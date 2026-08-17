@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- MERGE BASE ONLY (§13). Xcode generates the bulk of Info.plist
+	     (CFBundleIdentifier, CFBundleName, versions, platform metadata) and
+	     merges it ON TOP of this partial file — GENERATE_INFOPLIST_FILE stays
+	     YES in project.yml, INFOPLIST_FILE points here.
+
+	     Put a key here ONLY when the generator can't express it as an
+	     INFOPLIST_KEY_* build setting (non-allowlisted keys are silently
+	     dropped if you try). Everything else belongs in project.yml.
+
+	     scripts/release.sh verifies at the BUILT PRODUCT that both the
+	     generated keys and these keys survived the merge. -->
+
+	<!-- Sparkle appcast feed, published to gh-pages by scripts/appcast.sh. -->
+	<key>SUFeedURL</key>
+	<string>https://awizemann.github.io/birdwatch/appcast.xml</string>
+
+	<!-- EdDSA public key — the trust anchor for update signatures. The private
+	     half lives in the login Keychain (created once by Sparkle's
+	     `generate_keys`); generate_appcast signs release zips with it.
+	     release.sh REFUSES to ship while this is still the placeholder. -->
+	<key>SUPublicEDKey</key>
+	<string>sxHR0OGLmx9I4Fyx1GdPANR9WUiVAz/rI38x3cLYnMU=</string>
+
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+</dict>
+</plist>

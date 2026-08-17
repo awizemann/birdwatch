@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — Birdwatch</title>
+<meta name="description" content="Birdwatch's privacy policy: everything stays on your Mac, no analytics, no accounts, no network calls of its own.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topnav">
+  <div class="wrap">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"></span>
+      Birdwatch
+    </a>
+    <nav>
+      <a href="index.html#features">Features</a>
+      <a href="index.html#honesty">How it works</a>
+      <a href="index.html#download">Download</a>
+      <a href="privacy.html">Privacy</a>
+    </nav>
+  </div>
+</div>
+
+<div class="doc">
+  <h1>Privacy</h1>
+  <p class="updated">Last updated August 14, 2026</p>
+
+  <p>
+    Birdwatch is a local diagnostic tool. It reads the state of the iCloud sync daemons already
+    running on your Mac and shows it to you — that's the entire product. There is nothing to
+    collect, because there's nowhere for data to go.
+  </p>
+
+  <h2>Everything stays on your Mac</h2>
+  <p>
+    Birdwatch runs entirely on your machine. It doesn't have a server, and it doesn't send
+    anything anywhere — not to us, not to anyone else.
+  </p>
+
+  <h2>No analytics, no telemetry</h2>
+  <p>
+    Birdwatch doesn't track usage, crashes, or behavior. There's no analytics SDK in the app.
+  </p>
+
+  <h2>No accounts</h2>
+  <p>
+    You don't sign in to Birdwatch, and it doesn't create or need an account. It uses whatever
+    iCloud account is already signed in to your Mac, the same way Finder does.
+  </p>
+
+  <h2>No network calls of its own</h2>
+  <p>
+    Birdwatch doesn't make its own network requests. It reads local system state — daemon
+    status, log output, and sync metadata already present on disk and in memory — through
+    system APIs such as <code>brctl</code>, <code>NSMetadataQuery</code>, and <code>log
+    stream</code>. Any network activity you see reflected in the app (like estimated bandwidth)
+    belongs to macOS's own iCloud daemons, not to Birdwatch.
+  </p>
+
+  <h2>What it reads, specifically</h2>
+  <ul>
+    <li>Sync status and progress from the CloudDocs daemon (<code>bird</code>)</li>
+    <li>Sync status and item counts from the CloudKit daemon (<code>cloudd</code>)</li>
+    <li>Domain status from File Provider extensions (<code>fileproviderd</code>)</li>
+    <li>System log output for these daemons, streamed locally</li>
+    <li>CPU and memory usage of these daemons, sampled locally</li>
+  </ul>
+  <p>
+    None of this leaves your Mac. Full Disk Access is required to read it, which is why
+    Birdwatch asks for that permission on first launch.
+  </p>
+
+  <h2>Questions</h2>
+  <p>
+    If you have questions about this policy, reach out at
+    <a href="mailto:support@wizemann.com">support@wizemann.com</a>.
+  </p>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 Alan Wizemann</div>
+    <div>
+      <a href="mailto:support@wizemann.com">support@wizemann.com</a>
+      · <a href="privacy.html">Privacy</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

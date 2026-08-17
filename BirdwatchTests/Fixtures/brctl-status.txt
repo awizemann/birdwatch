@@ -1,0 +1,4 @@
+1 containers matching 'com.apple.CloudDocs'
+<c{1}m.a{3}e.C{7}s[1] [0;1;32mforeground[0m {client:idle server:full-sync|fetched-recents|fetched-favorites|ever-full-sync sync:has-synced-down last-sync:2026-08-14 16:39:27.209, requestID:179578, caught-up, token:unkown-token-size:36 (HwoFCJqQswUYACIWCN+PpcOgt66ZggEQuNu2iaKAuNuhASgA) zoneActiveState:{rid:179579} appuninstalled:(null)}>
+
+Desktop & Documents: current=YES lastEnabled=(never) lastDisabled=(never)

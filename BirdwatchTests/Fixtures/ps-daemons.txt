@@ -1,0 +1,9 @@
+  798   0.0   5040 /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd
+ 1031   0.0  24640 /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd
+ 1098   0.0  29872 /System/Library/PrivateFrameworks/iCloudDriveCore.framework/Versions/A/Support/bird
+ 1103   0.0  31040 /System/Library/PrivateFrameworks/FileProvider.framework/Support/fileproviderd
+ 1213   0.0   8960 /System/Library/PrivateFrameworks/iTunesCloud.framework/Support/itunescloudd
+55912   0.0  95744 /Library/Developer/CoreSimulator/Volumes/iOS_23C54/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.2.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd
+55941   0.0  58240 /Library/Developer/CoreSimulator/Volumes/iOS_23C54/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.2.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/iCloudDriveCore.framework/bird
+55960   0.0 101440 /Library/Developer/CoreSimulator/Volumes/iOS_23C54/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.2.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/iTunesCloud.framework/Support/itunescloudd
+55998   0.0  66240 /Library/Developer/CoreSimulator/Volumes/iOS_23C54/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.2.simruntime/Contents/Resources/RuntimeRoot/System/Library/Frameworks/FileProvider.framework/Support/fileproviderd

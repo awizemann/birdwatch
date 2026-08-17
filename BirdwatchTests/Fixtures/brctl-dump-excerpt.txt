@@ -1,0 +1,133 @@
+brctl: dumping
+    containers:   <all>
+    from:         running bird
+dump taken at 2026-08-14 20:52:23.685-0400 [account=00000000] [inCarry=No] [home=/Users/tester]
+
+database version: 34104
+database ID: 690EDD7A-B9ED-498B-AF45-B49FF4DA68F5
+fsType: FPFS
+Session migrated to uploadV2: NO
+
+boot_history (startup 28832.1s ago)
+-----------------------------------------------------
+server_truth
+  [2026-08-14 12:51:53.000] OS:26A5406e CloudDocs:5168.0.55 BirdSchema:34104 DBSchema:34104 DeviceID:78452
+client_truth
+  [2026-08-14 12:51:53.000] OS:26A5406e CloudDocs:5168.0.55 BirdSchema:34104 DBSchema:34104 DeviceID:78452
+backup_detector
+  [78464|78525|1] OS:26A5406e CloudDocs:5168.0.55 DBSchema:34104
+
+error_info: account_session_open_error_info (modified: 2026-07-03 21:57:09.879)
+  {
+    Error = "<NSError:0x7702740720(BRCloudDocsErrorDomain:116) - {\n    NSDescription = \"Can't get persona for accountID 00000000-0000-0000-0000-000000000000\";\n}>";
+}
+
+server_state
+-----------------------------------------------------
+last-sync:2026-08-14 20:51:50.349 nextRank:4460431 minUsedTime:1786370379 shared-db{last-sync:2026-08-14 10:05:46.041, caught-up, token:unkown-token-size:9 (AQAAAaAAl4hd), ever-caught-up:YES}
+
+client_state
+-----------------------------------------------------
+{
+    availableQuota = 223208176210;
+    clientRanks = "nextNotifRank:62030283 nextPackageItemRank:84789 nextItemRowID:2255583";
+    containerMetadataSync = "<0x7702719d40>: serverChangeToken:<CKServerChangeToken: 0x7703338bf0; data=HwoDCK4NGAAiFgimn5XE2LjJ99QBEJ7spvKu/8D+twEoAA==> requestID:34 lastSyncDate:2026-08-14 12:55:04";
+    currentUserRecordID = "<CKRecordID: 0x77035f5900; recordName=_0000000000000000000000000000000, zoneID=_defaultZone:__defaultOwner__>";
+    hasCompletedPCSMigration = 1;
+    lastQuotaFetchDate = "2026-06-02 02:48:22 +0000";
+    nonPurgeableSpace = 249667584;
+    periodicSyncDate = "2026-08-14 14:05:14 +0000";
+    purgeableSpace = 0;
+    sideCarSync = "side-car-state{last-sync:(null), needs-sync:NO, requestID:0, changeToken:(null)}";
+    stage = "gc:1786753295";
+    syncUpBudget = "<BRCSyncBudgetThrottle {  m:0.0  h:19.6  d:98.3  }>";
+    zoneHealthSync = "zone-health-state{last-sync:(null), needs-syncdown:NO, requestID:0, changeToken:(null)}";
+}
+
+devices:
+    o "u{5}n" (1)
+    o "M{8}o" (2)
+    o "A{15}o" (5)
+    o "i{15}K" (8)
+    o "A{15}o" (30)
+
+users:
+
+system
+-----------------------------------------------------
+    + network: online
+    + disk:    healthy (APFS)
+    + power:   healthy
+    + optimize storage: disabled
+    + device name:   A{15}o
+    + cellular: enabled
+
+scheduler
+-----------------------------------------------------
+    + items:                 client:133 thousand (133111), server: 133 thousand (133000)
+                             warning: output may be truncated
+    + push environment:      production
+    + push token:            {length = 32, bytes = 0x00000000 00000000 00000000 00000000 ... 00000000 00000000 }
+    + global sync up budget: budget available {  0:01:10s ago  m:0.0% (0.5)  h:0.0% (20.0)  d:0.0% (98.7)  }
+    + periodic sync:         idle
+    + available quota:       223 GB (223208176210)
+    + container-metadata:    has-synced-down
+    + sharedb:               idle
+    + zone-health:           idle
+    + sync status:           itemsNeedUpload|nonIdleItems
+    + side-car:              idle
+    + pcs-migration:         complete
+
+1 containers matching '*'
+-----------------------------------------------------
+- <c{1}m.a{3}e.C{7}s[1] foreground {client:idle server:full-sync|fetched-recents|fetched-favorites|ever-full-sync sync:has-synced-down last-sync:2026-08-14 20:51:50.349, requestID:179604, caught-up, token:unkown-token-size:36 (HwoFCOeQswUYACIWCN+PpcOgt66ZggEQuNu2iaKAuNuhASgA) zoneActiveState:{rid:179605} appuninstalled:(null)}>
+-----------------------------------------------------
+    ----------------------c{1}m.a{3}e.C{7}s[1]----------------------
+    r:0 i:<root[1]> al:1 foid:<a1> up:idle uv:0 mt:0 pzone:(null) st{(null)}
+    r:2255582 i:<E0A2E171> al:1 foid:<f226ade> ld{synced-all} up:needs-upload uv:1 st{p:<root[1]> n:"REDACTED-1.bin" doc bt:1786755129 m:rw- creator:0 sc:docs} up-id{fid:433236469, gen:1} ct{mt:1786755129 sz:62.9 MB (62914560) n:"REDACTED-1.bin" sig:<file-pending> tsig:<pending> device:0}
+    > upload{needs:(count:1, size:62.9 MB (62914560)) done:(count:0, size:0 bytes)}
+    > upload{[ active attempts:0 last:7.56s ago next:ready cleanup:59.87m]}
+    ----------------------i{4}d.c{1}m.m{7}t.O{4}e.E{3}l[171]----------------------
+    r:1338265 i:<documents[171]> al:171 foid:<lab> ld{share-synced-all|st-mode|st-hidden-ext|st-xattr|st-trash-put-back|st-symlink-target} up:needs-sync-up uv:0 mt:0 st{p:<root[171]> n:"REDACTED-2" dir bt:1741385320 m:rw- creator:0 sc:docs lch:1}
+    > sync-up{[zone:1 sync-up-scheduled attempts:0 last:1805.75h ago next:ready cleanup:ready]}
+    ----------------------i{4}d.c{1}m.f{7}s.c{5}p[148]----------------------
+    r:1338267 i:<documents[148]> al:148 foid:<l94> ld{share-synced-all|st-mode} up:needs-sync-up uv:0 mt:0 st{p:<root[148]> n:"REDACTED-3" dir bt:1741385312 m:rw- creator:0 sc:docs lch:1}
+    > sync-up{[zone:1 sync-up-scheduled attempts:3 last:12.5m ago next:4.25m cleanup:ready]}
+    r:2142637 i:<4E4C252E> al:1 foid:<f146ee6> up:idle uv:1 st{p:<07E275CA> n:"REDACTED-4.pdf" doc etag:39oq0 bt:1761698842 lu:1761698849 m:rw- creator:0 sc:docs} ct{etag:39opz mt:1761698842 sz:10.8 MB (10835523) tsz:123 KB (123751) n:"REDACTED-4.pdf" sig:016b5c424cfd214215898a4a515625d1a64812c6 device:11}
+    > upload{[1 old]}
+    r:2142640 i:<DEB5EA98> al:1 foid:<f146ee7> up:idle uv:1 st{p:<07E275CA> n:"REDACTED-5.zip" doc etag:46995 bt:1773707197 m:rw- creator:0 sc:docs} ct{etag:46994 mt:1773707197 sz:216 KB (216791) n:"REDACTED-5.zip" sig:01ff3217f32adc6397991c9e6fcd46330b75bf5bc1 device:11 quarantine:Download}
+    r:2140040 i:<15478C83> al:1 foid:<f146ee8> up:idle uv:1 st{p:<A7986CFA> n:"REDACTED-6.txt" doc etag:4mepe bt:1780242579 m:rw- creator:0 sc:docs} ct{etag:4mepd mt:1780242579 sz:223 KB (223841) n:"REDACTED-6.txt" sig:018cff2693656760b86786da3ef222c0b45f882c4a device:30}
+    > apply{[ inactive attempts:1 last:3.83m ago cleanup:56.15m]}
+
+     - not done dumping items -
+-----------------------------------------------------
+client_pkg_upload_items
+================
+
+
+0 misc operations:
+
+Named Throttle History
+-----------------------------------------------------
+
+analytics metrics
+-----------------------------------------------------
+FSEventToSyncUp: (
+)
+SyncHealthReport:
+uploadError: none
+syncUpError: <NSError:0x0(BRCloudDocsErrorDomain:11) - throttled>
+downloadError: none
+syncUpSharedZoneError: none
+syncUpPrivateZoneError: none
+syncDownSharedZoneError: none
+syncDownPrivateZoneError: none
+
+Aggregated Telemetry:
+none
+
+global progress {f:0.5742 uc:37932224/66060288}
+-----------------------------------------------------
+    upload {none}
+    upload version sizes (0):
+    {}
