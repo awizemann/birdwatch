@@ -1,0 +1,64 @@
+name: Birdwatch
+options:
+  bundleIdPrefix: com.wizemann
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  configs:
+    Release:
+      # Notarization rejects get-task-allow; Xcode injects it unless told not to.
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: "NO"
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY: "YES"
+    CODE_SIGN_STYLE: Automatic
+    # Set your own team for signed builds: `DEVELOPMENT_TEAM=XXXXXXXXXX xcodegen generate`
+    # (unsigned local builds work without it). Release signing lives in scripts/release.sh.
+    DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+    ENABLE_HARDENED_RUNTIME: "YES"
+    ENABLE_APP_SANDBOX: "NO"
+packages:
+  # Sparkle auto-update framework (app target only). The app is NOT sandboxed
+  # (ENABLE_APP_SANDBOX: NO), so Sparkle's standard installer path applies and
+  # SUEnableInstallerLauncherService is not needed.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.0.0"
+targets:
+  Birdwatch:
+    type: application
+    platform: macOS
+    sources:
+      - Birdwatch
+    dependencies:
+      - package: Sparkle
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wizemann.birdwatch
+        GENERATE_INFOPLIST_FILE: "YES"
+        # §13 merge base: Xcode generates Info.plist and merges it on top of
+        # this partial file. Only keys the generator can't express live there
+        # (SUFeedURL, SUPublicEDKey, LSMinimumSystemVersion). Keeping
+        # GENERATE_INFOPLIST_FILE YES is required — a full hand-written plist
+        # would lose the generated CFBundle* keys.
+        INFOPLIST_FILE: Birdwatch/Resources/Info.plist
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Alan Wizemann"
+        INFOPLIST_KEY_LSUIElement: "NO"
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        ENABLE_TESTABILITY: "YES"
+  BirdwatchTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - BirdwatchTests
+    dependencies:
+      - target: Birdwatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wizemann.birdwatch.tests
+        GENERATE_INFOPLIST_FILE: "YES"

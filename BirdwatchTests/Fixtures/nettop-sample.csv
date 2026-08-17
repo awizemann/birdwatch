@@ -1,0 +1,2 @@
+time,,interface,state,bytes_in,bytes_out,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch,
+17:35:54.515392,cloudd.1031,,,14958,14341,0,0,0,,,,,,,,,,,,

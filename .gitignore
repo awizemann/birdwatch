@@ -1,0 +1,42 @@
+# Memophant app-local state (machine-specific, not for git)
+.memophant/
+
+sessions/.raw/
+sessions/.index.json
+
+.claude/memophant-activity.log
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Local AI-tooling state (Memophant, agent configs) — not part of the public project
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.mcp.json
+.memory/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.github/copilot-instructions.md
+wiki/
+design/
+documents/
+tasks/
+TASKS.md
+code/
+sessions/
+templates/
+vendors/
+.release-dd/
+dist/
+
+# Release pipeline
+build/
+.gh-pages-worktree/
+# Release notes stay tracked; the signed/notarized artifacts do not.
+releases/**/*.zip
