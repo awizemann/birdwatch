@@ -237,7 +237,11 @@ path.write_text(new)
 PY
 
 log "Regenerating $PROJECT"
-xcodegen generate >/dev/null
+# Regenerate WITHOUT the team id in the environment: xcodegen would otherwise
+# bake the literal team into the committed .xcodeproj (project.yml carries
+# `${DEVELOPMENT_TEAM}` on purpose — this is an open-source repo). The team is
+# passed to xcodebuild explicitly at archive time instead.
+env -u DEVELOPMENT_TEAM xcodegen generate >/dev/null
 
 # Stage the version bump (committed alongside the release notes below).
 git add project.yml
