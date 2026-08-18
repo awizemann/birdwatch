@@ -82,7 +82,7 @@ private struct IssueCard: View {
                                 // TODO(Phase 1): perform the real operation (open storage
                                 // management / upgrade flow), not just navigation.
                                 logger.info("Issue action: \(issue.primaryActionLabel, privacy: .public) for \(issue.id, privacy: .public)")
-                                store.navigate(to: .storage)
+                                store.navigate(to: .storage, via: .link)
                             } else {
                                 // TODO(Phase 1): perform the real operation (e.g. actually
                                 // resume the upload) — logging + dismissal is a placeholder.

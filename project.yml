@@ -22,6 +22,13 @@ settings:
     MARKETING_VERSION: 0.1.1
     ENABLE_HARDENED_RUNTIME: "YES"
     ENABLE_APP_SANDBOX: "NO"
+    # The swift-stats write key is deliberately NOT a setting here. Info.plist
+    # references $(BW_STATS_WRITE_KEY), which xcodebuild expands from a
+    # command-line setting (scripts/release.sh) or an -xcconfig, and to "" when
+    # absent → analytics gated off (UsageAnalytics.makeTracker). Keeping it out
+    # of project.yml means `xcodegen generate` can never bake it into the
+    # committed .xcodeproj. Local test against the real backend:
+    #   xcodebuild … BW_STATS_WRITE_KEY=<key> build
 packages:
   # Sparkle auto-update framework (app target only). The app is NOT sandboxed
   # (ENABLE_APP_SANDBOX: NO), so Sparkle's standard installer path applies and
@@ -29,6 +36,11 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.0.0"
+  # swift-stats: privacy-first usage analytics (Stats core + the Cloudflare
+  # sink that speaks to api.swiftstats.co). Zero transitive dependencies.
+  swift-stats:
+    url: https://github.com/awizemann/swift-stats
+    from: "0.1.0"
 targets:
   Birdwatch:
     type: application
@@ -37,6 +49,10 @@ targets:
       - Birdwatch
     dependencies:
       - package: Sparkle
+      - package: swift-stats
+        product: Stats
+      - package: swift-stats
+        product: StatsCloudflare
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.wizemann.birdwatch
@@ -59,6 +75,9 @@ targets:
       - BirdwatchTests
     dependencies:
       - target: Birdwatch
+      # Recording sink + deterministic seams for the analytics tests.
+      - package: swift-stats
+        product: StatsTesting
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.wizemann.birdwatch.tests

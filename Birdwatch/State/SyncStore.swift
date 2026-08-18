@@ -73,8 +73,27 @@ final class SyncStore {
     private(set) var hasLoaded = false
 
     // Navigation & UI state
-    var selectedView: MonitorView = .overview
-    var detailAppID: String?          // non-nil → app detail is shown
+    /// Every route into a view lands here (sidebar binding, ⌘-digit, search,
+    /// popover, in-view links), so the `view_shown` event is recorded once, in
+    /// the setter, and callers that know *how* the user got there set
+    /// `pendingNavigationSource` first (see `navigate(to:via:)`).
+    var selectedView: MonitorView = .overview {
+        didSet {
+            // Consume the origin even when nothing changed, or a ⌘1 on the
+            // view already showing would label the NEXT sidebar click.
+            let via = pendingNavigationSource ?? .sidebar
+            pendingNavigationSource = nil
+            guard selectedView != oldValue else { return }
+            record(.viewShown(selectedView, via: via))
+        }
+    }
+    private var pendingNavigationSource: UsageEvent.NavigationSource?
+    var detailAppID: String? {         // non-nil → app detail is shown
+        didSet {
+            guard let id = detailAppID, id != oldValue, let app = app(withID: id) else { return }
+            record(.appDetailShown(app.backend))
+        }
+    }
     var conflictIssueID: String?      // non-nil → conflict resolution is shown
     var searchText = ""
     var notificationsPanelOpen = false
@@ -96,18 +115,62 @@ final class SyncStore {
     private var lastRefresh: Date?
     private var inFlightRefresh: Task<Void, Never>?
 
+    /// Usage analytics sink (swift-stats behind `UsageTracking`). Injected:
+    /// tests record, `--mock` and keyless builds get a no-op.
+    let usage: any UsageTracking
+    /// Mirror of the SDK's persisted master switch, for the Diagnostics
+    /// toggle. Loaded once in `loadUsagePreference()`; written through
+    /// `setUsageSharing(_:)`.
+    private(set) var usageSharingEnabled = true
+
     init(
         source: any SyncSource,
         now: @escaping () -> Date = { Date() },
         notifier: @escaping (String, String, String) -> Void = { title, body, id in
             SystemNotifier.post(title: title, body: body, id: id)
         },
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        usage: any UsageTracking = NoopUsageTracker()
     ) {
         self.source = source
         self.now = now
         self.notifier = notifier
         self.defaults = defaults
+        self.usage = usage
+    }
+
+    // MARK: - Usage analytics
+
+    /// Fire-and-forget: the SDK's `track` returns once the event is on disk,
+    /// which is not something a button handler should wait for. Each record
+    /// waits for the previous one so events reach the SDK — and get their
+    /// `seq` — in the order they happened; unstructured Tasks alone don't
+    /// promise that.
+    func record(_ event: UsageEvent) {
+        let previous = recordTail
+        recordTail = Task { [usage] in
+            await previous?.value
+            await usage.track(event)
+        }
+    }
+    private var recordTail: Task<Void, Never>?
+
+    /// Navigation with a known origin, so `view_shown` carries `via`.
+    func navigate(to view: MonitorView, via: UsageEvent.NavigationSource) {
+        pendingNavigationSource = via
+        navigate(to: view)
+    }
+
+    func loadUsagePreference() async {
+        usageSharingEnabled = await usage.isEnabled
+    }
+
+    func setUsageSharing(_ enabled: Bool) {
+        guard enabled != usageSharingEnabled else { return }
+        usageSharingEnabled = enabled
+        // Deliberately not tracked: opting out clears the queue, so an
+        // "opted out" event could never leave the machine anyway.
+        Task { [usage] in await usage.setEnabled(enabled) }
     }
 
     // MARK: - Derived facts (single source of truth — never recomputed in views)
@@ -212,6 +275,13 @@ final class SyncStore {
 
     func open(_ target: SearchResult.Target) {
         conflictIssueID = nil
+        let resultKind: UsageEvent.SearchResultKind
+        switch target {
+        case .app: resultKind = .app
+        case .view: resultKind = .view
+        }
+        record(.searchUsed(resultKind: resultKind, resultCount: searchResults.count))
+        pendingNavigationSource = .search
         switch target {
         case .app(let id):
             selectedView = .applications
@@ -220,6 +290,7 @@ final class SyncStore {
             detailAppID = nil
             selectedView = view
         }
+        pendingNavigationSource = nil
         searchText = ""
     }
 
@@ -261,6 +332,7 @@ final class SyncStore {
             let snapshot = await source.currentSnapshot()
             self.apply(snapshot)
             self.lastRefresh = self.now()
+            if !self.hasLoaded { self.recordSnapshotHealth() }
             self.hasLoaded = true
         }
         inFlightRefresh = task
@@ -269,6 +341,23 @@ final class SyncStore {
         // replaced it already, and clearing that one re-opens the stale-clobber
         // race this coalescing exists to prevent.
         if inFlightRefresh == task { inFlightRefresh = nil }
+    }
+
+    /// Once per launch, after the first snapshot lands: how much of the world
+    /// Birdwatch can actually see on this Mac. Counts only, bucketed.
+    private func recordSnapshotHealth() {
+        // `didSet` does not run for the initial value, so the launch view
+        // would otherwise never count as shown.
+        record(.viewShown(selectedView, via: .launch))
+        var byBackend: [SyncBackend: Int] = [:]
+        for app in apps { byBackend[app.backend, default: 0] += 1 }
+        record(.snapshotHealth(
+            appsByBackend: byBackend,
+            issueCount: issues.count,
+            daemonsMissing: daemons.filter { $0.pid == nil }.count,
+            fdaGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Full Disk") }?.granted ?? false,
+            notificationsGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Notification") }?.granted ?? false
+        ))
     }
 
     private func apply(_ s: SyncSnapshot) {
@@ -345,6 +434,7 @@ final class SyncStore {
         }
         planCapConfirmed = true
         storage = Self.applyPlanCap(planCapOverride, to: rawStorage)
+        record(.planCapSet(cleared: planCapOverride == nil))
     }
 
     /// Pure overlay: a user-chosen cap replaces the derived one, keeping the
@@ -408,14 +498,18 @@ final class SyncStore {
 
     func togglePauseAll() {
         isGloballyPaused.toggle()
+        record(isGloballyPaused ? .monitoringPaused : .monitoringResumed)
     }
 
     /// Mute/unmute an app (popover quick action). Does not touch sync.
     func toggleMute(appID: String) {
-        if pausedAppIDs.contains(appID) { pausedAppIDs.remove(appID) } else { pausedAppIDs.insert(appID) }
+        let muted: Bool
+        if pausedAppIDs.contains(appID) { pausedAppIDs.remove(appID); muted = false } else { pausedAppIDs.insert(appID); muted = true }
+        if let backend = app(withID: appID)?.backend { record(.appMuted(backend, muted: muted)) }
     }
 
     func dismissIssue(id: String) {
+        if let issue = issues.first(where: { $0.id == id }) { record(.issueDismissed(severity: issue.severity)) }
         issues.removeAll { $0.id == id }
     }
 
@@ -424,6 +518,7 @@ final class SyncStore {
     /// screen — any choice resolves and returns.
     func resolveConflict(issueID: String, keepVersionID: String = ConflictSource.currentVersionID) async {
         await source.resolveConflict(issueID: issueID, keepVersionID: keepVersionID)
+        record(.conflictResolved(keptCurrent: keepVersionID == ConflictSource.currentVersionID))
         issues.removeAll { $0.id == issueID }
         conflictIssueID = nil
     }
@@ -474,14 +569,17 @@ final class SyncStore {
         trash: (String) throws -> String = { try FileTrasher.trash(path: $0) }
     ) async -> TrashOutcome {
         guard let absolute = item.absolutePath else {
+            record(.retryItemTrashed(outcome: .failed))
             return .failed(name: item.name, reason: "Birdwatch has no resolved location for this item")
         }
         let destination: String
         do {
             destination = try trash(absolute)
         } catch {
+            record(.retryItemTrashed(outcome: .failed))
             return .failed(name: item.name, reason: FileTrasher.plainReason(for: error))
         }
+        record(.retryItemTrashed(outcome: .ok))
         // Synchronous, MainActor-only, no I/O: the row goes and the caller can
         // report the outcome in the same turn the user clicked.
         removeRetryQueueItem(id: item.id)
@@ -504,6 +602,7 @@ final class SyncStore {
     }
 
     func markAllNotificationsRead() {
+        if notifications.contains(where: { !$0.isRead }) { record(.notificationsMarkedRead) }
         notifications = notifications.map { n in
             var n = n
             n.isRead = true

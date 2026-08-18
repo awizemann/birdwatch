@@ -5,6 +5,7 @@ import UserNotifications
 /// preferences; Phase 1 replaces the manual switch with real Full Disk Access
 /// detection + a deep link to Privacy & Security.
 struct OnboardingView: View {
+    @Environment(SyncStore.self) private var store
     @Binding var isComplete: Bool
     @State private var step = 0
     @State private var fdaGranted = false
@@ -78,7 +79,7 @@ struct OnboardingView: View {
                 .kerning(-0.3)
                 .accessibilityAddTraits(.isHeader)
 
-            Text("Birdwatch runs outside the App Sandbox and needs Full Disk Access to read iCloud's sync state. Nothing leaves your Mac.")
+            Text("Birdwatch runs outside the App Sandbox and needs Full Disk Access to read iCloud's sync state. Your files and sync data never leave your Mac; anonymous usage counts do, and Diagnostics has the switch to turn that off.")
                 .scaledFont(size: 13.5)
                 .foregroundStyle(Surface.fg2)
                 .multilineTextAlignment(.center)
@@ -136,6 +137,7 @@ struct OnboardingView: View {
                             try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert])
                         }
                     }
+                    store.record(.onboardingCompleted(fdaGranted: fdaGranted, notificationsRequested: optNotifications))
                     isComplete = true
                 }
                     .buttonStyle(.borderedProminent)

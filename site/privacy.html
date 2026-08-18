@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy — Birdwatch</title>
-<meta name="description" content="Birdwatch's privacy policy: everything stays on your Mac, no analytics, no accounts, no network calls of its own.">
+<meta name="description" content="Birdwatch's privacy policy: your sync data stays on your Mac, no accounts, and anonymous usage counts you can switch off.">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -26,23 +26,48 @@
 
 <div class="doc">
   <h1>Privacy</h1>
-  <p class="updated">Last updated August 14, 2026</p>
+  <p class="updated">Last updated August 18, 2026</p>
 
   <p>
     Birdwatch is a local diagnostic tool. It reads the state of the iCloud sync daemons already
-    running on your Mac and shows it to you — that's the entire product. There is nothing to
-    collect, because there's nowhere for data to go.
+    running on your Mac and shows it to you — that's the entire product. Your files, file names,
+    paths, sync data and account details never leave your Mac.
   </p>
 
-  <h2>Everything stays on your Mac</h2>
+  <h2>Your data stays on your Mac</h2>
   <p>
-    Birdwatch runs entirely on your machine. It doesn't have a server, and it doesn't send
-    anything anywhere — not to us, not to anyone else.
+    Everything Birdwatch shows you — sync status, transfers, conflicts, logs, daemon stats — is
+    read locally and stays local. Birdwatch has no server that receives it, and it is never
+    sent to us or to anyone else.
   </p>
 
-  <h2>No analytics, no telemetry</h2>
+  <h2>Anonymous usage counts (you can turn this off)</h2>
   <p>
-    Birdwatch doesn't track usage, crashes, or behavior. There's no analytics SDK in the app.
+    So we know which parts of Birdwatch are actually used, the app sends a small number of
+    usage events to our own analytics endpoint (<code>api.swiftstats.co</code>, run by us with
+    the open-source <a href="https://github.com/awizemann/swift-stats">swift-stats</a>). What
+    is sent: which screen was opened, which action was taken (for example “monitoring paused”
+    or “daemon restarted”, and whether it succeeded), coarse counts such as “2–5 issues”, the
+    Birdwatch version, the macOS version, device model and locale, and a random install
+    identifier that is hashed before it leaves your Mac and cannot be tied to you, your Apple
+    ID or your hardware.
+  </p>
+  <p>
+    What is never sent: file or folder names, paths, app names, device names, storage sizes,
+    log lines, search text, your iCloud account, or anything typed. There is no advertising
+    identifier, no fingerprinting and no cross-app tracking. Raw events are kept for 90 days;
+    only daily totals are kept longer.
+  </p>
+  <p>
+    Turn it off any time in <strong>Diagnostics → Share anonymous usage</strong>. The switch
+    persists, and while it is off nothing is collected or sent.
+  </p>
+
+  <h2>Software updates</h2>
+  <p>
+    Birdwatch checks for updates with <a href="https://sparkle-project.org">Sparkle</a>. That
+    check fetches a small feed file from our site; it carries no personal information, and you
+    can disable automatic checks the first time Sparkle asks.
   </p>
 
   <h2>No accounts</h2>
@@ -51,13 +76,14 @@
     iCloud account is already signed in to your Mac, the same way Finder does.
   </p>
 
-  <h2>No network calls of its own</h2>
+  <h2>Network activity</h2>
   <p>
-    Birdwatch doesn't make its own network requests. It reads local system state — daemon
-    status, log output, and sync metadata already present on disk and in memory — through
-    system APIs such as <code>brctl</code>, <code>NSMetadataQuery</code>, and <code>log
-    stream</code>. Any network activity you see reflected in the app (like estimated bandwidth)
-    belongs to macOS's own iCloud daemons, not to Birdwatch.
+    Apart from the two things above — usage counts and update checks — Birdwatch makes no
+    network requests. It reads local system state — daemon status, log output, and sync
+    metadata already present on disk and in memory — through system APIs such as
+    <code>brctl</code>, <code>NSMetadataQuery</code>, and <code>log stream</code>. Any network
+    activity you see reflected in the app (like estimated bandwidth) belongs to macOS's own
+    iCloud daemons, not to Birdwatch.
   </p>
 
   <h2>What it reads, specifically</h2>
