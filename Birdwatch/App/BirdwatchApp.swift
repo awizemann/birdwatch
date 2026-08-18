@@ -68,17 +68,31 @@ struct BirdwatchApp: App {
             MenuBarPopoverView()
                 .environment(store)
         } label: {
-            // State-carrying symbol: issues outrank pause outrank normal.
-            Image(systemName: menuBarSymbol)
-                .accessibilityLabel("Birdwatch")
+            // The app's bird mark as a template image (macOS tints it for the
+            // menu bar), with a small state badge: issues outrank pause.
+            Image("MenuBarIcon")
+                .overlay(alignment: .bottomTrailing) {
+                    if let badge = menuBarBadge {
+                        Image(systemName: badge)
+                            .font(.system(size: 7, weight: .black))
+                            .offset(x: 3, y: 2)
+                    }
+                }
+                .accessibilityLabel(menuBarAccessibilityLabel)
         }
         .menuBarExtraStyle(.window)
     }
 
-    private var menuBarSymbol: String {
-        if store.issueCount > 0 { return "exclamationmark.icloud" }
-        if store.isGloballyPaused { return "pause.circle" }
-        return "cloud.fill"
+    private var menuBarBadge: String? {
+        if store.issueCount > 0 { return "exclamationmark.circle.fill" }
+        if store.isGloballyPaused { return "pause.circle.fill" }
+        return nil
+    }
+
+    private var menuBarAccessibilityLabel: String {
+        if store.issueCount > 0 { return "Birdwatch, \(store.issueCount) issues" }
+        if store.isGloballyPaused { return "Birdwatch, monitoring paused" }
+        return "Birdwatch"
     }
 
     /// macOS is keyboard-first: ⌘1–⌘9 jump between monitor views, ⌘R refreshes,

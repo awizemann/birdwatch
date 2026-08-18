@@ -288,10 +288,13 @@ APP_PATH="$EXPORT_DIR/${SCHEME}.app"
 # silently — shipping an app that can't self-update. Verify at the BUILT PRODUCT.
 PLIST="$APP_PATH/Contents/Info.plist"
 for key in CFBundleIdentifier CFBundleName CFBundleVersion CFBundleShortVersionString \
-           SUFeedURL SUPublicEDKey LSMinimumSystemVersion; do
+           CFBundleIconFile SUFeedURL SUPublicEDKey LSMinimumSystemVersion; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null 2>&1 \
     || die "built Info.plist missing '$key' — the merge-base plist merge may have broken (see project.yml INFOPLIST_FILE + GENERATE_INFOPLIST_FILE)."
 done
+# An iconless app is a real regression (Dock, Sparkle's update dialog, Finder) —
+# fail loudly rather than ship it.
+[[ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]] || die "AppIcon.icns missing from the built app."
 BUILT_SHORT="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")"
 [[ "$BUILT_SHORT" == "$VERSION" ]] \
   || die "built CFBundleShortVersionString is '$BUILT_SHORT', expected '$VERSION' — the project.yml bump didn't reach the build."

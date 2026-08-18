@@ -79,6 +79,7 @@
 		EAA0F8D9751E106C4CF3D4F0 /* MetadataMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01DB24F5D299B20D09B5699C /* MetadataMappingTests.swift */; };
 		EE34E3BC3E3178EB1E78931A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A27700EDC2C746949A3254A3 /* Sparkle */; };
 		F03A3199B6F0AD481ACEAB6A /* MenuBarPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50136D9F17EF5D0AD9385E2E /* MenuBarPopoverView.swift */; };
+		F115A0173A51B87C9D767165 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 71EB35B61E46273C3077906B /* Assets.xcassets */; };
 		F130B65DEFBFEF6BA918F796 /* BrctlDumpSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = F57EB3452F6D941BE54AEBFD /* BrctlDumpSource.swift */; };
 		F36D39B6550093E1BC5DDA74 /* ubiquity-probe-timeline.ndjson in Resources */ = {isa = PBXBuildFile; fileRef = FA8A625B92AA960DEEA568A6 /* ubiquity-probe-timeline.ndjson */; };
 		F883994D4C271657A1796677 /* ConflictResolutionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CE3F3A21705742BB966263D /* ConflictResolutionView.swift */; };
@@ -130,6 +131,7 @@
 		6451E5FC16A71AC4A86F543A /* SyncSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncSource.swift; sourceTree = "<group>"; };
 		669EAD2701ED8FE9F96C9FC1 /* DriveFolderSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DriveFolderSource.swift; sourceTree = "<group>"; };
 		6B460FF1902EA643D874A17D /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		71EB35B61E46273C3077906B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		769D12F5F6AF93E8AB0CE36F /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		797B33DD569F7AC7395FB8D4 /* LogStreamParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStreamParser.swift; sourceTree = "<group>"; };
 		7CD707A499C5FD2F340A3E8F /* ps-daemons.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "ps-daemons.txt"; sourceTree = "<group>"; };
@@ -259,6 +261,7 @@
 		50ACCE6C8AEDABFA9EF841F2 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				71EB35B61E46273C3077906B /* Assets.xcassets */,
 				B1BCE3AAC03F95C5884B9C91 /* Info.plist */,
 			);
 			path = Resources;
@@ -400,6 +403,7 @@
 			buildConfigurationList = 59A0B71111F6A2405D2042D9 /* Build configuration list for PBXNativeTarget "Birdwatch" */;
 			buildPhases = (
 				C196F35049BB0A1CD162BABB /* Sources */,
+				818C5BA34E187FF8774CAAC4 /* Resources */,
 				AF3EAB28ECE46B8683B43858 /* Frameworks */,
 			);
 			buildRules = (
@@ -457,6 +461,14 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		818C5BA34E187FF8774CAAC4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F115A0173A51B87C9D767165 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		921C46108DEE46D6DD077A20 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -639,7 +651,7 @@
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
 				ENABLE_APP_SANDBOX = NO;
@@ -704,7 +716,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
 				ENABLE_APP_SANDBOX = NO;

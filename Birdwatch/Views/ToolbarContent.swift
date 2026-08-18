@@ -10,8 +10,17 @@ struct MainToolbar: ToolbarContent {
     var body: some ToolbarContent {
         // Search leads (it belongs with the content), the two controls that act
         // on the whole app sit together on the trailing edge.
-        ToolbarItem(placement: .principal) {
+        // Leading placement: the field sits at the left of the content toolbar,
+        // right after the sidebar toggle, rather than centered in the title bar.
+        ToolbarItem(placement: .navigation) {
             SearchFieldView()
+        }
+
+        // With a hidden title bar the content-column toolbar packs items
+        // left-to-right; this flexible spacer is what actually pins the two
+        // app-level controls to the trailing edge.
+        ToolbarItem(placement: .principal) {
+            Spacer()
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
@@ -69,9 +78,27 @@ struct SearchFieldView: View {
     }
 
     var body: some View {
-        TextField("Search", text: $draft)
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 180)
+        // Idiomatic macOS search look: magnifier + plain field in a rounded
+        // capsule. The prefix icon supplies the leading inset, so the
+        // placeholder is never flush against the field edge.
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(Surface.fg3)
+                .accessibilityHidden(true)
+
+            TextField("Search", text: $draft)
+                .textFieldStyle(.plain)
+                .accessibilityLabel("Search apps, files, folders and activity")
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 8)
+        .padding(.vertical, 4)
+        // No filled background: the toolbar item supplies its own chrome, and a
+        // second fill rendered as a grey box inside a box. A hairline border
+        // alone reads as a field without fighting the system look.
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Surface.cardLine, lineWidth: 0.5))
+        .frame(width: 220)
             .task(id: draft) {
                 suppressPopover = false
                 try? await Task.sleep(for: .milliseconds(250))
@@ -109,7 +136,6 @@ struct SearchFieldView: View {
                 store.searchText = ""
                 draft = ""
             }
-            .accessibilityLabel("Search apps, files, folders and activity")
             .popover(isPresented: resultsPresented, arrowEdge: .bottom) {
                 SearchResultsList(selectedIndex: selectedIndex, onOpen: {
                     store.searchText = ""
