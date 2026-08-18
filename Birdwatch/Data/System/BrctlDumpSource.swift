@@ -290,11 +290,11 @@ nonisolated enum BrctlDumpMapper {
         let devices = dump.deviceActivity
             .filter { $0.index != 0 }
             .map { DeviceActivityItem(index: $0.index, itemCount: $0.itemCount, lastModified: $0.lastModified) }
-            .sorted { ($0.itemCount, $1.index) > ($1.itemCount, $0.index) }
-        guard !devices.isEmpty else { return nil }
+        let sorted = DeviceActivitySummary.sortedByActivity(devices)
+        guard !sorted.isEmpty else { return nil }
         return DeviceActivitySummary(
-            devices: devices,
-            registeredDeviceCount: max(dump.devices.count, devices.count),
+            devices: sorted,
+            registeredDeviceCount: max(dump.devices.count, sorted.count),
             countsArePartial: true
         )
     }

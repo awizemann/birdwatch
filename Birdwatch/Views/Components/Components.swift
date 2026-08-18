@@ -266,9 +266,9 @@ struct ContentColumn<Content: View>: View {
             VStack(alignment: .leading, spacing: 18) {
                 content
             }
-            .frame(maxWidth: 920, alignment: .leading)
+            .frame(maxWidth: 1180, alignment: .leading)
             .padding(.vertical, 24)
-            .padding(.horizontal, 30)
+            .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .transition(reduceMotion ? AnyTransition.opacity : .opacity.combined(with: .offset(y: 6)))

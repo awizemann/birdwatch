@@ -136,6 +136,27 @@ struct DeviceActivitySummary: Sendable, Hashable {
     func activeCount(since: Date) -> Int {
         devices.filter { ($0.lastModified ?? .distantPast) >= since }.count
     }
+
+    /// Devices ordered the way the UI shows them: most recently active first.
+    nonisolated var devicesByActivity: [DeviceActivityItem] {
+        Self.sortedByActivity(devices)
+    }
+
+    /// Pure activity ordering: most recent `lastModified` first, undated
+    /// devices last, ties broken by item count (desc) then index (asc) so the
+    /// order is total and stable.
+    nonisolated static func sortedByActivity(_ items: [DeviceActivityItem]) -> [DeviceActivityItem] {
+        items.sorted { lhs, rhs in
+            switch (lhs.lastModified, rhs.lastModified) {
+            case let (l?, r?) where l != r: return l > r
+            case (nil, .some): return false
+            case (.some, nil): return true
+            default: break
+            }
+            if lhs.itemCount != rhs.itemCount { return lhs.itemCount > rhs.itemCount }
+            return lhs.index < rhs.index
+        }
+    }
 }
 
 // MARK: - Issues

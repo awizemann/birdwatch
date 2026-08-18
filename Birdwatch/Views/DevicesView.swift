@@ -16,11 +16,13 @@ struct DevicesView: View {
                     emptyState
                     SourceFootnote(text: "The bird device registry redacts device names in its diagnostic output, and CloudKit's device list has no public API.")
                 }
+                DeviceManagementFootnote()
             } else {
                 ForEach(store.devices) { device in
                     DeviceCard(device: device)
                 }
                 SourceFootnote(text: "Read from the CloudKit account device list and the bird device registry.")
+                DeviceManagementFootnote()
             }
         }
     }
@@ -38,6 +40,24 @@ struct DevicesView: View {
                     .scaledFont(size: 12.5)
                     .foregroundStyle(Surface.fg2)
             }
+        }
+    }
+}
+
+/// Devices can only be removed from the Apple Account pane — `brctl` exposes
+/// no device-management verb (its commands are diagnose/log/dump/status/
+/// accounts/quota/monitor, all read-only), and there is no public API for it.
+struct DeviceManagementFootnote: View {
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            SourceFootnote(text: "Devices are managed in System Settings › Apple Account (removing one there also signs it out of iCloud); Birdwatch can only observe them.")
+            Button("Open Apple Account settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .buttonStyle(.link)
+            .scaledFont(size: 11.5)
         }
     }
 }
@@ -71,7 +91,7 @@ struct AnonymousDeviceSummary: View {
 
             Card {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(summary.devices.enumerated()), id: \.element.id) { index, device in
+                    ForEach(Array(summary.devicesByActivity.enumerated()), id: \.element.id) { index, device in
                         if index > 0 { Divider().overlay(Surface.cardLine) }
                         row(device)
                             .padding(.vertical, 9)

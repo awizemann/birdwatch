@@ -159,13 +159,14 @@ struct BrctlDumpMappingTests {
 
     // MARK: - Devices
 
-    @Test("Device summary is anonymous, excludes device:0, and is ordered by item count")
+    @Test("Device summary is anonymous, excludes device:0, and is ordered by activity")
     func deviceSummary() throws {
         let summary = try #require(BrctlDumpMapper.deviceSummary(from: try dumpFixture()))
 
         #expect(!summary.devices.contains { $0.index == 0 }, "device:0 is bird's placeholder, not a device")
-        #expect(summary.devices.map(\.index) == [11, 30])
-        #expect(summary.devices.first?.itemCount == 2)
+        // Device 30's newest item is later than device 11's, so it leads.
+        #expect(summary.devices.map(\.index) == [30, 11])
+        #expect(summary.devices == summary.devicesByActivity)
         #expect(summary.countsArePartial, "bird truncated its item dump")
         // The registry lists five devices; only two authored an item in the
         // (truncated) tree — the headline must use the larger, real number.
@@ -182,5 +183,31 @@ struct BrctlDumpMappingTests {
     @Test("No device attribution at all yields no summary, so the empty state stays")
     func noDeviceActivity() {
         #expect(BrctlDumpMapper.deviceSummary(from: BrctlDump()) == nil)
+    }
+
+    @Test("Activity sort: newest write first, undated devices last, ties by item count")
+    func activitySortOrder() {
+        let old = Date(timeIntervalSince1970: 1_000)
+        let new = Date(timeIntervalSince1970: 2_000)
+        let items = [
+            DeviceActivityItem(index: 1, itemCount: 99, lastModified: nil),
+            DeviceActivityItem(index: 2, itemCount: 1, lastModified: old),
+            DeviceActivityItem(index: 3, itemCount: 5, lastModified: new),
+            DeviceActivityItem(index: 4, itemCount: 50, lastModified: nil),
+            DeviceActivityItem(index: 5, itemCount: 7, lastModified: new),
+        ]
+        // 3 and 5 share the newest date, so the larger item count wins; the two
+        // undated devices sort last, again by item count.
+        #expect(DeviceActivitySummary.sortedByActivity(items).map(\.index) == [5, 3, 2, 1, 4])
+    }
+
+    @Test("Activity sort is stable and total for fully tied devices")
+    func activitySortTies() {
+        let date = Date(timeIntervalSince1970: 500)
+        let items = [
+            DeviceActivityItem(index: 9, itemCount: 3, lastModified: date),
+            DeviceActivityItem(index: 2, itemCount: 3, lastModified: date),
+        ]
+        #expect(DeviceActivitySummary.sortedByActivity(items).map(\.index) == [2, 9])
     }
 }
