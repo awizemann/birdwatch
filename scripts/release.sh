@@ -72,6 +72,12 @@ done
 # Birdwatch is open source and deliberately does NOT hardcode a Team ID.
 TEAM_ID="${DEVELOPMENT_TEAM:?set DEVELOPMENT_TEAM to your Apple Developer Team ID (see 'security find-identity -v -p codesigning')}"
 export DEVELOPMENT_TEAM="$TEAM_ID"
+# swift-stats write key for api.swiftstats.co (Memophant vendor "swift-stats").
+# Append-only and scoped to one project, but it is still not committed: it is
+# baked into Info.plist (BWStatsWriteKey) via the BW_STATS_WRITE_KEY build
+# setting at archive time. A release without it would silently ship with
+# analytics off, so it is required here.
+STATS_WRITE_KEY="${BW_STATS_WRITE_KEY:?set BW_STATS_WRITE_KEY to the swift-stats write key (Memophant → vendors → swift-stats)}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
 BUNDLE_ID="com.wizemann.birdwatch"
 SCHEME="Birdwatch"
@@ -262,6 +268,7 @@ xcodebuild \
   ONLY_ACTIVE_ARCH=NO \
   CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
   DEVELOPMENT_TEAM="$TEAM_ID" \
+  BW_STATS_WRITE_KEY="$STATS_WRITE_KEY" \
   CODE_SIGN_STYLE=Manual \
   archive
 
@@ -292,13 +299,21 @@ APP_PATH="$EXPORT_DIR/${SCHEME}.app"
 # silently — shipping an app that can't self-update. Verify at the BUILT PRODUCT.
 PLIST="$APP_PATH/Contents/Info.plist"
 for key in CFBundleIdentifier CFBundleName CFBundleVersion CFBundleShortVersionString \
-           CFBundleIconFile SUFeedURL SUPublicEDKey LSMinimumSystemVersion; do
+           CFBundleIconFile SUFeedURL SUPublicEDKey LSMinimumSystemVersion BWStatsWriteKey; do
   /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" >/dev/null 2>&1 \
     || die "built Info.plist missing '$key' — the merge-base plist merge may have broken (see project.yml INFOPLIST_FILE + GENERATE_INFOPLIST_FILE)."
 done
 # An iconless app is a real regression (Dock, Sparkle's update dialog, Finder) —
 # fail loudly rather than ship it.
 [[ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]] || die "AppIcon.icns missing from the built app."
+# The key must have been EXPANDED, not left as the literal "$(BW_STATS_WRITE_KEY)".
+BUILT_STATS_KEY="$(/usr/libexec/PlistBuddy -c "Print :BWStatsWriteKey" "$PLIST")"
+[[ "$BUILT_STATS_KEY" == "$STATS_WRITE_KEY" ]] \
+  || die "built Info.plist BWStatsWriteKey was not expanded from the build setting — analytics would ship disabled."
+# The privacy manifest declares the analytics data types; a resource-bundling
+# regression must not ship silently.
+[[ -f "$APP_PATH/Contents/Resources/PrivacyInfo.xcprivacy" ]] \
+  || die "built app is missing PrivacyInfo.xcprivacy"
 BUILT_SHORT="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")"
 [[ "$BUILT_SHORT" == "$VERSION" ]] \
   || die "built CFBundleShortVersionString is '$BUILT_SHORT', expected '$VERSION' — the project.yml bump didn't reach the build."

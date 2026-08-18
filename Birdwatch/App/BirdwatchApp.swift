@@ -49,11 +49,23 @@ struct BirdwatchApp: App {
     // Constructing the store is cheap by design: no I/O happens until
     // RootView's .task calls refresh() (§6 — nothing heavy before first frame).
     // `--mock` keeps the design-handoff fixture data for demos/screenshots.
-    @State private var store = SyncStore(
-        source: ProcessInfo.processInfo.arguments.contains("--mock")
-            ? MockSyncSource() as any SyncSource
-            : SystemSyncSource()
-    )
+    // Usage analytics (swift-stats) rides along: `makeTracker()` is a no-op
+    // under XCTest, `--mock`, or without a baked-in write key. Constructing
+    // the client does no I/O either.
+    @State private var store: SyncStore
+    /// Keeps the NSApplication observers alive for the app's lifetime.
+    private let usageLifecycle: UsageLifecycle
+
+    init() {
+        let usage = UsageAnalytics.makeTracker()
+        _store = State(initialValue: SyncStore(
+            source: ProcessInfo.processInfo.arguments.contains("--mock")
+                ? MockSyncSource() as any SyncSource
+                : SystemSyncSource(),
+            usage: usage
+        ))
+        usageLifecycle = UsageLifecycle(usage: usage)
+    }
 
     var body: some Scene {
         Window("Birdwatch", id: "main") {
@@ -112,7 +124,7 @@ struct BirdwatchApp: App {
         CommandMenu("View") {
             ForEach(Array(MonitorView.allCases.enumerated()), id: \.element.id) { index, view in
                 Button(view.title) {
-                    store.navigate(to: view)
+                    store.navigate(to: view, via: .shortcut)
                 }
                 .keyboardShortcut(
                     KeyEquivalent(Character("\(index + 1)")),
@@ -123,6 +135,7 @@ struct BirdwatchApp: App {
             Divider()
 
             Button("Refresh Now") {
+                store.record(.refreshForced)
                 Task { await store.refresh(force: true) }
             }
             .keyboardShortcut("r", modifiers: .command)
@@ -133,6 +146,35 @@ struct BirdwatchApp: App {
             .keyboardShortcut("p", modifiers: [.command, .shift])
         }
     }
+}
+
+/// swift-stats installs no lifecycle observers of its own; these two calls are
+/// what produce `app_open` / `app_background`, sessions, and the flush on
+/// background (consumer checklist §1). Driven from NSApplication rather than
+/// `scenePhase`: this is a Window + MenuBarExtra app, so the window's scene
+/// phase goes `.background` when the window closes while the app is still very
+/// much in use from the menu bar, and never fires again once the window is
+/// gone. Resign-active is macOS's "user went elsewhere" and is the honest
+/// analog of iOS's background — it is also when a flush is worth doing.
+@MainActor
+final class UsageLifecycle {
+    private var tokens: [any NSObjectProtocol] = []
+
+    init(usage: any UsageTracking) {
+        let center = NotificationCenter.default
+        tokens.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            Task { await usage.applicationDidBecomeActive() }
+        })
+        tokens.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
+            Task { await usage.applicationDidEnterBackground() }
+        })
+        // A launch that finishes without ever activating (opened straight into
+        // the menu bar) still counts as an open.
+        Task { await usage.applicationDidBecomeActive() }
+    }
+
+    // No deinit: this object lives as long as the App does, and block-based
+    // observers are removed automatically when their tokens deallocate.
 }
 
 /// "Check for Updates…" menu command. Disabled while Sparkle can't check

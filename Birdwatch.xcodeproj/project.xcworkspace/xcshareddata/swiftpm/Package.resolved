@@ -1,5 +1,5 @@
 {
-  "originHash" : "e721da7f9826abdffcb6185e886155efa2514bd6234475f1afa893e29eb258d6",
+  "originHash" : "a76fbda56d914f62a191f21952ed604ab29da21abfea00946826fbc500095c5d",
   "pins" : [
     {
       "identity" : "sparkle",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "79bc9e872948e47877e76f194cb0c8e0412b0b90",
         "version" : "2.9.5"
+      }
+    },
+    {
+      "identity" : "swift-stats",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/awizemann/swift-stats",
+      "state" : {
+        "revision" : "74e7b9028712317414d73d30c28cc597039a5c93",
+        "version" : "0.1.0"
       }
     }
   ],

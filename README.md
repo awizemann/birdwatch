@@ -23,7 +23,7 @@ The `operations/` notes under `.memory/` (if you use Memophant) and the code com
 - macOS 15 or later
 - Xcode 16 / Swift 6.2 toolchain (built with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, strict concurrency)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) — the `.xcodeproj` is generated from `project.yml`
-- Birdwatch runs **outside the App Sandbox** and asks for **Full Disk Access**; that's what lets it read the sync daemons' state. Nothing leaves your Mac.
+- Birdwatch runs **outside the App Sandbox** and asks for **Full Disk Access**; that's what lets it read the sync daemons' state. Your files and sync data never leave your Mac; anonymous usage counts do (see [Privacy](site/privacy.html)), and Diagnostics has the switch to turn that off.
 
 ## Build
 
@@ -41,6 +41,8 @@ scripts/build-detached.sh
 Add `--mock` as a launch argument to run on the design-handoff fixture data instead of the live system.
 
 To sign builds with your own team: `DEVELOPMENT_TEAM=<TEAMID> xcodegen generate`. Unsigned local builds work without it.
+
+Usage analytics ([swift-stats](https://github.com/awizemann/swift-stats)) is off in local builds unless a write key is supplied at build time: `xcodebuild … BW_STATS_WRITE_KEY=<key> build` bakes it into the built Info.plist. The key is never committed and is not a project.yml setting (so `xcodegen generate` cannot capture it); `scripts/release.sh` requires it in the environment. `--mock` and test runs always run with analytics off.
 
 ## Test
 

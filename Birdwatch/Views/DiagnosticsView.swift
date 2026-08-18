@@ -123,7 +123,11 @@ struct DiagnosticsView: View {
 
     /// Runs a maintenance operation on the actor, logs the outcome, and shows
     /// a transient success/failure line in the maintenance card.
-    private func run(_ title: String, operation: @escaping () async throws -> String) {
+    ///
+    /// Every operation routed here today is a daemon restart, which is why the
+    /// usage event is `restart_daemon` with the daemon's name — a closed set
+    /// (bird / cloudd / fileproviderd), not user data.
+    private func run(_ title: String, daemon: String, operation: @escaping () async throws -> String) {
         Task {
             do {
                 let result = try await operation()
@@ -131,11 +135,27 @@ struct DiagnosticsView: View {
                 let tone: ActionStatus.Tone =
                     result == MaintenanceActions.respawnNotObserved ? .caution : .success
                 show(ActionStatus(text: "\(title): \(result)", tone: tone))
+                store.record(.maintenanceRun(.restart_daemon, daemon: daemon, outcome: .ok, errorKind: nil))
             } catch {
                 let reason = Self.shortReason(for: error)
                 logger.error("\(title, privacy: .public) failed: \(reason, privacy: .private)")
                 show(ActionStatus(text: "Failed: \(reason)", tone: .failure))
+                store.record(.maintenanceRun(.restart_daemon, daemon: daemon, outcome: .failed, errorKind: Self.errorKind(for: error)))
             }
+        }
+    }
+
+    /// The error's *kind* for analytics — a `MaintenanceError` case name or
+    /// "other". An explicit switch, never reflection or the message: every
+    /// payload is a path or daemon name and must not travel.
+    static func errorKind(for error: Error) -> String {
+        guard let m = error as? MaintenanceError else { return "other" }
+        switch m {
+        case .notSupported: return "notSupported"
+        case .unknownDaemon: return "unknownDaemon"
+        case .daemonNotRunning: return "daemonNotRunning"
+        case .pathNotAllowed: return "pathNotAllowed"
+        case .requiresTerminal: return "requiresTerminal"
         }
     }
 
@@ -235,7 +255,7 @@ struct DiagnosticsView: View {
                 confirmAction = ConfirmAction(
                     title: "Restart \(name)",
                     command: MaintenanceActions.restartCommand(name: name),
-                    perform: { run("Restart \(name)") { try await maintenance.restartDaemon(name: name) } }
+                    perform: { run("Restart \(name)", daemon: name) { try await maintenance.restartDaemon(name: name) } }
                 )
             }
             .buttonStyle(.bordered)
@@ -588,6 +608,7 @@ struct DiagnosticsView: View {
 
     private func reveal(_ absolutePath: String) {
         logger.info("Reveal in Finder requested for a retry-queue item")
+        store.record(.retryItemRevealed)
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: absolutePath)])
     }
 
@@ -601,6 +622,8 @@ struct DiagnosticsView: View {
         let command: String
         let actionLabel: String
         var needsConfirm = false
+        /// Which daemon the row acts on (analytics prop; closed set).
+        let daemon: String
         let operation: @MainActor (MaintenanceActions) async throws -> String
         var id: String { title }
     }
@@ -611,6 +634,7 @@ struct DiagnosticsView: View {
             command: MaintenanceActions.restartCommand(name: "bird"),
             actionLabel: "Restart",
             needsConfirm: true,
+            daemon: "bird",
             operation: { try await $0.restartDaemon(name: "bird") }
         ),
     ]
@@ -667,6 +691,7 @@ struct DiagnosticsView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(MaintenanceActions.diagnoseCommand, forType: .string)
                     logger.info("Copied the brctl diagnose command to the pasteboard")
+                    store.record(.maintenanceRun(.diagnose_copy_command, daemon: nil, outcome: .ok, errorKind: nil))
                     withAnimation { copiedDiagnoseCommand = true }
                     copyResetTask?.cancel()
                     copyResetTask = Task {
@@ -678,6 +703,7 @@ struct DiagnosticsView: View {
                 .accessibilityLabel("Copy the brctl diagnose command")
                 Button("Open Terminal") {
                     logger.info("Open Terminal requested for brctl diagnose")
+                    store.record(.maintenanceRun(.diagnose_open_terminal, daemon: nil, outcome: .ok, errorKind: nil))
                     if let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") {
                         NSWorkspace.shared.openApplication(at: terminal, configuration: NSWorkspace.OpenConfiguration())
                     }
@@ -708,10 +734,10 @@ struct DiagnosticsView: View {
                     confirmAction = ConfirmAction(
                         title: item.title,
                         command: item.command,
-                        perform: { run(item.title) { try await item.operation(maintenance) } }
+                        perform: { run(item.title, daemon: item.daemon) { try await item.operation(maintenance) } }
                     )
                 } else {
-                    run(item.title) { try await item.operation(maintenance) }
+                    run(item.title, daemon: item.daemon) { try await item.operation(maintenance) }
                 }
             }
             .buttonStyle(.bordered)
@@ -762,8 +788,31 @@ struct DiagnosticsView: View {
                 .buttonStyle(.link)
                 .scaledFont(size: 12.5, weight: .semibold)
                 .padding(.top, 10)
+
+                Divider().overlay(Surface.cardLine).padding(.vertical, 10)
+
+                // The opt-out a person can find (swift-stats consumer
+                // checklist §4). Copy says exactly what is and isn't sent.
+                Toggle(isOn: usageSharingBinding) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Share anonymous usage")
+                            .scaledFont(size: 13, weight: .medium)
+                            .foregroundStyle(Surface.fg)
+                        Text("Which screens and actions get used, plus app version and macOS version, under a random install ID. Never file names, paths, app names or account details.")
+                            .scaledFont(size: 11.5)
+                            .foregroundStyle(Surface.fg3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .task { await store.loadUsagePreference() }
             }
         }
+    }
+
+    private var usageSharingBinding: Binding<Bool> {
+        Binding(get: { store.usageSharingEnabled }, set: { store.setUsageSharing($0) })
     }
 }
 

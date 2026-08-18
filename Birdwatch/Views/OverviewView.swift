@@ -159,7 +159,7 @@ struct OverviewView: View {
             HStack {
                 SectionLabel(text: "Recent activity")
                 Spacer()
-                Button("All") { store.selectedView = .activity }
+                Button("All") { store.navigate(to: .activity, via: .link) }
                     .buttonStyle(.plain)
                     .scaledFont(size: 12, weight: .semibold)
                     .foregroundStyle(Palette.accent)

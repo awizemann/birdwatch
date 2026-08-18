@@ -25,6 +25,11 @@
 	<key>SUPublicEDKey</key>
 	<string>sxHR0OGLmx9I4Fyx1GdPANR9WUiVAz/rI38x3cLYnMU=</string>
 
+	<!-- swift-stats write key, expanded from the BW_STATS_WRITE_KEY build
+	     setting (project.yml). Empty in plain dev builds → analytics off. -->
+	<key>BWStatsWriteKey</key>
+	<string>$(BW_STATS_WRITE_KEY)</string>
+
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 </dict>
