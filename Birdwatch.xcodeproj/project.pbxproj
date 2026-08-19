@@ -870,7 +870,7 @@
 			repositoryURL = "https://github.com/awizemann/swift-stats";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.1.0;
+				minimumVersion = 0.2.0;
 			};
 		};
 		F6933A6BC5401F38275C9BB6 /* XCRemoteSwiftPackageReference "Sparkle" */ = {

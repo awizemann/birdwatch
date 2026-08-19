@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/awizemann/swift-stats",
       "state" : {
-        "revision" : "74e7b9028712317414d73d30c28cc597039a5c93",
-        "version" : "0.1.0"
+        "revision" : "e743ecdb565a8973a5f3e034da0fc627d6d6e9ff",
+        "version" : "0.2.0"
       }
     }
   ],
