@@ -11,9 +11,11 @@ import StatsCloudflare
 /// implementation wraps an actor: callers hop off main for the (disk) write.
 nonisolated protocol UsageTracking: Sendable {
     func track(_ event: UsageEvent) async
-    /// Drive from `scenePhase` — swift-stats installs no lifecycle observers.
+    /// Driven from NSApplication notifications — swift-stats installs no
+    /// lifecycle observers. Resign-active only flushes; we deliberately do not
+    /// emit `app_background` (every ⌘-tab away would be an event).
     func applicationDidBecomeActive() async
-    func applicationDidEnterBackground() async
+    func flush() async
     /// The master opt-out. Persists inside the SDK.
     func setEnabled(_ enabled: Bool) async
     var isEnabled: Bool { get async }
@@ -27,7 +29,7 @@ struct StatsUsageTracker: UsageTracking {
         await client.track(event.name, props: event.props.mapValues(\.statsValue))
     }
     func applicationDidBecomeActive() async { await client.applicationDidBecomeActive() }
-    func applicationDidEnterBackground() async { await client.applicationDidEnterBackground() }
+    func flush() async { await client.flush() }
     func setEnabled(_ enabled: Bool) async { await client.setEnabled(enabled) }
     var isEnabled: Bool { get async { await client.isEnabled } }
 }
@@ -36,7 +38,7 @@ struct StatsUsageTracker: UsageTracking {
 struct NoopUsageTracker: UsageTracking {
     func track(_ event: UsageEvent) async {}
     func applicationDidBecomeActive() async {}
-    func applicationDidEnterBackground() async {}
+    func flush() async {}
     func setEnabled(_ enabled: Bool) async {}
     var isEnabled: Bool { get async { false } }
 }
@@ -87,7 +89,9 @@ enum UsageAnalytics {
                 // install so active-install and retention counts are real.
                 // Disclosed in the Diagnostics toggle copy.
                 consent: .all,
-                autoEvents: [.appOpen, .appBackground, .sessions]
+                // No .appBackground: on macOS "left the foreground" is every
+                // ⌘-tab, which is noise. Sessions still close on the gap.
+                autoEvents: [.appOpen, .sessions]
             ))
             return StatsUsageTracker(client: client)
         } catch {
