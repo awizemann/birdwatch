@@ -1,4 +1,15 @@
-# Birdwatch
+<h1>
+  <img src="docs/images/app-icon.png" alt="" width="48" align="top">
+  Birdwatch
+</h1>
+
+[![Latest release](https://img.shields.io/github/v/release/awizemann/birdwatch?label=release)](https://github.com/awizemann/birdwatch/releases/latest)
+![macOS 15+](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)
+![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
+![SwiftUI](https://img.shields.io/badge/SwiftUI-native-0A84FF)
+![Universal](https://img.shields.io/badge/Apple%20Silicon%20%7C%20Intel-universal-555)
+![Notarized](https://img.shields.io/badge/Notarized-Sparkle%20updates-34C759)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **See what iCloud is actually doing.** A native macOS utility that makes iCloud sync visible — per-app status, files in transit, issues explained in plain language, live daemon logs, diagnostics, storage, and estimated bandwidth — in a main window and a menu-bar popover.
 
