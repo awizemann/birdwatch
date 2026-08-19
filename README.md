@@ -4,6 +4,10 @@
 
 Birdwatch is built on one rule: **it never invents a number.** Where macOS exposes real data, you get real data. Where it doesn't, the app says so and points you to the place that does.
 
+<p align="center">
+  <img src="docs/images/overview.png" alt="Birdwatch's Overview screen: a 100% synced ring, upload/download/active-app/issue tiles, and the sidebar of monitor views" width="900">
+</p>
+
 ## What it shows
 
 | Area | Where the data comes from |
