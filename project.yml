@@ -40,7 +40,7 @@ packages:
   # sink that speaks to api.swiftstats.co). Zero transitive dependencies.
   swift-stats:
     url: https://github.com/awizemann/swift-stats
-    from: "0.1.0"
+    from: "0.2.0"
 targets:
   Birdwatch:
     type: application
