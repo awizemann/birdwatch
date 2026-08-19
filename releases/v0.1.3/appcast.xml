@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Birdwatch</title>
+        <item>
+            <title>0.1.3</title>
+            <pubDate>Wed, 19 Aug 2026 16:26:19 -0400</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/awizemann/birdwatch/releases/download/v0.1.3/Birdwatch-v0.1.3-Universal.zip" length="6007034" type="application/octet-stream" sparkle:edSignature="qwgFLtcGwlf2MfgDSVlgkAOZP8gIh38blQQvHKs1Z88EAVVbOw1p97/Z1hMtdnXGJkl9uGU13TjpSDBovB5YBg=="/>
+        </item>
+    </channel>
+</rss>
