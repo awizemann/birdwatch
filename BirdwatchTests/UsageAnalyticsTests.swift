@@ -15,7 +15,7 @@ actor RecordingUsageTracker: UsageTracking {
 
     func track(_ event: UsageEvent) async { events.append(event) }
     func applicationDidBecomeActive() async { lifecycle.append("active") }
-    func applicationDidEnterBackground() async { lifecycle.append("background") }
+    func flush() async { lifecycle.append("flush") }
     func setEnabled(_ enabled: Bool) async { self.enabled = enabled }
     var isEnabled: Bool { enabled }
 

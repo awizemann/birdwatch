@@ -148,14 +148,13 @@ struct BirdwatchApp: App {
     }
 }
 
-/// swift-stats installs no lifecycle observers of its own; these two calls are
-/// what produce `app_open` / `app_background`, sessions, and the flush on
-/// background (consumer checklist §1). Driven from NSApplication rather than
-/// `scenePhase`: this is a Window + MenuBarExtra app, so the window's scene
-/// phase goes `.background` when the window closes while the app is still very
-/// much in use from the menu bar, and never fires again once the window is
-/// gone. Resign-active is macOS's "user went elsewhere" and is the honest
-/// analog of iOS's background — it is also when a flush is worth doing.
+/// swift-stats installs no lifecycle observers of its own; `didBecomeActive`
+/// is what produces `app_open` and sessions (consumer checklist §1). Driven
+/// from NSApplication rather than `scenePhase`: this is a Window + MenuBarExtra
+/// app, so the window's scene phase goes `.background` when the window closes
+/// while the app is still in use from the menu bar, and never fires again once
+/// the window is gone. Resign-active (every ⌘-tab away) only flushes the queue
+/// — no `app_background` event, that would be noise on macOS.
 @MainActor
 final class UsageLifecycle {
     private var tokens: [any NSObjectProtocol] = []
@@ -166,7 +165,7 @@ final class UsageLifecycle {
             Task { await usage.applicationDidBecomeActive() }
         })
         tokens.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
-            Task { await usage.applicationDidEnterBackground() }
+            Task { await usage.flush() }
         })
         // A launch that finishes without ever activating (opened straight into
         // the menu bar) still counts as an open.
