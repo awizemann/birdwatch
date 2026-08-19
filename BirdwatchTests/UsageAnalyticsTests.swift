@@ -6,27 +6,19 @@ import Testing
 
 // MARK: - Test doubles
 
-/// Records every event the store hands the tracker. An actor so the store's
-/// fire-and-forget `record` Tasks land safely; `drain` waits for them.
-actor RecordingUsageTracker: UsageTracking {
-    private(set) var events: [UsageEvent] = []
-    private(set) var lifecycle: [String] = []
-    private(set) var enabled = true
+/// Records every event the store hands the tracker. `record` is synchronous
+/// on the seam, so events are readable the moment the store method returns.
+final class RecordingUsageTracker: UsageTracking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [UsageEvent] = []
+    private var _enabled = true
 
-    func track(_ event: UsageEvent) async { events.append(event) }
-    func applicationDidBecomeActive() async { lifecycle.append("active") }
-    func flush() async { lifecycle.append("flush") }
-    func setEnabled(_ enabled: Bool) async { self.enabled = enabled }
-    var isEnabled: Bool { enabled }
-
-    /// Bounded wait for the store's detached record Tasks to arrive.
-    func drain(expecting count: Int) async -> [UsageEvent] {
-        let deadline = ContinuousClock.now + .seconds(2)
-        while events.count < count && ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        return events
-    }
+    var events: [UsageEvent] { lock.withLock { _events } }
+    func record(_ event: UsageEvent) { lock.withLock { _events.append(event) } }
+    func applicationDidBecomeActive() async {}
+    func flush() async {}
+    func setEnabled(_ enabled: Bool) async { lock.withLock { _enabled = enabled } }
+    var isEnabled: Bool { get async { lock.withLock { _enabled } } }
 }
 
 private func throwawayDefaults() -> UserDefaults {
@@ -146,8 +138,8 @@ struct UsageEventWireTests {
             uuidProvider: FixedUUIDProvider(), randomSource: FixedRandomSource()
         ))
         let tracker = StatsUsageTracker(client: client)
-        for e in allEvents { await tracker.track(e) }
-        await client.flush()
+        for e in allEvents { tracker.record(e) }
+        await client.flush()                     // drains record()'s buffer first
         let sent = await sink.sentEvents
         // If the SDK refused any name (regex / reserved), it would be missing here.
         #expect(sent.map(\.name) == allEvents.map(\.name))
@@ -193,7 +185,7 @@ struct UsageStoreHookTests {
         store.navigate(to: .issues, via: .menubar)
         store.navigate(to: .issues, via: .shortcut)      // no-op, but must not arm the next click
         store.selectedView = .drive                      // plain sidebar click
-        let events = await tracker.drain(expecting: 3)
+        let events = tracker.events
         #expect(events == [
             .viewShown(.devices, via: .sidebar),
             .viewShown(.issues, via: .menubar),
@@ -208,7 +200,7 @@ struct UsageStoreHookTests {
         await store.refresh(force: true)
         store.searchText = "pho"
         store.open(.app(id: "photos"))
-        let events = await tracker.drain(expecting: 5)
+        let events = tracker.events
         #expect(events.first == .viewShown(.overview, via: .launch))
         #expect(events.contains(.snapshotHealth(appsByBackend: [.cloudDocs: 1], issueCount: 0, daemonsMissing: 0, fdaGranted: false, notificationsGranted: false)))
         #expect(events.contains(.searchUsed(resultKind: .app, resultCount: 1)))
@@ -222,8 +214,8 @@ struct UsageStoreHookTests {
         let (store, tracker) = makeStore()
         await store.refresh(force: true)
         await store.refresh(force: true)
-        store.togglePauseAll()                           // a sentinel that lands AFTER any duplicate would
-        let events = await tracker.drain(expecting: 3)
+        store.togglePauseAll()
+        let events = tracker.events
         #expect(events == [
             .viewShown(.overview, via: .launch),
             .snapshotHealth(appsByBackend: [:], issueCount: 0, daemonsMissing: 0, fdaGranted: false, notificationsGranted: false),
@@ -243,7 +235,7 @@ struct UsageStoreHookTests {
         store.dismissIssue(id: "i1")
         await store.resolveConflict(issueID: "c1")
         store.markAllNotificationsRead()                 // nothing unread → no event
-        let events = await tracker.drain(expecting: 7)
+        let events = tracker.events
         #expect(events.dropFirst(2) == [
             .monitoringPaused, .monitoringResumed,
             .appMuted(.cloudDocs, muted: true),

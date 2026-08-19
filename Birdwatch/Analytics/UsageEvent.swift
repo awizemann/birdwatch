@@ -10,7 +10,7 @@ import Foundation
 /// case names, which is the most specific we go.
 ///
 /// Names are snake_case per the schema (`^[a-z][a-z0-9_]*$`).
-enum UsageEvent: Sendable, Equatable {
+nonisolated enum UsageEvent: Sendable, Equatable {
     /// How the user got somewhere — the sidebar, a ⌘-digit shortcut, the
     /// search dropdown, the menu-bar popover, or a link inside another view.
     enum NavigationSource: String, Sendable { case launch, sidebar, shortcut, search, menubar, link }
@@ -136,7 +136,7 @@ enum UsageEvent: Sendable, Equatable {
 
 /// The scalar prop values the schema allows. Mirrors `Stats.StatsValue`
 /// one-to-one; converted at the adapter boundary.
-enum UsageValue: Sendable, Equatable {
+nonisolated enum UsageValue: Sendable, Equatable {
     case string(String)
     case int(Int)
     case bool(Bool)

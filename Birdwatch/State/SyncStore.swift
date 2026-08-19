@@ -141,19 +141,11 @@ final class SyncStore {
 
     // MARK: - Usage analytics
 
-    /// Fire-and-forget: the SDK's `track` returns once the event is on disk,
-    /// which is not something a button handler should wait for. Each record
-    /// waits for the previous one so events reach the SDK — and get their
-    /// `seq` — in the order they happened; unstructured Tasks alone don't
-    /// promise that.
+    /// Synchronous hand-off (swift-stats `record()` is ordered and never
+    /// suspends), so a button handler never waits on the analytics queue.
     func record(_ event: UsageEvent) {
-        let previous = recordTail
-        recordTail = Task { [usage] in
-            await previous?.value
-            await usage.track(event)
-        }
+        usage.record(event)
     }
-    private var recordTail: Task<Void, Never>?
 
     /// Navigation with a known origin, so `view_shown` carries `via`.
     func navigate(to view: MonitorView, via: UsageEvent.NavigationSource) {
