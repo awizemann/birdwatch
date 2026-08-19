@@ -18,8 +18,8 @@ settings:
     # Set your own team for signed builds: `DEVELOPMENT_TEAM=XXXXXXXXXX xcodegen generate`
     # (unsigned local builds work without it). Release signing lives in scripts/release.sh.
     DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
-    CURRENT_PROJECT_VERSION: 3
-    MARKETING_VERSION: 0.1.1
+    CURRENT_PROJECT_VERSION: 4
+    MARKETING_VERSION: 0.1.2
     ENABLE_HARDENED_RUNTIME: "YES"
     ENABLE_APP_SANDBOX: "NO"
     # The swift-stats write key is deliberately NOT a setting here. Info.plist
