@@ -8,9 +8,12 @@ import StatsCloudflare
 /// send nothing at all.
 ///
 /// `nonisolated` because this module defaults to MainActor and the real
-/// implementation wraps an actor: callers hop off main for the (disk) write.
+/// implementation wraps an actor.
 nonisolated protocol UsageTracking: Sendable {
-    func track(_ event: UsageEvent) async
+    /// Synchronous and ordered: swift-stats 0.2's `record()` takes the
+    /// timestamp at the call, preserves arrival order, and hands off to the
+    /// actor without a suspension — so a button handler never waits on disk.
+    func record(_ event: UsageEvent)
     /// Driven from NSApplication notifications — swift-stats installs no
     /// lifecycle observers. Resign-active only flushes; we deliberately do not
     /// emit `app_background` (every ⌘-tab away would be an event).
@@ -25,8 +28,8 @@ nonisolated protocol UsageTracking: Sendable {
 struct StatsUsageTracker: UsageTracking {
     let client: StatsClient
 
-    func track(_ event: UsageEvent) async {
-        await client.track(event.name, props: event.props.mapValues(\.statsValue))
+    func record(_ event: UsageEvent) {
+        client.record(event.name, props: event.props.mapValues(\.statsValue))
     }
     func applicationDidBecomeActive() async { await client.applicationDidBecomeActive() }
     func flush() async { await client.flush() }
@@ -36,7 +39,7 @@ struct StatsUsageTracker: UsageTracking {
 
 /// Sends nothing, remembers nothing. Used when analytics is gated off.
 struct NoopUsageTracker: UsageTracking {
-    func track(_ event: UsageEvent) async {}
+    func record(_ event: UsageEvent) {}
     func applicationDidBecomeActive() async {}
     func flush() async {}
     func setEnabled(_ enabled: Bool) async {}
