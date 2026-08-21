@@ -97,7 +97,7 @@ private func makeStore(apps: [AppSyncState] = [], issues: [IssueItem] = [],
 }
 
 private func issue(id: String, severity: IssueSeverity = .warning, appID: String? = nil) -> IssueItem {
-    IssueItem(id: id, severity: severity, title: id, meta: "", reason: "", primaryActionLabel: "Fix", symbolName: "circle", appID: appID)
+    IssueItem(id: id, severity: severity, title: id, meta: "", reason: "", action: .openDiagnostics, symbolName: "circle", appID: appID)
 }
 
 /// Records banner posts instead of hitting UNUserNotificationCenter, so the

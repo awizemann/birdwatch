@@ -173,22 +173,22 @@ struct MockSyncSource: SyncSource {
             id: "issue-photos-metered", severity: .warning,
             title: "Photos upload paused on metered network",
             meta: "Photos · 12 minutes ago",
-            reason: "macOS pauses large iCloud uploads when it detects a personal hotspot or metered connection to protect your data plan. Uploads resume automatically on Wi-Fi, or you can resume them now.",
-            primaryActionLabel: "Resume upload", symbolName: "wifi.exclamationmark"
+            reason: "macOS pauses large iCloud uploads when it detects a personal hotspot or metered connection to protect your data plan. Uploads resume automatically on Wi-Fi.",
+            action: .none, symbolName: "wifi.exclamationmark"
         ),
         IssueItem(
             id: "issue-conflict", severity: .conflict,
             title: "Sync conflict in Documents",
             meta: "Q3 Report.pages · 26 minutes ago",
             reason: "This file was edited on two devices at the same time, so iCloud kept both versions instead of guessing. Review them and choose which to keep — nothing has been lost.",
-            primaryActionLabel: "Review versions", symbolName: "doc.on.doc"
+            action: .reviewVersions, symbolName: "doc.on.doc"
         ),
         IssueItem(
             id: "issue-storage", severity: .warning,
             title: "Not enough iCloud storage for full backup",
             meta: "Storage · 2 hours ago",
             reason: "Your account has 52.8 GB free but the next device backup needs more. Sync of new files continues, but backups will fail until you free space or upgrade the plan.",
-            primaryActionLabel: "Manage storage", symbolName: "externaldrive.badge.exclamationmark"
+            action: .manageStorage, symbolName: "externaldrive.badge.exclamationmark"
         ),
     ]
 

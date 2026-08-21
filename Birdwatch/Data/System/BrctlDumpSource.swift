@@ -167,7 +167,7 @@ nonisolated enum BrctlDumpMapper {
                 : "\(count) items haven't synced in \(days) day\(days == 1 ? "" : "s")",
             meta: "iCloud Drive · reported by bird",
             reason: "bird still has \(count) item\(count == 1 ? "" : "s") scheduled for upload, but its last attempt on the oldest was \(days) day\(days == 1 ? "" : "s") ago. The item names are redacted by macOS, so Birdwatch can only report the count and the age.",
-            primaryActionLabel: "Open Diagnostics",
+            action: .openDiagnostics,
             symbolName: "clock.badge.exclamationmark",
             appID: "icloud-drive"
         )
@@ -185,7 +185,7 @@ nonisolated enum BrctlDumpMapper {
                 title: "\(humanized(category)) reported by bird",
                 meta: "iCloud Drive · SyncHealthReport",
                 reason: "bird's own health report lists this error under \(category): \(redact(value)). It is the only per-category error macOS exposes, so Birdwatch shows it verbatim rather than guessing at a cause.",
-                primaryActionLabel: "Open Diagnostics",
+                action: .openDiagnostics,
                 symbolName: "exclamationmark.triangle.fill",
                 appID: "icloud-drive"
             ))
@@ -203,7 +203,7 @@ nonisolated enum BrctlDumpMapper {
             title: "iCloud account session error",
             meta: "iCloud Drive · \(code ?? "reported by bird")",
             reason: "bird recorded an account-session error and has not cleared it: \(redact(description))\(code.map { " (\($0))" } ?? ""). Birdwatch reports it exactly as the engine stated it — there is no public API to interpret or clear it.",
-            primaryActionLabel: "Open Diagnostics",
+            action: .openDiagnostics,
             symbolName: "person.crop.circle.badge.exclamationmark",
             appID: "icloud-drive"
         )

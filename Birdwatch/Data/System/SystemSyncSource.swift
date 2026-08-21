@@ -518,7 +518,7 @@ final class SystemSyncSource: SyncSource {
             title: "iCloud storage is nearly full",
             meta: "Storage · \(Format.sizeNonisolated(quota)) remaining",
             reason: "Your account is close to its storage limit. Sync of new files may fail until you free space or upgrade your plan.",
-            primaryActionLabel: "Manage storage", symbolName: "externaldrive.badge.exclamationmark",
+            action: .manageStorage, symbolName: "externaldrive.badge.exclamationmark",
             // Account-level: no app owns the quota, so no per-app mute can
             // silence it.
             appID: nil

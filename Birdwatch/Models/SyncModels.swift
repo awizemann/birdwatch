@@ -165,19 +165,57 @@ enum IssueSeverity: String, Sendable, Hashable {
     case warning, conflict, error
 }
 
+/// What an issue's primary button DOES.
+///
+/// Typed, not free text. The button used to be keyed on
+/// `primaryActionLabel`, so a source could invent a new label, compile
+/// cleanly, and silently render either no button or one that did nothing.
+/// A case here is a promise Birdwatch can keep.
+nonisolated enum IssueAction: String, Sendable, Hashable, CaseIterable {
+    case reviewVersions
+    case openDiagnostics
+    case manageStorage
+    /// No button at all — the honest answer when Birdwatch cannot act on the
+    /// issue itself. A button that does nothing would claim a capability that
+    /// does not exist (C1).
+    case none
+
+    /// The button's title, DERIVED from the action so a label can never
+    /// disagree with what the button does. Empty for `.none`, which shows no
+    /// button — read `IssueItem.hasPrimaryAction` rather than testing this
+    /// string.
+    var label: String {
+        switch self {
+        case .reviewVersions: "Review versions"
+        case .openDiagnostics: "Open Diagnostics"
+        case .manageStorage: "Manage storage"
+        case .none: ""
+        }
+    }
+}
+
 struct IssueItem: Sendable, Hashable, Identifiable {
     let id: String
     let severity: IssueSeverity
     let title: String
     let meta: String                 // "Photos · 12 minutes ago"
     let reason: String               // plain-language paragraph
-    let primaryActionLabel: String
+    /// Non-optional and with NO default on purpose: a new issue-producing site
+    /// that forgets to say what its button does fails to COMPILE instead of
+    /// shipping a silently actionless issue.
+    let action: IssueAction
     let symbolName: String
     /// The app this issue belongs to (`AppSyncState.id`), when the issue is
     /// attributable to one. nil means account-level (e.g. low quota), which
     /// per-app mute deliberately cannot silence.
     var appID: String? = nil
     var isConflict: Bool { severity == .conflict }
+
+    /// Display label for the primary button. Derived — never stored, so it
+    /// cannot drift from `action`.
+    var primaryActionLabel: String { action.label }
+    /// Whether to show a primary button at all.
+    var hasPrimaryAction: Bool { action != .none }
 }
 
 /// The two sides of a file conflict (Issues → Review versions).
