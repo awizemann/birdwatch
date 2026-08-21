@@ -22,7 +22,7 @@ struct IssuePrimaryActionTests {
         )
     }
 
-    @Test("A conflict offers the version comparison, whatever label it carries")
+    @Test("A conflict offers the version comparison, whatever action it carries")
     func conflictResolvesToReviewVersions() {
         #expect(IssuePrimaryAction(issue: issue(action: .reviewVersions, severity: .conflict)) == .reviewVersions)
         // Severity wins over whatever the source asked for: a conflict always
