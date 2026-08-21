@@ -169,6 +169,30 @@ struct MockSyncSource: SyncSource {
     }
 
     nonisolated private static let issues: [IssueItem] = [
+        // Shaped like BrctlDumpSource's SyncHealthReport error (severity
+        // .error, action .openDiagnostics) so `--mock` exercises the Open
+        // Diagnostics click path AT ALL: the live sources only emit this when
+        // bird actually reports an error, which no dev Mac currently does, so
+        // every --mock verification of that button was vacuous.
+        //
+        // The id is deliberately stable and obvious — the Issues card derives
+        // its accessibility identifier as "issue-primary-<id>", so QA can
+        // target this exact element. Its NEIGHBOUR below is deliberately
+        // action-less (.none): with a primary-bearing card next to a
+        // primary-less one, a mark-to-element mis-resolution shows up as the
+        // wrong button rather than passing silently.
+        //
+        // Copy rule (C1): this promises only what the button does — open
+        // Diagnostics and show the engine's own output. It does not claim
+        // Birdwatch can fix, retry, or interpret the error.
+        IssueItem(
+            id: "issue-stuck-items-mock", severity: .error,
+            title: "Upload error reported by bird",
+            meta: "iCloud Drive · SyncHealthReport",
+            reason: "bird's own health report lists an upload error for iCloud Drive. macOS exposes no cause and redacts the item names, so Birdwatch shows the engine's report rather than guessing — Diagnostics has the raw output this came from.",
+            action: .openDiagnostics, symbolName: "exclamationmark.triangle.fill",
+            appID: "icloud-drive"
+        ),
         IssueItem(
             id: "issue-photos-metered", severity: .warning,
             title: "Photos upload paused on metered network",
