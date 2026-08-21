@@ -12,7 +12,10 @@ actor DaemonStatsSource {
         "fileproviderd": "File Provider host",
     ]
 
-    private let runner = ProcessRunner()
+    private let runner: any ProcessRunning
+
+    /// Injected so tests can COUNT spawns; production gets the real runner.
+    init(runner: any ProcessRunning = ProcessRunner()) { self.runner = runner }
 
     /// `ps` columns shared with BandwidthSource's pid discovery, so one spawn
     /// per refresh cycle can feed both (see `sampleRaw`).
@@ -29,7 +32,7 @@ actor DaemonStatsSource {
     /// the pure parsers already treat as "no daemons".
     func sampleRaw() async -> String {
         do {
-            return try await runner.run(toolPath: "/bin/ps", arguments: Self.psArguments)
+            return try await runner.run(toolPath: "/bin/ps", arguments: Self.psArguments, timeout: .seconds(10))
         } catch {
             logger.error("ps sample failed: \(String(describing: error), privacy: .public)")
             return ""

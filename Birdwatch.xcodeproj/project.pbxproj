@@ -39,6 +39,7 @@
 		5B629AC7FB54DBEEE274A2AA /* CloudDocsSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F9513137AD1E1310CC7D83 /* CloudDocsSource.swift */; };
 		5C131951C021D073B041C8A0 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0EC864673FCCE7495F6A6B3 /* Theme.swift */; };
 		5F7F69A76CCC2AFF71CD4E2F /* UsageTracking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85018792B6C09018098DAC5E /* UsageTracking.swift */; };
+		606209394C1C2B5173001032 /* ProcessSpawnBudgetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06291E6CA2C1ECCC2660A809 /* ProcessSpawnBudgetTests.swift */; };
 		61AFF181127532FA0512E8D9 /* BandwidthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 256F18317111799533A9D6EC /* BandwidthTests.swift */; };
 		61E755A00FBB3FBE0B968635 /* RedactedPathResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA1C3486FF8BB963D95045AA /* RedactedPathResolverTests.swift */; };
 		64E18B14BA41CD1B02D8EAA7 /* nettop-sample.csv in Resources */ = {isa = PBXBuildFile; fileRef = 161AB8EAA529BEA8DA82E104 /* nettop-sample.csv */; };
@@ -108,6 +109,7 @@
 
 /* Begin PBXFileReference section */
 		01DB24F5D299B20D09B5699C /* MetadataMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataMappingTests.swift; sourceTree = "<group>"; };
+		06291E6CA2C1ECCC2660A809 /* ProcessSpawnBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessSpawnBudgetTests.swift; sourceTree = "<group>"; };
 		09A00F245B8C1AAF9FD8F214 /* CloudKitAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitAppTests.swift; sourceTree = "<group>"; };
 		0AE14CEABABEB44DCFA21B0C /* SystemNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemNotifier.swift; sourceTree = "<group>"; };
 		0E0E646B5AC46EC4C7E2865B /* BirdwatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BirdwatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -356,6 +358,7 @@
 				F6953211791AF827E69B987C /* MaintenanceActionsTests.swift */,
 				01DB24F5D299B20D09B5699C /* MetadataMappingTests.swift */,
 				64BC1270C9471D308888B274 /* PopoverAccessibilityTests.swift */,
+				06291E6CA2C1ECCC2660A809 /* ProcessSpawnBudgetTests.swift */,
 				DA1C3486FF8BB963D95045AA /* RedactedPathResolverTests.swift */,
 				800E4B86AEE9C64BE105CE55 /* RetryItemActionsTests.swift */,
 				33BAFBB800BED5F5DB8BEF14 /* RetryTrashFlowTests.swift */,
@@ -558,6 +561,7 @@
 				98528E24C1545C2BCD03AE95 /* MaintenanceActionsTests.swift in Sources */,
 				EAA0F8D9751E106C4CF3D4F0 /* MetadataMappingTests.swift in Sources */,
 				577267D0CF6482F764A2C547 /* PopoverAccessibilityTests.swift in Sources */,
+				606209394C1C2B5173001032 /* ProcessSpawnBudgetTests.swift in Sources */,
 				61E755A00FBB3FBE0B968635 /* RedactedPathResolverTests.swift in Sources */,
 				AD305AE5545FCF3141FCE4CC /* RetryItemActionsTests.swift in Sources */,
 				09FE1A1333EBC776963453A8 /* RetryTrashFlowTests.swift in Sources */,

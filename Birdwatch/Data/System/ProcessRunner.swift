@@ -6,10 +6,21 @@ nonisolated enum RunnerError: Error, Equatable {
     case nonZeroExit(code: Int32, stderr: String)
 }
 
+/// The spawn seam. Production is `ProcessRunner`; tests substitute a recording
+/// stub to assert HOW MANY times a tool is spawned per refresh cycle — a fact
+/// no output-level assertion can reach.
+///
+/// `timeout` is a requirement, not a defaulted convenience: C5 says every
+/// system tool runs under one, and a protocol requirement cannot carry a
+/// default, so every call through this seam names its own.
+nonisolated protocol ProcessRunning: Sendable {
+    func run(toolPath: String, arguments: [String], timeout: Duration) async throws -> String
+}
+
 /// Runs a tool at a fixed absolute path and returns its stdout. Actor-isolated
 /// so callers hop off the MainActor for the whole spawn/wait/read cycle
 /// (SE-0461: a `nonisolated async` version would run on the caller's actor).
-actor ProcessRunner {
+actor ProcessRunner: ProcessRunning {
     /// Cap on captured bytes per stream; a runaway tool keeps getting drained
     /// (so it never deadlocks on pipe backpressure) but we stop retaining.
     static let maxCapturedBytes = 4 * 1024 * 1024
