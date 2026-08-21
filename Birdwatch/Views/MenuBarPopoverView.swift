@@ -59,10 +59,22 @@ struct MenuBarPopoverView: View {
                 .padding(.top, 10)
 
             if let hours = store.bandwidth?.hours, !hours.isEmpty {
-                Sparkline(hours: hours)
-                    .frame(height: 26)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
+                VStack(alignment: .leading, spacing: 3) {
+                    Sparkline(hours: hours)
+                        .frame(height: 26)
+                    // The chart carried no caption at all: sighted users saw
+                    // bars with no unit and no hint that the figures are
+                    // attributed, not measured (C2).
+                    Text("iCloud traffic per hour, estimated")
+                        .scaledFont(size: 10.5)
+                        .foregroundStyle(Surface.fg2)
+                        // The chart element already speaks this line as its
+                        // accessibility label; leaving the caption visible to
+                        // VoiceOver made it read twice in a row.
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
             }
 
             if !store.syncingApps.isEmpty {
@@ -146,11 +158,22 @@ struct MenuBarPopoverView: View {
         HStack(spacing: 10) {
             HStack(spacing: 10) {
                 ColorTile(colorHex: app.tileColorHex, letter: app.name, size: 22)
-                Text(app.name)
-                    .scaledFont(size: 12.5, weight: .semibold)
-                    .foregroundStyle(Surface.fg)
-                    .lineLimit(1)
-                    .frame(minWidth: 118, alignment: .leading)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(app.name)
+                        .scaledFont(size: 12.5, weight: .semibold)
+                        .foregroundStyle(Surface.fg)
+                        .lineLimit(1)
+                    // Dimming was the ONLY mark of a muted row, which reads as
+                    // nothing at all to anyone who cannot compare two rows'
+                    // opacity. Say it in words as well.
+                    if store.isMuted(appID: app.id) {
+                        Label("Muted", systemImage: "bell.slash.fill")
+                            .scaledFont(size: 10, weight: .semibold)
+                            .foregroundStyle(Surface.fg2)
+                            .labelStyle(.titleAndIcon)
+                    }
+                }
+                .frame(minWidth: 118, alignment: .leading)
                 MiniProgressBar(progress: appProgress(app), label: "\(app.name) sync progress",
                                 indeterminate: store.progressIsIndeterminate(appID: app.id))
                 // No percent when the channel has none (see TransferItem.isIndeterminate).
@@ -162,6 +185,9 @@ struct MenuBarPopoverView: View {
                     .frame(minWidth: 32, alignment: .trailing)
             }
             .accessibilityElement(children: .combine)
+            // Muting silences notifications only — it never pauses sync, so the
+            // value must not read as "paused".
+            .accessibilityValue(store.isMuted(appID: app.id) ? "Notifications muted" : "")
             // Quick "mute": dims the row and silences the app's notifications.
             // It does NOT (and cannot) pause the app's iCloud sync.
             Button {
@@ -246,7 +272,8 @@ struct MenuBarPopoverView: View {
 // MARK: - Sparkline
 
 /// Tiny recent-bandwidth sparkline: one bar per hour of combined traffic.
-private struct Sparkline: View {
+/// Internal, not private, so its spoken summary is unit-testable.
+struct Sparkline: View {
     let hours: [BandwidthHourSample]
 
     var body: some View {
@@ -270,6 +297,24 @@ private struct Sparkline: View {
             }
             .fill(Palette.accent.opacity(0.55))
         }
-        .accessibilityHidden(true)
+        // Was .accessibilityHidden(true): the only bandwidth figure in the
+        // popover, unreadable to VoiceOver. Summarize the series instead of
+        // exposing 24 unlabeled bars, and keep the estimate wording (C2).
+        .accessibilityElement()
+        .accessibilityLabel("iCloud traffic per hour, estimated")
+        .accessibilityValue(Self.summary(of: hours))
+    }
+
+    /// "N hours, peak X in the busiest hour, Y total" — derived from the same
+    /// samples the bars are drawn from, so the spoken value and the picture can
+    /// never disagree. An all-zero series says so rather than implying traffic.
+    static func summary(of hours: [BandwidthHourSample]) -> String {
+        let totals = hours.map { $0.uploadedBytes + $0.downloadedBytes }
+        let hourWord = hours.count == 1 ? "hour" : "hours"
+        guard let peak = totals.max(), peak > 0 else {
+            return "\(hours.count) \(hourWord), no traffic recorded"
+        }
+        let sum = totals.reduce(Int64(0), +)
+        return "\(hours.count) \(hourWord), peak \(Format.size(peak)) in one hour, \(Format.size(sum)) in total"
     }
 }

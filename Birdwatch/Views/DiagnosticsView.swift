@@ -48,7 +48,11 @@ struct DiagnosticsView: View {
     @State private var retryStatusClearTask: Task<Void, Never>?
     @State private var copiedDiagnoseCommand = false
     @State private var copyResetTask: Task<Void, Never>?
-    private let maintenance = MaintenanceActions()
+    /// One actor for the whole app, created by `BirdwatchApp` and injected —
+    /// NOT a stored `let`, which minted a fresh actor every time SwiftUI
+    /// re-created this struct and left each in-flight restart talking to an
+    /// instance nobody else could see.
+    @Environment(\.maintenanceActions) private var maintenance
     @AppStorage("bw_setup_complete") private var setupComplete = true
 
     private struct ActionStatus: Equatable {
@@ -103,6 +107,24 @@ struct DiagnosticsView: View {
 
             SourceFootnote(text: "Daemon stats via proc_pid_rusage · engine state via brctl status · retry queue, budgets and item counts via brctl dump -i")
         }
+        // The three transient-status timers are the only tasks this screen
+        // owns, and they outlive it: each sleeps 10s before clearing a line
+        // that is already gone once the sidebar switches away. Cancel them
+        // with the view and drop the lines, so a revisit starts clean.
+        //
+        // In-flight maintenance operations are deliberately NOT cancelled
+        // here. The SIGTERM has already been sent by then; cancelling would
+        // only abandon the bounded respawn poll that decides whether the
+        // restart is reported as confirmed or unconfirmed — throwing away the
+        // observation, not the effect.
+        .onDisappear {
+            statusClearTask?.cancel()
+            retryStatusClearTask?.cancel()
+            copyResetTask?.cancel()
+            actionStatus = nil
+            retryStatus = nil
+            copiedDiagnoseCommand = false
+        }
         .sheet(item: $confirmAction, onDismiss: {
             if let id = pendingActionID {
                 focusedActionID = id
@@ -110,7 +132,10 @@ struct DiagnosticsView: View {
             }
         }) { action in
             ConfirmDialog(action: action) {
-                logger.info("Confirmed maintenance action: \(action.title, privacy: .public) — \(action.command, privacy: .public)")
+                // NOT .public: a retry-row Trash action puts the file name in
+                // `title` and its full path in `command`, so this one line
+                // would print both to a log anyone can read (C7).
+                logger.info("Confirmed maintenance action: \(action.title, privacy: .private) — \(action.command, privacy: .private)")
                 action.perform()
                 confirmAction = nil
             } onCancel: {
@@ -131,6 +156,9 @@ struct DiagnosticsView: View {
         Task {
             do {
                 let result = try await operation()
+                // `title` stays .public deliberately: every caller passes a
+                // daemon name or a `maintenanceItems` title — a closed, static
+                // set with no user data in it. The results do not (C7).
                 logger.info("\(title, privacy: .public) succeeded: \(result, privacy: .private)")
                 let tone: ActionStatus.Tone =
                     result == MaintenanceActions.respawnNotObserved ? .caution : .success
@@ -543,7 +571,8 @@ struct DiagnosticsView: View {
                     .accessibilityLabel("Reveal \(item.name) in Finder")
                 if canTrash {
                     Button(isEmptyFolder ? "Move to Trash" : "Move to Trash…") {
-                        logger.info("Move to Trash tapped for retry row \(item.id, privacy: .public)")
+                        // bird's item id names one of the user's files (C7).
+                        logger.info("Move to Trash tapped for retry row \(item.id, privacy: .private)")
                         confirmTrash(item, absolutePath: absolute)
                     }
                     .modifier(ProminentWhen(prominent: isEmptyFolder))
@@ -578,11 +607,11 @@ struct DiagnosticsView: View {
             perform: {
                 // The whole operation is the store's — trash, then forget, then
                 // refresh, and the row only goes when the file actually did.
-                logger.info("Trash confirmed for retry row \(id, privacy: .public); calling the store")
+                logger.info("Trash confirmed for retry row \(id, privacy: .private); calling the store")
                 Task {
                     switch await store.trashRetryQueueItem(item) {
                     case .moved(let name, let destination):
-                        logger.info("Store reported MOVED for \(id, privacy: .public)")
+                        logger.info("Store reported MOVED for \(id, privacy: .private)")
                         // Where it landed is part of the outcome: iCloud Drive
                         // keeps its own trash, so "check the Trash" alone sends
                         // people to the wrong folder.
@@ -594,7 +623,8 @@ struct DiagnosticsView: View {
                             rowID: item.id
                         ))
                     case .failed(let name, let reason):
-                        logger.error("Move to Trash failed: \(reason, privacy: .public)")
+                        // The reason quotes the file name back at us (C7).
+                        logger.error("Move to Trash failed: \(reason, privacy: .private)")
                         showRetryStatus(ActionStatus(
                             text: "Couldn’t move “\(name)” to the Trash: \(reason)",
                             tone: .failure,

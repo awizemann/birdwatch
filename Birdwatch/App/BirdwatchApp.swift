@@ -55,6 +55,10 @@ struct BirdwatchApp: App {
     @State private var store: SyncStore
     /// Keeps the NSApplication observers alive for the app's lifetime.
     private let usageLifecycle: UsageLifecycle
+    /// The app's one maintenance actor, handed to the view tree through the
+    /// environment so Diagnostics cannot mint a fresh one per body pass.
+    /// Allocating it runs no Process and touches no disk (C4).
+    @State private var maintenance = MaintenanceActions()
 
     init() {
         let usage = UsageAnalytics.makeTracker()
@@ -71,6 +75,7 @@ struct BirdwatchApp: App {
         Window("Birdwatch", id: "main") {
             RootView()
                 .environment(store)
+                .environment(\.maintenanceActions, maintenance)
                 .frame(minWidth: 900, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
