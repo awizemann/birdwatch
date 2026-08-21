@@ -1,0 +1,5 @@
+{"input":{"keys":["down","down","down","down","down","down"]},"marks":17,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/001.png","step":1,"tool":"key_shortcut","ts":"2026-08-21T13:49:25Z"}
+{"input":{"keys":["down"]},"marks":20,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/002.png","step":2,"tool":"key_shortcut","ts":"2026-08-21T13:49:28Z"}
+{"input":{"id":14},"marks":2,"point_size":{"h":251,"w":469},"result":"ok","screenshot":"steps/003.png","step":3,"tool":"tap_mark","ts":"2026-08-21T13:49:31Z"}
+{"input":{"id":1},"marks":20,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/004.png","step":4,"tool":"tap_mark","ts":"2026-08-21T13:49:46Z"}
+{"input":{"dx":0,"dy":400,"x":632,"y":400},"marks":20,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/005.png","step":5,"tool":"scroll","ts":"2026-08-21T13:49:51Z"}
