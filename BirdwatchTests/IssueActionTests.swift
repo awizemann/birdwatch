@@ -15,8 +15,7 @@ import Testing
 struct IssueActionTests {
 
     private static func issue(_ action: IssueAction) -> IssueItem {
-        IssueItem(id: "i", severity: .warning, title: "t", meta: "m", reason: "r",
-                  action: action, symbolName: "circle")
+        TestIssues.make(id: "i", action: action, title: "t", meta: "m", reason: "r")
     }
 
     // The label is derived, so it can never disagree with what the button does.

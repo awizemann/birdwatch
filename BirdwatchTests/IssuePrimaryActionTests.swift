@@ -16,10 +16,8 @@ struct IssuePrimaryActionTests {
         severity: IssueSeverity = .warning,
         id: String = "issue-x"
     ) -> IssueItem {
-        IssueItem(
-            id: id, severity: severity, title: "t", meta: "m", reason: "r",
-            action: action, symbolName: "circle"
-        )
+        TestIssues.make(id: id, action: action, severity: severity,
+                        title: "t", meta: "m", reason: "r")
     }
 
     @Test("A conflict offers the version comparison, whatever action it carries")
@@ -97,8 +95,7 @@ struct IssueActionEffectTests {
     /// Takes the typed `action` (was a free-text `label:`): IssueItem's primary
     /// action is now the stored fact and the label is derived from it.
     private func issue(_ id: String, action: IssueAction, severity: IssueSeverity = .warning) -> IssueItem {
-        IssueItem(id: id, severity: severity, title: id, meta: "", reason: "",
-                  action: action, symbolName: "circle")
+        TestIssues.make(id: id, action: action, severity: severity)
     }
 
     @Test("Open Diagnostics navigates and removes nothing")
