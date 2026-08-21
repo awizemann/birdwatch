@@ -72,6 +72,16 @@ final class SyncStore {
     private(set) var notifications: [AppNotification] = []
     private(set) var hasLoaded = false
 
+    /// Monitoring was paused before the first snapshot ever landed: nothing is
+    /// loading and nothing will until monitoring resumes. Distinct from
+    /// `!hasLoaded` alone — a spinner here would claim work that is not
+    /// happening (C1), so the UI must say "paused" instead.
+    var isPausedBeforeFirstLoad: Bool { isGloballyPaused && !hasLoaded }
+
+    /// The refresh a resume kicks off when nothing has ever loaded. Exposed so
+    /// tests can await it deterministically instead of sleeping (C8).
+    private(set) var pendingResumeRefresh: Task<Void, Never>?
+
     // Navigation & UI state
     /// Every route into a view lands here (sidebar binding, ⌘-digit, search,
     /// popover, in-view links), so the `view_shown` event is recorded once, in
@@ -491,6 +501,17 @@ final class SyncStore {
     func togglePauseAll() {
         isGloballyPaused.toggle()
         record(isGloballyPaused ? .monitoringPaused : .monitoringResumed)
+        // Audit P3: monitoring paused BEFORE the first snapshot ever landed
+        // leaves `hasLoaded` false, and nothing else fetches again — the
+        // window's `.task` already ran, so resuming from the toolbar left the
+        // loading state stuck forever. Resume is the trigger in that one case.
+        // Not on every resume: an already-loaded store keeps its debounce and
+        // whatever refresh the caller chooses to run.
+        if !isGloballyPaused && !hasLoaded {
+            pendingResumeRefresh = Task { [weak self] in
+                await self?.refresh(force: true)
+            }
+        }
     }
 
     /// Mute/unmute an app (popover quick action). Does not touch sync.

@@ -241,6 +241,59 @@ struct SyncStoreTests {
         #expect(source.snapshotCallCount == 2, "resume restores fetching")
     }
 
+    // Audit P3. The window's `.task` fires `refresh()` exactly once; if
+    // monitoring is already paused when it runs (paused from the menu bar
+    // before the window was ever opened), the fetch is skipped, `hasLoaded`
+    // stays false, and the UI's `!hasLoaded` spinner had nothing left to
+    // resolve it — resuming did not refetch. Fails on the pre-fix store.
+    @Test("Pausing before the first load ever completes still resolves the loading state on resume")
+    func pauseBeforeFirstLoadResolves() async {
+        let source = StubSyncSource(snapshot: .minimal(apps: [.stub(id: "docs", status: .upToDate)]))
+        let store = SyncStore(source: source)
+
+        store.togglePauseAll()
+        await store.refresh(force: true)
+        #expect(source.snapshotCallCount == 0, "paused monitoring never fetches — that part is correct")
+        #expect(!store.hasLoaded)
+        // The honest state the UI must render instead of a spinner (C1):
+        // nothing is loading, because monitoring is off.
+        #expect(store.isPausedBeforeFirstLoad)
+
+        store.togglePauseAll()          // resume
+        await store.pendingResumeRefresh?.value
+
+        #expect(store.hasLoaded, "resume must kick the first load — otherwise the spinner is permanent")
+        #expect(!store.isPausedBeforeFirstLoad)
+        #expect(source.snapshotCallCount == 1)
+        #expect(store.apps.count == 1)
+    }
+
+    // The other half of P3: pausing while the FIRST fetch is already in flight
+    // must still land that snapshot — the work is done, dropping it would
+    // strand the loading state with no data to show.
+    @Test("Pausing during an in-flight first refresh still lands that snapshot")
+    func pauseDuringFirstRefreshStillLands() async {
+        let source = GatedSyncSource(snapshot: .minimal(apps: [.stub(id: "docs", status: .upToDate)]))
+        let store = SyncStore(source: source)
+
+        let first = Task { await store.refresh(force: true) }
+        // Deterministic hand-off, not a sleep: yield until the gated source
+        // has actually entered currentSnapshot.
+        while source.snapshotCallCount == 0 { await Task.yield() }
+        #expect(!store.hasLoaded)
+
+        store.togglePauseAll()          // pause mid-flight
+        source.releaseAll()
+        await first.value
+
+        #expect(store.hasLoaded, "an in-flight first snapshot is never dropped by a pause")
+        #expect(!store.isPausedBeforeFirstLoad)
+        #expect(store.apps.count == 1)
+        // And a resume must not double-fetch: something already loaded.
+        store.togglePauseAll()
+        #expect(store.pendingResumeRefresh == nil)
+    }
+
     @Test("pendingFileCount reports last-known pending items, unchanged by a monitoring pause")
     func pendingFileCount() async {
         let (store, _) = await makeStore(apps: [

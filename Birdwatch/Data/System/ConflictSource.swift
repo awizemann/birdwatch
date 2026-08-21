@@ -232,6 +232,38 @@ enum ConflictSource {
                 logger.info("resolve: no unresolved versions for \(fileURL.path, privacy: .private) — already resolved")
                 return true
             }
+            return applyResolution(
+                fileURL: fileURL, keepVersionID: keepVersionID, unresolved: unresolved, root: root
+            )
+        } catch {
+            let ns = error as NSError
+            logger.error("resolve failed for \(fileURL.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
+            return false
+        }
+    }
+
+    /// The mutating half of `resolve`, split out from the *discovery* of the
+    /// unresolved versions so it can be exercised against REAL `NSFileVersion`
+    /// objects (`NSFileVersion.addOfItem` can create versions on a scratch
+    /// file, but only iCloud can flag one as an unresolved *conflict*). Every
+    /// mutation below — `replaceItem`, `removeOtherVersionsOfItem`, the
+    /// conflicted-copy claim — is the production API, not a stand-in.
+    ///
+    /// Synchronous and `nonisolated`: `NSFileVersion` is not `Sendable`, so
+    /// the version list must never cross an isolation boundary.
+    nonisolated static func applyResolution(
+        fileURL: URL,
+        keepVersionID: String,
+        unresolved: [NSFileVersion],
+        root: URL = DriveFolderSource.cloudDocsURL
+    ) -> Bool {
+        // Repeated on this path too: it is the one that actually writes, and
+        // it is reachable without going through `resolve`.
+        guard isUnderCloudDocsRoot(fileURL, root: root) else {
+            logger.error("applyResolution: refusing to mutate a path outside CloudDocs: \(fileURL.path, privacy: .private)")
+            return false
+        }
+        do {
             switch keepVersionID {
             case currentVersionID:
                 break   // the on-disk file already is the kept version
@@ -239,8 +271,7 @@ enum ConflictSource {
                 for version in unresolved {
                     do {
                         try coordinate(.write(fileURL, options: [.forMerging])) {
-                            let dest = conflictedCopyURL(for: fileURL)
-                            try FileManager.default.copyItem(at: version.url, to: dest)
+                            let dest = try claimConflictedCopy(of: version.url, nextTo: fileURL)
                             logger.info("resolve: preserved conflict version as \(dest.lastPathComponent, privacy: .private)")
                         }
                     } catch {
@@ -271,18 +302,78 @@ enum ConflictSource {
         }
     }
 
-    /// "<name> (conflicted copy).ext", numbered if that already exists.
-    nonisolated static func conflictedCopyURL(for fileURL: URL) -> URL {
+    /// "<name> (conflicted copy).ext" for attempt 0, then
+    /// "<name> (conflicted copy 2).ext", "… 3" and so on.
+    ///
+    /// PURE: it never touches the filesystem, so it cannot go stale between a
+    /// check and a create. Choosing a free name is `claimConflictedCopy`'s job,
+    /// and it does it by claiming, not by asking.
+    nonisolated static func conflictedCopyURL(for fileURL: URL, attempt: Int = 0) -> URL {
         let dir = fileURL.deletingLastPathComponent()
         let ext = fileURL.pathExtension
         let base = fileURL.deletingPathExtension().lastPathComponent
-        var attempt = 0
-        while true {
-            let suffix = attempt == 0 ? " (conflicted copy)" : " (conflicted copy \(attempt + 1))"
-            var candidate = dir.appending(path: base + suffix)
-            if !ext.isEmpty { candidate = candidate.appendingPathExtension(ext) }
-            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
-            attempt += 1
+        let suffix = attempt == 0 ? " (conflicted copy)" : " (conflicted copy \(attempt + 1))"
+        var candidate = dir.appending(path: base + suffix)
+        if !ext.isEmpty { candidate = candidate.appendingPathExtension(ext) }
+        return candidate
+    }
+
+    /// A directory holding this many conflicted copies of one file is
+    /// pathological; failing loudly beats looping forever.
+    nonisolated static let maxConflictedCopyAttempts = 1000
+
+    /// Copies `sourceURL` (a conflict version's store URL) next to `fileURL`
+    /// under the first free "(conflicted copy)" name, and claims that name
+    /// ATOMICALLY. Returns the URL actually claimed.
+    ///
+    /// The bytes land on a hidden temporary in the same directory first, then
+    /// `renamex_np` with `RENAME_EXCL` moves them into place: the kernel
+    /// refuses the rename when the name is taken, so no racing writer (`bird`,
+    /// a second resolve, the user) can slip in between "is this name free?"
+    /// and "create it" — the check-then-act window this replaces could litter
+    /// or clobber. `FileManager.fileExists` cannot close that window even
+    /// single-threaded: it FOLLOWS symlinks, so a dangling symlink at the
+    /// candidate name reads as free and the copy then fails, losing that
+    /// version. `renamex_np` operates on the link itself and reports EEXIST.
+    ///
+    /// Rename (not `link`) so directory-shaped versions — packages such as
+    /// `.rtfd` — are preserved too; `link(2)` refuses directories.
+    nonisolated static func claimConflictedCopy(of sourceURL: URL, nextTo fileURL: URL) throws -> URL {
+        let fm = FileManager.default
+        let dir = fileURL.deletingLastPathComponent()
+        let temp = dir.appending(path: ".bw-conflicted-copy-\(UUID().uuidString)")
+        try fm.copyItem(at: sourceURL, to: temp)
+        var claimed = false
+        // The temporary must never survive a failure — a stray dotfile in the
+        // user's CloudDocs folder would sync to every device. If even the
+        // cleanup fails, say so (C7): a leaked temp is a real, visible symptom.
+        defer {
+            if !claimed {
+                do { try fm.removeItem(at: temp) } catch {
+                    let ns = error as NSError
+                    logger.error("resolve: could not remove the conflicted-copy temporary \(temp.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
+                }
+            }
         }
+
+        for attempt in 0..<maxConflictedCopyAttempts {
+            let candidate = conflictedCopyURL(for: fileURL, attempt: attempt)
+            if renamex_np(temp.path, candidate.path, UInt32(RENAME_EXCL)) == 0 {
+                claimed = true
+                return candidate
+            }
+            let code = errno
+            // EEXIST is the ordinary "that number is taken" answer; anything
+            // else (permissions, read-only volume) is real and must surface.
+            guard code == EEXIST else { throw posixError(code, path: candidate.path) }
+        }
+        throw posixError(EEXIST, path: conflictedCopyURL(for: fileURL, attempt: maxConflictedCopyAttempts - 1).path)
+    }
+
+    private nonisolated static func posixError(_ code: Int32, path: String) -> NSError {
+        NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
+            NSFilePathErrorKey: path,
+            NSLocalizedDescriptionKey: String(cString: strerror(code))
+        ])
     }
 }
