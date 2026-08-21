@@ -226,7 +226,7 @@ struct UsageStoreHookTests {
     @Test("Pause / mute / dismiss / conflict / notifications record their events")
     func actions() async {
         let app = AppSyncState.stub(id: "notes", status: .upToDate)
-        let issue = IssueItem(id: "i1", severity: .warning, title: "", meta: "", reason: "", primaryActionLabel: "", symbolName: "")
+        let issue = IssueItem(id: "i1", severity: .warning, title: "", meta: "", reason: "", action: .none, symbolName: "")
         let (store, tracker) = makeStore(snapshot: .minimal(apps: [app], issues: [issue]))
         await store.refresh(force: true)
         store.togglePauseAll()

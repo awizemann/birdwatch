@@ -170,7 +170,7 @@ enum ConflictSource {
             title: "Sync conflict in \(fileURL.deletingLastPathComponent().lastPathComponent)",
             meta: "\(fileURL.lastPathComponent) · \(versions.count) versions",
             reason: "This file was edited on more than one device, so iCloud kept every version instead of guessing. Review them and choose which to keep — nothing has been lost.",
-            primaryActionLabel: "Review versions",
+            action: .reviewVersions,
             symbolName: "doc.on.doc",
             // Attributed to the owning CloudDocs app so per-app mute can
             // suppress the banner (same mapping the transfer rows use).
