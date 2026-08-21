@@ -1,7 +1,61 @@
 import SwiftUI
+import AppKit
 import os
 
 private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", category: "issues")
+
+/// What an issue card's primary button actually does when clicked.
+///
+/// Birdwatch observes iCloud sync, it does not fix it: there is no public API
+/// to resume an upload, clear an account-session error or free storage. So the
+/// button offers only operations the app can genuinely perform, and its label
+/// states exactly that operation. An issue whose DTO asks for something
+/// Birdwatch cannot do gets no primary button at all rather than one that
+/// implies work happened (C1).
+enum IssuePrimaryAction: String, Sendable, Hashable {
+    /// Opens the conflict comparison screen for this issue.
+    case reviewVersions
+    /// Switches to the Diagnostics screen, where the engine output behind the
+    /// issue (SyncHealthReport, `brctl` state) is shown verbatim.
+    case openDiagnostics
+    /// Opens System Settings › Apple Account, the only place iCloud storage
+    /// can actually be managed or upgraded.
+    case openAppleAccountSettings
+
+    var label: String {
+        switch self {
+        case .reviewVersions: "Review versions"
+        case .openDiagnostics: "Open Diagnostics"
+        case .openAppleAccountSettings: "Manage iCloud in System Settings…"
+        }
+    }
+
+    var accessibilityHint: String {
+        switch self {
+        case .reviewVersions: "Compares the conflicting versions of this file"
+        case .openDiagnostics: "Shows the engine output this issue came from"
+        case .openAppleAccountSettings: "Opens System Settings"
+        }
+    }
+
+    /// Resolves the action from the issue, so the rendered label can never
+    /// outlive what the click does. Conflicts are keyed on severity (the
+    /// conflict detail is what the screen needs); everything else on the
+    /// action the source asked for. An unrecognised request resolves to nil —
+    /// no button — which is the honest answer for anything Birdwatch cannot
+    /// carry out (e.g. the "Resume upload" the mock source models).
+    init?(issue: IssueItem) {
+        if issue.isConflict {
+            self = .reviewVersions
+            return
+        }
+        switch issue.primaryActionLabel {
+        case "Open Diagnostics": self = .openDiagnostics
+        case "Manage storage": self = .openAppleAccountSettings
+        default: return nil
+        }
+    }
+}
 
 /// Issues — stacked severity-accented cards with plain-language reasons (handoff §5).
 struct IssuesView: View {
@@ -75,28 +129,21 @@ private struct IssueCard: View {
                         .frame(maxWidth: 560, alignment: .leading)
 
                     HStack(spacing: 8) {
-                        Button(issue.primaryActionLabel) {
-                            if issue.isConflict {
-                                store.conflictIssueID = issue.id
-                            } else if issue.primaryActionLabel == "Manage storage" {
-                                // TODO(Phase 1): perform the real operation (open storage
-                                // management / upgrade flow), not just navigation.
-                                logger.info("Issue action: \(issue.primaryActionLabel, privacy: .public) for \(issue.id, privacy: .public)")
-                                store.navigate(to: .storage, via: .link)
-                            } else {
-                                // TODO(Phase 1): perform the real operation (e.g. actually
-                                // resume the upload) — logging + dismissal is a placeholder.
-                                logger.info("Issue action: \(issue.primaryActionLabel, privacy: .public) for \(issue.id, privacy: .public)")
-                                store.dismissIssue(id: issue.id)
-                            }
+                        // No button at all when Birdwatch cannot honestly do
+                        // what the issue asks for — only "Dismiss", which
+                        // removes the card and nothing else.
+                        if let action = IssuePrimaryAction(issue: issue) {
+                            Button(action.label) { perform(action) }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Palette.accent)
+                                .accessibilityHint(action.accessibilityHint)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Palette.accent)
 
                         Button("Dismiss") {
                             store.dismissIssue(id: issue.id)
                         }
                         .buttonStyle(.bordered)
+                        .accessibilityHint("Removes this issue from the list")
                     }
                     .controlSize(.regular)
                     .padding(.top, 4)
@@ -110,6 +157,32 @@ private struct IssueCard: View {
                 .frame(width: 3)
                 .padding(.vertical, 10)
                 .accessibilityHidden(true)
+        }
+    }
+
+    private func perform(_ action: IssuePrimaryAction) {
+        // The id can be a hashed file path (ConflictSource), so it stays private.
+        logger.info("Issue action: \(action.label, privacy: .public) for \(issue.id, privacy: .private)")
+        switch action {
+        case .reviewVersions:
+            store.conflictIssueID = issue.id
+        case .openDiagnostics:
+            store.navigate(to: .diagnostics, via: .link)
+        case .openAppleAccountSettings:
+            openAppleAccountSettings()
+        }
+    }
+
+    /// Same pane Storage and Devices open — the one surface that can actually
+    /// change an iCloud plan. A refusal from the URL system is logged rather
+    /// than swallowed: the click then did nothing, and the log says so.
+    private func openAppleAccountSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") else {
+            logger.error("Apple Account settings URL is malformed; cannot open System Settings")
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            logger.error("System Settings refused to open the Apple Account pane")
         }
     }
 }
