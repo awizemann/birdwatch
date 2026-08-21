@@ -38,6 +38,35 @@ enum IssuePrimaryAction: String, Sendable, Hashable {
         }
     }
 
+    /// Runs the action. This is the WHOLE body of the button's closure — the
+    /// view adds nothing — so a test that calls this exercises the same code a
+    /// click does, including the thing QA caught the old placeholder doing:
+    /// `.openDiagnostics` must NAVIGATE and must leave `store.issues` alone.
+    /// Only "Dismiss" removes a card.
+    func perform(on store: SyncStore, issueID: String) {
+        switch self {
+        case .reviewVersions:
+            store.conflictIssueID = issueID
+        case .openDiagnostics:
+            store.navigate(to: .diagnostics, via: .link)
+        case .openAppleAccountSettings:
+            Self.openAppleAccountSettings()
+        }
+    }
+
+    /// Same pane Storage and Devices open — the one surface that can actually
+    /// change an iCloud plan. A refusal from the URL system is logged rather
+    /// than swallowed: the click then did nothing, and the log says so.
+    static func openAppleAccountSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") else {
+            logger.error("Apple Account settings URL is malformed; cannot open System Settings")
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            logger.error("System Settings refused to open the Apple Account pane")
+        }
+    }
+
     /// Resolves the action from the issue, so the rendered label can never
     /// outlive what the click does. Conflicts are keyed on severity (the
     /// conflict detail is what the screen needs); everything else on the
@@ -163,26 +192,6 @@ private struct IssueCard: View {
     private func perform(_ action: IssuePrimaryAction) {
         // The id can be a hashed file path (ConflictSource), so it stays private.
         logger.info("Issue action: \(action.label, privacy: .public) for \(issue.id, privacy: .private)")
-        switch action {
-        case .reviewVersions:
-            store.conflictIssueID = issue.id
-        case .openDiagnostics:
-            store.navigate(to: .diagnostics, via: .link)
-        case .openAppleAccountSettings:
-            openAppleAccountSettings()
-        }
-    }
-
-    /// Same pane Storage and Devices open — the one surface that can actually
-    /// change an iCloud plan. A refusal from the URL system is logged rather
-    /// than swallowed: the click then did nothing, and the log says so.
-    private func openAppleAccountSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") else {
-            logger.error("Apple Account settings URL is malformed; cannot open System Settings")
-            return
-        }
-        if !NSWorkspace.shared.open(url) {
-            logger.error("System Settings refused to open the Apple Account pane")
-        }
+        action.perform(on: store, issueID: issue.id)
     }
 }
