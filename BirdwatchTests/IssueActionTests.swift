@@ -18,25 +18,21 @@ struct IssueActionTests {
         TestIssues.make(id: "i", action: action, title: "t", meta: "m", reason: "r")
     }
 
-    // The label is derived, so it can never disagree with what the button does.
-    // Fails if a case is added without a label, or a label is edited to
-    // describe a different action than the one it triggers.
-    @Test("Every action derives its own label; only .none has none")
-    func labelsAreDerived() {
-        #expect(IssueAction.reviewVersions.label == "Review versions")
-        #expect(IssueAction.openDiagnostics.label == "Open Diagnostics")
-        #expect(IssueAction.manageStorage.label == "Manage storage")
-        #expect(IssueAction.none.label.isEmpty)
+    // The model no longer carries any display copy — the button's title belongs
+    // to IssuePrimaryAction in the view layer. What is left to pin here is the
+    // case set itself and what each case promises.
+    //
+    // Fails if a case is ADDED or removed, which is the point: a new action is
+    // a new promise, and whoever adds one must decide here whether it offers a
+    // button and teach IssuesView's exhaustive switch to honour it.
+    @Test("The action cases are exactly these four, and only .none offers no button")
+    func actionCasesAndTheirPromises() {
+        #expect(Set(IssueAction.allCases) == [.reviewVersions, .openDiagnostics, .manageStorage, .none])
 
-        // Exhaustive over CaseIterable: a NEW case with an empty label would be
-        // an invisible button, so only .none may be empty.
         for action in IssueAction.allCases where action != .none {
-            #expect(!action.label.isEmpty, "\(action) would render a blank button")
-            #expect(Self.issue(action).hasPrimaryAction)
-            #expect(Self.issue(action).primaryActionLabel == action.label)
+            #expect(Self.issue(action).hasPrimaryAction, "\(action) must offer a button")
         }
         #expect(!Self.issue(.none).hasPrimaryAction)
-        #expect(Self.issue(.none).primaryActionLabel.isEmpty)
     }
 
     // C1: an issue must not promise an action Birdwatch cannot perform. The
@@ -56,16 +52,13 @@ struct IssueActionTests {
                 "what macOS does on its own is still worth saying")
     }
 
-    // Every issue the mock ships either has a real action or honestly has none
-    // — no issue may carry a label without a matching action.
-    @Test("Mock issues carry a typed action, and labels follow it")
+    // The mock must exercise every action path the crew verifies through --mock,
+    // including the honest no-button case. Fails if a shipped mock issue kind
+    // disappears from the fixture set.
+    @Test("Mock issues cover the actionable kinds and the action-less one")
     func mockIssuesAreTyped() async {
         let issues = await MockSyncSource().currentSnapshot().issues
         #expect(!issues.isEmpty)
-        for issue in issues {
-            #expect(issue.primaryActionLabel == issue.action.label)
-            #expect(issue.hasPrimaryAction == (issue.action != .none))
-        }
         #expect(issues.contains { $0.action == .reviewVersions })
         #expect(issues.contains { $0.action == .manageStorage })
         #expect(issues.contains { $0.action == .none })
@@ -80,6 +73,6 @@ struct IssueActionTests {
         let issues = SystemSyncSource.deriveIssues(quotaRemaining: 1_000_000)
         let quota = issues.first { $0.id == "issue-low-quota" }
         #expect(quota?.action == .manageStorage)
-        #expect(quota?.primaryActionLabel == "Manage storage")
+        #expect(quota?.hasPrimaryAction == true)
     }
 }

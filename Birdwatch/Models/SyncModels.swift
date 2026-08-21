@@ -167,10 +167,11 @@ enum IssueSeverity: String, Sendable, Hashable {
 
 /// What an issue's primary button DOES.
 ///
-/// Typed, not free text. The button used to be keyed on
-/// `primaryActionLabel`, so a source could invent a new label, compile
-/// cleanly, and silently render either no button or one that did nothing.
-/// A case here is a promise Birdwatch can keep.
+/// Typed, not free text. The button used to be keyed on a derived label
+/// string, so a source could invent a label, compile cleanly, and silently
+/// render either no button or one that did nothing. A case here is a promise
+/// Birdwatch can keep. The button's TITLE is the view layer's business
+/// (`IssuePrimaryAction`); no display copy lives in this model.
 nonisolated enum IssueAction: String, Sendable, Hashable, CaseIterable {
     case reviewVersions
     case openDiagnostics
@@ -179,19 +180,6 @@ nonisolated enum IssueAction: String, Sendable, Hashable, CaseIterable {
     /// issue itself. A button that does nothing would claim a capability that
     /// does not exist (C1).
     case none
-
-    /// The button's title, DERIVED from the action so a label can never
-    /// disagree with what the button does. Empty for `.none`, which shows no
-    /// button — read `IssueItem.hasPrimaryAction` rather than testing this
-    /// string.
-    var label: String {
-        switch self {
-        case .reviewVersions: "Review versions"
-        case .openDiagnostics: "Open Diagnostics"
-        case .manageStorage: "Manage storage"
-        case .none: ""
-        }
-    }
 }
 
 struct IssueItem: Sendable, Hashable, Identifiable {
@@ -211,9 +199,6 @@ struct IssueItem: Sendable, Hashable, Identifiable {
     var appID: String? = nil
     var isConflict: Bool { severity == .conflict }
 
-    /// Display label for the primary button. Derived — never stored, so it
-    /// cannot drift from `action`.
-    var primaryActionLabel: String { action.label }
     /// Whether to show a primary button at all.
     var hasPrimaryAction: Bool { action != .none }
 }

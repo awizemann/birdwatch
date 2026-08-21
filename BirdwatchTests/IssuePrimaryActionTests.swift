@@ -52,9 +52,6 @@ struct IssuePrimaryActionTests {
     func unsupportedActionsResolveToNil() {
         #expect(IssuePrimaryAction(issue: issue(action: .none)) == nil)
         #expect(IssuePrimaryAction(issue: issue(action: .none, severity: .error)) == nil)
-        // The label that fed the old string switch is empty for .none, so the
-        // "" case it used to test is now unreachable by construction.
-        #expect(issue(action: .none).primaryActionLabel.isEmpty)
         #expect(!issue(action: .none).hasPrimaryAction)
     }
 
