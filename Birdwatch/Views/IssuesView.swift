@@ -68,20 +68,30 @@ enum IssuePrimaryAction: String, Sendable, Hashable {
     }
 
     /// Resolves the action from the issue, so the rendered label can never
-    /// outlive what the click does. Conflicts are keyed on severity (the
-    /// conflict detail is what the screen needs); everything else on the
-    /// action the source asked for. An unrecognised request resolves to nil —
-    /// no button — which is the honest answer for anything Birdwatch cannot
-    /// carry out (e.g. the "Resume upload" the mock source models).
+    /// outlive what the click does.
+    ///
+    /// Switches on the TYPED `issue.action`, never on the label: the label is
+    /// derived from the action now, so keying on it would re-introduce the
+    /// coupling the typed DTO removed — and this switch is exhaustive, so a
+    /// new `IssueAction` case breaks the build here instead of silently
+    /// rendering no button.
+    ///
+    /// Two rules, in order. A conflict always offers the version comparison
+    /// whatever the source asked for, because the conflict screen is what that
+    /// card exists for. Otherwise `.none` — the source saying there is nothing
+    /// Birdwatch can do — resolves to nil, which is exactly
+    /// `!issue.hasPrimaryAction` and is what makes the view render no button
+    /// rather than a dead one (C1).
     init?(issue: IssueItem) {
         if issue.isConflict {
             self = .reviewVersions
             return
         }
-        switch issue.primaryActionLabel {
-        case "Open Diagnostics": self = .openDiagnostics
-        case "Manage storage": self = .openAppleAccountSettings
-        default: return nil
+        switch issue.action {
+        case .reviewVersions: self = .reviewVersions
+        case .openDiagnostics: self = .openDiagnostics
+        case .manageStorage: self = .openAppleAccountSettings
+        case .none: return nil
         }
     }
 }
