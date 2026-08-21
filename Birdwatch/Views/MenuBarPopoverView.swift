@@ -10,10 +10,16 @@ struct MenuBarPopoverView: View {
         Group {
             if store.hasLoaded {
                 content
+            } else if ContentRoute(store: store) == .pausedBeforeFirstLoad {
+                // Paused before anything loaded: nothing is in flight, so the
+                // spinner would be claiming work that is not happening (C1).
+                MonitoringPausedState(compact: true)
+                    .frame(width: 328)
             } else {
                 ProgressView()
                     .controlSize(.small)
                     .frame(width: 328, height: 120)
+                    .accessibilityLabel("Loading iCloud sync state")
             }
         }
         // Cached-first: `content` renders from the store's existing snapshot on

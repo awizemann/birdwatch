@@ -166,6 +166,7 @@ private struct IssueCard: View {
                                 .buttonStyle(.borderedProminent)
                                 .tint(Palette.accent)
                                 .accessibilityHint(action.accessibilityHint)
+                                .accessibilityIdentifier(Self.primaryActionID(issue))
                         }
 
                         Button("Dismiss") {
@@ -173,6 +174,7 @@ private struct IssueCard: View {
                         }
                         .buttonStyle(.bordered)
                         .accessibilityHint("Removes this issue from the list")
+                        .accessibilityIdentifier(Self.dismissActionID(issue))
                     }
                     .controlSize(.regular)
                     .padding(.top, 4)
@@ -188,6 +190,19 @@ private struct IssueCard: View {
                 .accessibilityHidden(true)
         }
     }
+
+    /// Stable identities for the two buttons, so a test harness targets the
+    /// one it means instead of a position.
+    ///
+    /// This is not cosmetic. When a card has no primary action, "Dismiss"
+    /// slides into the x where primaries begin, so a click resolved from a
+    /// screenshot mark hits Dismiss and looks exactly like a primary action
+    /// that silently deleted the card — the shape of the failure QA reported
+    /// against this screen. An identifier removes the ambiguity entirely.
+    /// The id is bird's item identity or an FNV hash, never a path, and
+    /// identifiers are not spoken by VoiceOver or written to any log.
+    static func primaryActionID(_ issue: IssueItem) -> String { "issue-primary-\(issue.id)" }
+    static func dismissActionID(_ issue: IssueItem) -> String { "issue-dismiss-\(issue.id)" }
 
     private func perform(_ action: IssuePrimaryAction) {
         // The id can be a hashed file path (ConflictSource), so it stays private.
