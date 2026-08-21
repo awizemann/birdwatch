@@ -144,17 +144,20 @@ final class SystemSyncSource: SyncSource {
         async let quotaTask = cloudDocs.quotaRemaining()
         // One ps spawn per cycle, shared by daemon stats and bandwidth (audit:
         // the two independent spawns walked the whole process table twice).
-        let psRaw = await daemonStats.sampleRaw()
-        async let daemonsTask = daemonStats.sample(psOutput: psRaw)
+        // Both consumers go through `sampleProcessStats` — the single place
+        // that owns that guarantee, and the one a test can pin.
+        async let processStatsTask = Self.sampleProcessStats(
+            daemonStats: daemonStats, bandwidth: bandwidthSource
+        )
         // §6: time-box system scans and return partial results — a cold-metadata
         // CloudDocs enumeration (getattrlistbulk on placeholders) blocked first
         // paint for tens of seconds. Empty now, complete on a later cycle.
         async let foldersTask = Self.withTimeout(seconds: 5, fallback: [DriveFolder]()) {
             await DriveFolderSource.currentFolders(transfers: transfers)
         }
-        async let bandwidthTask = bandwidthSource.sample(psOutput: psRaw)
-        let (status, quota, daemons, folders, bandwidth) =
-            await (statusTask, quotaTask, daemonsTask, foldersTask, bandwidthTask)
+        let (status, quota, processStats, folders) =
+            await (statusTask, quotaTask, processStatsTask, foldersTask)
+        let (daemons, bandwidth) = processStats
         // Desktop & Documents are only iCloud data when the sync feature is on;
         // brctl status says so. Nothing reads those folders (or earns a TCC
         // prompt) until it does. Starts false; flips as soon as status confirms.
@@ -434,6 +437,25 @@ final class SystemSyncSource: SyncSource {
     /// True when brctl status reports the Desktop & Documents feature ON
     /// ("Desktop & Documents: current=YES"). The single source for every
     /// decision to touch ~/Desktop or ~/Documents.
+
+    /// The ONE `/bin/ps` of a refresh cycle. The process table is sampled once
+    /// and the SAME raw output feeds both consumers: daemon CPU/memory (which
+    /// aggregates multi-instance daemons to one row) and bandwidth pid
+    /// discovery (which needs every pid). Two independent spawns walked the
+    /// whole table twice per 15s cycle.
+    ///
+    /// Extracted so this guarantee lives in one callable place: a test drives
+    /// this exact function with a recording runner and counts the spawns.
+    nonisolated static func sampleProcessStats(
+        daemonStats: DaemonStatsSource,
+        bandwidth: BandwidthSource
+    ) async -> ([DaemonStat], BandwidthSummary) {
+        let psRaw = await daemonStats.sampleRaw()
+        async let daemons = daemonStats.sample(psOutput: psRaw)
+        async let summary = bandwidth.sample(psOutput: psRaw)
+        return await (daemons, summary)
+    }
+
     nonisolated static func desktopDocumentsSynced(_ status: BrctlStatus?) -> Bool {
         status?.apps.contains { $0.name.hasPrefix("Desktop") && $0.isCurrent } ?? false
     }

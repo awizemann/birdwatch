@@ -15,8 +15,11 @@ actor BandwidthSource {
     /// Daemons whose traffic we attribute to iCloud sync.
     private static let daemonNames: Set<String> = ["bird", "cloudd", "fileproviderd"]
 
-    private let runner = ProcessRunner()
+    private let runner: any ProcessRunning
     private var state = State()
+
+    /// Injected so tests can COUNT spawns; production gets the real runner.
+    init(runner: any ProcessRunning = ProcessRunner()) { self.runner = runner }
 
     // MARK: - Rolling state (pure value; advanced by a pure static func)
 
@@ -58,7 +61,7 @@ actor BandwidthSource {
             // Multi-pid syntax verified on this machine: repeated -p flags,
             // one CSV row per process that has (or had) network activity —
             // idle processes are simply absent from the output.
-            let csv = try await runner.run(toolPath: "/usr/bin/nettop", arguments: arguments)
+            let csv = try await runner.run(toolPath: "/usr/bin/nettop", arguments: arguments, timeout: .seconds(10))
             let readings = Dictionary(
                 Self.parseNettop(csv: csv).map { ($0.pid, Reading(bytesIn: $0.bytesIn, bytesOut: $0.bytesOut)) },
                 uniquingKeysWith: { a, b in Reading(bytesIn: a.bytesIn + b.bytesIn, bytesOut: a.bytesOut + b.bytesOut) }
@@ -82,7 +85,7 @@ actor BandwidthSource {
     private func discoverDaemonPids(psOutput: String? = nil) async -> [Int32] {
         if let psOutput { return Self.extractDaemonPids(psOutput: psOutput) }
         do {
-            let output = try await runner.run(toolPath: "/bin/ps", arguments: ["-axo", "pid,comm"])
+            let output = try await runner.run(toolPath: "/bin/ps", arguments: ["-axo", "pid,comm"], timeout: .seconds(10))
             return Self.extractDaemonPids(psOutput: output)
         } catch {
             logger.error("ps pid discovery failed: \(String(describing: error), privacy: .public)")
