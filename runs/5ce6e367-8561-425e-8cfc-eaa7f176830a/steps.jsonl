@@ -1,0 +1,9 @@
+{"kind":"observe","marks":17,"point_size":{"h":672,"w":1041},"result":"observed","screenshot":"steps/001.png","step":1,"ts":"2026-08-21T14:24:03Z"}
+{"input":{"keys":["down","down","down","down"]},"marks":21,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/002.png","step":2,"tool":"key_shortcut","ts":"2026-08-21T14:24:09Z"}
+{"input":{"keys":["down","down","down"]},"marks":17,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/003.png","step":3,"tool":"key_shortcut","ts":"2026-08-21T14:24:16Z"}
+{"input":{"keys":["down","down"]},"marks":17,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/004.png","step":4,"tool":"key_shortcut","ts":"2026-08-21T14:24:22Z"}
+{"input":{"keys":["down"]},"marks":22,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/005.png","step":5,"tool":"key_shortcut","ts":"2026-08-21T14:24:34Z"}
+{"input":{"id":19},"marks":21,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/006.png","step":6,"tool":"tap_mark","ts":"2026-08-21T14:24:40Z"}
+{"input":{"id":12},"marks":22,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/007.png","step":7,"tool":"tap_mark","ts":"2026-08-21T14:24:56Z"}
+{"input":{"id":21},"marks":22,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/008.png","step":8,"tool":"tap_mark","ts":"2026-08-21T14:25:04Z"}
+{"input":{"id":16},"marks":21,"point_size":{"h":672,"w":1041},"result":"ok","screenshot":"steps/009.png","step":9,"tool":"tap_mark","ts":"2026-08-21T14:25:26Z"}
