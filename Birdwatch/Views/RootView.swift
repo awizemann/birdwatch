@@ -129,24 +129,64 @@ struct RootView: View {
     }
 }
 
+/// What the main pane is showing. Extracted from the view so the one decision
+/// that can lie — showing a spinner while monitoring is paused, which claims
+/// work that is not happening (C1) — is unit-testable rather than only
+/// observable by eye.
+enum ContentRoute: Equatable {
+    /// Paused before anything ever loaded: nothing is in flight and nothing
+    /// will be until monitoring resumes. MUST NOT render a spinner.
+    case pausedBeforeFirstLoad
+    case loading
+    case conflict(String)
+    case app(String)
+    case view(MonitorView)
+
+    init(store: SyncStore) {
+        // Order matters: paused-before-first-load is also `!hasLoaded`, and
+        // testing `hasLoaded` first is exactly the bug this type prevents.
+        if store.isPausedBeforeFirstLoad {
+            self = .pausedBeforeFirstLoad
+        } else if !store.hasLoaded {
+            self = .loading
+        } else if let issueID = store.conflictIssueID {
+            self = .conflict(issueID)
+        } else if let appID = store.detailAppID {
+            self = .app(appID)
+        } else {
+            self = .view(store.selectedView)
+        }
+    }
+
+    /// Equatable key the 0.25s fade/6px pop animates on.
+    var key: String {
+        switch self {
+        case .pausedBeforeFirstLoad: "paused"
+        case .loading: "loading"
+        case .conflict(let id): "conflict-\(id)"
+        case .app(let id): "app-\(id)"
+        case .view(let view): "view-\(view.rawValue)"
+        }
+    }
+
+    /// The spinner is honest ONLY here.
+    var showsSpinner: Bool { self == .loading }
+}
+
 /// Routes the selected sidebar destination, app detail, and conflict screen.
 struct ContentRouterView: View {
     @Environment(SyncStore.self) private var store
 
-    /// Single Equatable key describing the visible route; animating on this
-    /// value drives the 0.25s fade/6px pop on every view switch.
-    private var routeKey: String {
-        if !store.hasLoaded { return "loading" }
-        if let issueID = store.conflictIssueID { return "conflict-\(issueID)" }
-        if let appID = store.detailAppID { return "app-\(appID)" }
-        return "view-\(store.selectedView.rawValue)"
-    }
+    private var route: ContentRoute { ContentRoute(store: store) }
 
     var body: some View {
         Group {
-            if !store.hasLoaded {
+            if route == .pausedBeforeFirstLoad {
+                MonitoringPausedState()
+            } else if route.showsSpinner {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityLabel("Loading iCloud sync state")
             } else if let issueID = store.conflictIssueID {
                 ConflictResolutionView(issueID: issueID)
             } else if let appID = store.detailAppID {
@@ -166,6 +206,6 @@ struct ContentRouterView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeOut(duration: 0.25), value: routeKey)
+        .animation(.easeOut(duration: 0.25), value: route.key)
     }
 }
