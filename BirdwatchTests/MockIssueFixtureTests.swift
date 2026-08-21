@@ -49,16 +49,13 @@ struct MockIssueFixtureTests {
                 "the .openDiagnostics card must have an action-less immediate neighbour")
     }
 
-    // C1: the mock is the surface most likely to grow copy nobody checks against
-    // a real capability. Every mock issue that promises nothing must OFFER
-    // nothing, and vice versa.
-    @Test("Every mock issue's copy matches whether it actually offers a button")
-    func mockCopyMatchesCapability() async {
-        for issue in await Self.issues() {
-            #expect(issue.hasPrimaryAction == (issue.action != .none))
-            if !issue.hasPrimaryAction {
-                #expect(issue.primaryActionLabel.isEmpty)
-            }
-        }
-    }
+    // NOTE: "Every mock issue's copy matches whether it actually offers a button"
+    // lived here and has been REMOVED, not relocated. It paired a label check
+    // against `hasPrimaryAction`; once IssueItem carried no label, the only
+    // assertion left was `hasPrimaryAction == (action != .none)` — which is the
+    // DEFINITION of hasPrimaryAction, so the test could no longer fail. The C1
+    // property it guarded is now enforced by the type system (a model with no
+    // display copy cannot promise a capability in copy), and the mock's
+    // copy-vs-capability check that still has teeth lives in
+    // IssueActionTests.meteredIssueMakesNoPromiseItCannotKeep.
 }
