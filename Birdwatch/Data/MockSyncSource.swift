@@ -252,10 +252,10 @@ struct MockSyncSource: SyncSource {
     )
 
     nonisolated private static let permissions: [PermissionStatus] = [
-        PermissionStatus(name: "Full Disk Access", granted: true),
-        PermissionStatus(name: "Automation", granted: true),
-        PermissionStatus(name: "Local Network", granted: true),
-        PermissionStatus(name: "Notifications", granted: true),
+        PermissionStatus(name: "Full Disk Access", state: .granted),
+        PermissionStatus(name: "Automation", state: .granted),
+        PermissionStatus(name: "Local Network", state: .granted),
+        PermissionStatus(name: "Notifications", state: .granted),
     ]
 
     nonisolated private static let bandwidth: BandwidthSummary = {

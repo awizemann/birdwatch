@@ -366,6 +366,7 @@ final class SyncStore {
             appsByBackend: byBackend,
             issueCount: issues.count,
             daemonsMissing: daemons.filter { $0.pid == nil }.count,
+            // Booleans by design: a permission the probe can't tell (`.unknown`) counts as false.
             fdaGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Full Disk") }?.granted ?? false,
             notificationsGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Notification") }?.granted ?? false
         ))

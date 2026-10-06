@@ -778,20 +778,38 @@ struct DiagnosticsView: View {
 
     // MARK: - System Access
 
+    /// "Can't tell" is its own answer (C1): the probe had nothing to test or
+    /// the system didn't reply in time — never shown as "Not granted".
+    private static func permissionLabel(_ state: PermissionState) -> String {
+        switch state {
+        case .granted: "Granted"
+        case .denied: "Not granted"
+        case .unknown: "Can't tell"
+        }
+    }
+
+    private static func permissionColor(_ state: PermissionState) -> Color {
+        switch state {
+        case .granted: Palette.success
+        case .denied: Palette.warning
+        case .unknown: Palette.gray
+        }
+    }
+
     private var systemAccessCard: some View {
         Card {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(store.permissions.enumerated()), id: \.element.id) { index, permission in
                     if index > 0 { Divider().overlay(Surface.cardLine) }
                     HStack(spacing: 10) {
-                        StatusDot(color: permission.granted ? Palette.success : Palette.warning)
+                        StatusDot(color: Self.permissionColor(permission.state))
                         Text(permission.name)
                             .scaledFont(size: 13, weight: .medium)
                             .foregroundStyle(Surface.fg)
                         Spacer()
-                        Text(permission.granted ? "Granted" : "Not granted")
+                        Text(Self.permissionLabel(permission.state))
                             .scaledFont(size: 12.5, weight: .semibold)
-                            .foregroundStyle(permission.granted ? Palette.success : Palette.warning)
+                            .foregroundStyle(Self.permissionColor(permission.state))
                     }
                     .padding(.vertical, 8)
                     .accessibilityElement(children: .combine)

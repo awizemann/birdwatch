@@ -53,8 +53,11 @@ enum AppContainerSource {
     /// container. Fault-tolerant per item — a container that fails to read is
     /// skipped, never the whole list. Containers with no visible content are
     /// dropped (dozens of accounts leave empty stubs behind forever).
-    @concurrent
-    static func currentContainers() async -> [Container] {
+    ///
+    /// BLOCKING: runs only on a `SingleFlightScan`'s own queue, never a
+    /// cooperative-pool thread, and always runs to completion (a late result
+    /// is cached and served next cycle).
+    nonisolated static func scanContainers() -> [Container] {
         let fm = FileManager.default
         let root = containersRoot
         let entries: [URL]
@@ -71,7 +74,6 @@ enum AppContainerSource {
         var result: [Container] = []
         result.reserveCapacity(min(entries.count, containerCap))
         for url in entries.prefix(containerCap) {
-            if Task.isCancelled { break }
             let dir = url.lastPathComponent
             guard var container = makeContainer(directoryName: dir) else { continue }
             guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
@@ -244,14 +246,27 @@ enum AppContainerSource {
         return total
     }
 
+    /// Serial queue for the blocking size walk (see `BlockingWork`).
+    nonisolated static let sizeWalkQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.container-sizes", qos: .utility)
+
     /// Local footprint per app id: every container plus the two built-in
     /// CloudDocs rows. Runs OFF the snapshot path (see SystemSyncSource's
-    /// 5-minute, single-flight container-size cache).
-    @concurrent
-    static func localSizes(
+    /// 5-minute, single-flight container-size cache), and the blocking walk
+    /// runs on its own queue so a hung read never holds a pool thread.
+    nonisolated static func localSizes(
         containers: [Container], homeDirectory: String = NSHomeDirectory(),
         includeDesktopDocuments: Bool = false
     ) async -> [String: Int64] {
+        await BlockingWork.run(on: sizeWalkQueue) {
+            measureLocalSizes(containers: containers, homeDirectory: homeDirectory,
+                              includeDesktopDocuments: includeDesktopDocuments)
+        }
+    }
+
+    /// The blocking walk behind `localSizes`. Never call it from a Task directly.
+    nonisolated static func measureLocalSizes(
+        containers: [Container], homeDirectory: String, includeDesktopDocuments: Bool
+    ) -> [String: Int64] {
         var sizes: [String: Int64] = [:]
         let home = URL(fileURLWithPath: homeDirectory)
         let root = home.appendingPathComponent("Library/Mobile Documents", isDirectory: true)
@@ -265,7 +280,6 @@ enum AppContainerSource {
         }
 
         for container in containers {
-            if Task.isCancelled { break }
             sizes[container.id] = allocatedSize(
                 ofDirectory: root.appendingPathComponent(container.directoryName, isDirectory: true)
             )

@@ -1,5 +1,8 @@
+import os
 import SwiftUI
 import UserNotifications
+
+private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", category: "onboarding")
 
 /// First-run setup (design: "First-run onboarding"). Completion persists in
 /// preferences; Phase 1 replaces the manual switch with real Full Disk Access
@@ -8,7 +11,10 @@ struct OnboardingView: View {
     @Environment(SyncStore.self) private var store
     @Binding var isComplete: Bool
     @State private var step = 0
-    @State private var fdaGranted = false
+    /// nil until the first probe answers — nothing about access is claimed
+    /// (and the escape hatch stays hidden) while it is still checking.
+    @State private var fdaState: PermissionState?
+    private var fdaGranted: Bool { fdaState == .granted }
     @State private var optNotifications = true
 
     var body: some View {
@@ -92,7 +98,13 @@ struct OnboardingView: View {
                         ColorTile(colorHex: "0a84ff", symbolName: "binoculars.fill", size: 26)
                         Text("Birdwatch").scaledFont(size: 13, weight: .semibold)
                         Spacer()
-                        if fdaGranted {
+                        if fdaState == nil {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("Checking…").scaledFont(size: 12).foregroundStyle(Surface.fg3)
+                            }
+                            .accessibilityElement(children: .combine)
+                        } else if fdaGranted {
                             Label("Granted", systemImage: "checkmark.circle.fill")
                                 .scaledFont(size: 12, weight: .semibold)
                                 .foregroundStyle(Palette.success)
@@ -102,7 +114,9 @@ struct OnboardingView: View {
                             }
                         }
                     }
-                    Text("Required. Grant access in System Settings — Birdwatch detects it automatically.")
+                    Text(fdaState == .unknown
+                         ? "Birdwatch can't tell whether access is granted on this Mac. If you've granted it, continue below."
+                         : "Grant access in System Settings — Birdwatch detects it automatically.")
                         .scaledFont(size: 11.5)
                         .foregroundStyle(Surface.fg3)
                 }
@@ -111,7 +125,7 @@ struct OnboardingView: View {
             // TCC grants land while the user is in System Settings).
             .task {
                 while !Task.isCancelled && !fdaGranted {
-                    fdaGranted = await PermissionsProbe.fullDiskAccessGranted()
+                    fdaState = await PermissionsProbe.fullDiskAccessState()
                     if fdaGranted { break }
                     try? await Task.sleep(for: .seconds(2))
                 }
@@ -131,20 +145,45 @@ struct OnboardingView: View {
             HStack {
                 Button("Back") { step = 0 }
                     .buttonStyle(.bordered)
-                Button("Enter Birdwatch") {
-                    if optNotifications {
-                        Task {
-                            try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert])
-                        }
-                    }
-                    store.record(.onboardingCompleted(fdaGranted: fdaGranted, notificationsRequested: optNotifications))
-                    isComplete = true
-                }
+                Button("Enter Birdwatch") { finish() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(!fdaGranted)
                     .accessibilityHint(fdaGranted ? "" : "Requires Full Disk Access to be enabled")
             }
+
+            // Escape hatch: the probe can miss a real grant (an account with
+            // none of its probe files, or a future macOS that moves them), and
+            // a false negative must not lock anyone out. Diagnostics keeps
+            // reporting the probe's real answer either way.
+            if fdaState == .denied || fdaState == .unknown {
+                VStack(spacing: 4) {
+                    Button("Continue without Full Disk Access") { finish() }
+                        .buttonStyle(.link)
+                        .scaledFont(size: 12.5, weight: .semibold)
+                    Text("Some sync details may be missing. Diagnostics shows whether access is granted, and you can re-run setup from there.")
+                        .scaledFont(size: 11.5)
+                        .foregroundStyle(Surface.fg3)
+                        .multilineTextAlignment(.center)
+                }
+            }
         }
+    }
+
+    private func finish() {
+        if optNotifications {
+            Task {
+                do {
+                    let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert])
+                    logger.info("notification authorization request answered: granted=\(granted, privacy: .public)")
+                } catch {
+                    logger.error("notification authorization request failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+        // fdaGranted is false for `.denied` AND `.unknown`, and can now be false
+        // on completion via "Continue without Full Disk Access".
+        store.record(.onboardingCompleted(fdaGranted: fdaGranted, notificationsRequested: optNotifications))
+        isComplete = true
     }
 }

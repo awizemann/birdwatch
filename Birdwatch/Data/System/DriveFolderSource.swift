@@ -16,10 +16,11 @@ enum DriveFolderSource {
             .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
     }
 
-    /// Shallow enumeration of the CloudDocs container. `@concurrent` so callers
-    /// on the MainActor never pay for the directory I/O.
-    @concurrent
-    static func currentFolders(transfers: [TransferItem]) async -> [DriveFolder] {
+    /// Shallow enumeration of the CloudDocs container. BLOCKING — it can hang
+    /// on cold File Provider placeholders, so it only ever runs on a
+    /// `SingleFlightScan`'s own queue, never a cooperative-pool thread. Rows
+    /// come back `.upToDate`; `applying(transfers:to:)` adds per-cycle status.
+    nonisolated static func scanFolders() -> [DriveFolder] {
         let fm = FileManager.default
         let root = cloudDocsURL
         let contents: [URL]
@@ -46,13 +47,16 @@ enum DriveFolderSource {
                 let ns = error as NSError
                 logger.warning("item count failed for \(url.lastPathComponent, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
             }
-            folders.append(makeFolder(
-                name: url.lastPathComponent,
-                itemCount: count,
-                transferLocations: transfers.map(\.location)
-            ))
+            folders.append(makeFolder(name: url.lastPathComponent, itemCount: count, transferLocations: []))
         }
         return folders
+    }
+
+    /// Re-derives each folder's sync status from THIS cycle's transfers, so a
+    /// cached scan never carries a stale "syncing" state.
+    nonisolated static func applying(transfers: [TransferItem], to folders: [DriveFolder]) -> [DriveFolder] {
+        let locations = transfers.map(\.location)
+        return folders.map { makeFolder(name: $0.name, itemCount: $0.itemCount, transferLocations: locations) }
     }
 
     // MARK: - Pure mapping (separated from I/O for testability)

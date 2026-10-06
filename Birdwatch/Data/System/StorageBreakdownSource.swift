@@ -141,13 +141,28 @@ enum StorageBreakdownSource {
         return roots
     }
 
-    /// Full pass over the real footprint. Never on the snapshot path.
-    @concurrent
-    static func currentTotals(
+    /// Serial queue for the blocking breakdown walk (see `BlockingWork`).
+    nonisolated static let walkQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.storage-breakdown", qos: .utility)
+
+    /// Full pass over the real footprint. Never on the snapshot path, and the
+    /// blocking walk runs on its own queue so a hung read never holds a
+    /// cooperative-pool thread.
+    nonisolated static func currentTotals(
         homeDirectory: String = NSHomeDirectory(),
         includeDesktopDocuments: Bool
     ) async -> (totals: [StorageCategory: Int64], isPartial: Bool) {
-        totals(ofDirectories: scanRoots(homeDirectory: homeDirectory, includeDesktopDocuments: includeDesktopDocuments))
+        let roots = scanRoots(homeDirectory: homeDirectory, includeDesktopDocuments: includeDesktopDocuments)
+        let result = await BlockingWork.run(on: walkQueue) {
+            let walked = totals(ofDirectories: roots)
+            return Totals(totals: walked.totals, isPartial: walked.isPartial)
+        }
+        return (result.totals, result.isPartial)
+    }
+
+    /// Sendable carrier for the walk's result across the queue bridge.
+    private nonisolated struct Totals: Sendable {
+        let totals: [StorageCategory: Int64]
+        let isPartial: Bool
     }
 
     // MARK: - Segments (pure)

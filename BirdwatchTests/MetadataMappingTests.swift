@@ -71,6 +71,28 @@ struct MetadataMappingTests {
         #expect(folder.status == .upToDate)
     }
 
+    // A cached scan is re-decorated every cycle: fails if a folder keeps a
+    // stale status from the scan or ignores this cycle's transfers.
+    @Test func applyingTransfersReDerivesCachedFolderStatus() {
+        let scanned = [
+            DriveFolderSource.makeFolder(name: "Design", itemCount: 4, transferLocations: []),
+            DriveFolderSource.makeFolder(name: "Notes", itemCount: 2, transferLocations: []),
+        ]
+        #expect(scanned.allSatisfy { $0.status == .upToDate })
+
+        let transfer = TransferItem(
+            id: "t", appID: "icloud-drive", name: "a.png",
+            location: "~/Library/Mobile Documents/com~apple~CloudDocs/Design/Assets",
+            sizeBytes: 1, direction: .upload, progress: 0)
+        let busy = DriveFolderSource.applying(transfers: [transfer], to: scanned)
+        #expect(busy.first { $0.name == "Design" }?.status.isSyncing == true)
+        #expect(busy.first { $0.name == "Notes" }?.status == .upToDate)
+        #expect(busy.map(\.itemCount) == [4, 2])
+
+        let idle = DriveFolderSource.applying(transfers: [], to: busy)
+        #expect(idle.allSatisfy { $0.status == .upToDate })
+    }
+
     @Test func folderSyncingOnExactLocationMatch() {
         let folder = DriveFolderSource.makeFolder(
             name: "Design", itemCount: 1,

@@ -288,10 +288,19 @@ struct SyncEngineInfo: Sendable, Hashable {
     var globalProgressLine: String? = nil
 }
 
+/// What a permission probe could establish. `.unknown` is its own answer —
+/// the probe had nothing to test, or the system didn't reply in time — and is
+/// never shown as "Not granted" (C1).
+nonisolated enum PermissionState: Sendable, Hashable {
+    case granted, denied, unknown
+}
+
 struct PermissionStatus: Sendable, Hashable, Identifiable {
     var id: String { name }
     let name: String
-    var granted: Bool
+    var state: PermissionState
+    /// True only for a confirmed grant; `.unknown` reads as false here.
+    var granted: Bool { state == .granted }
 }
 
 // MARK: - Log

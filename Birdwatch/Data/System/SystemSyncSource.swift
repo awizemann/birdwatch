@@ -17,6 +17,10 @@ final class SystemSyncSource: SyncSource {
     private let cloudDocs = CloudDocsSource()
     private let daemonStats = DaemonStatsSource()
     private let logSource = LogStreamSource()
+    // Blocking directory scans (see SingleFlightScan): one in flight each, on
+    // their own queues, late results kept for the next cycle.
+    private let folderScan = SingleFlightScan(label: "drive-folders") { DriveFolderSource.scanFolders() }
+    private let containerScan = SingleFlightScan(label: "app-containers") { AppContainerSource.scanContainers() }
     private let bandwidthSource = BandwidthSource()
     @MainActor private var metadata: UbiquityTransferSource?
     @MainActor private var activityLog: ActivityLog?
@@ -101,30 +105,6 @@ final class SystemSyncSource: SyncSource {
 
     nonisolated init() {}   // cheap by design — no I/O before first snapshot (§6)
 
-    /// Races `operation` against a deadline; nil on timeout. The loser is
-    /// cancelled, but a non-cooperative operation may run on in the background —
-    /// acceptable for read-only scans.
-    nonisolated static func withDeadline<T: Sendable>(
-        seconds: Double, _ operation: @escaping @Sendable () async -> T
-    ) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(seconds))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
-    }
-
-    nonisolated static func withTimeout<T: Sendable>(
-        seconds: Double, fallback: T, _ operation: @escaping @Sendable () async -> T
-    ) async -> T {
-        await withDeadline(seconds: seconds, operation) ?? fallback
-    }
-
     func currentSnapshot() async -> SyncSnapshot {
         // Lazily start the metadata query on first use (needs the main runloop).
         let (transfers, activity) = await MainActor.run { () -> ([TransferItem], [ActivityEvent]) in
@@ -149,15 +129,15 @@ final class SystemSyncSource: SyncSource {
         async let processStatsTask = Self.sampleProcessStats(
             daemonStats: daemonStats, bandwidth: bandwidthSource
         )
-        // §6: time-box system scans and return partial results — a cold-metadata
-        // CloudDocs enumeration (getattrlistbulk on placeholders) blocked first
-        // paint for tens of seconds. Empty now, complete on a later cycle.
-        async let foldersTask = Self.withTimeout(seconds: 5, fallback: [DriveFolder]()) {
-            await DriveFolderSource.currentFolders(transfers: transfers)
-        }
-        let (status, quota, processStats, folders) =
+        // §6: time-box system scans — a cold-metadata CloudDocs enumeration
+        // (getattrlistbulk on placeholders) blocked first paint for tens of
+        // seconds. Single-flight on its own queue: a slow scan serves the last
+        // result (empty only before the first one lands), never a pool thread.
+        async let foldersTask = folderScan.value(within: 5)
+        let (status, quota, processStats, scannedFolders) =
             await (statusTask, quotaTask, processStatsTask, foldersTask)
         let (daemons, bandwidth) = processStats
+        let folders = DriveFolderSource.applying(transfers: transfers, to: scannedFolders ?? [])
         // Desktop & Documents are only iCloud data when the sync feature is on;
         // brctl status says so. Nothing reads those folders (or earns a TCC
         // prompt) until it does. Starts false; flips as soon as status confirms.
@@ -203,11 +183,10 @@ final class SystemSyncSource: SyncSource {
             }
         }
 
-        // One capped, shallow container enumeration per cycle, time-boxed like
-        // every other system scan (§6). Empty on timeout; complete next cycle.
-        let containers = await Self.withTimeout(seconds: 5, fallback: [AppContainerSource.Container]()) {
-            await AppContainerSource.currentContainers()
-        }
+        // One capped, shallow container enumeration, time-boxed like every other
+        // system scan (§6) and single-flight on its own queue like the folder
+        // scan: on timeout the last completed result is served.
+        let containers = await containerScan.value(within: 5) ?? []
         // Local footprint: served stale-or-empty, refreshed in the background at
         // most every 5 minutes. Sizes land on a later cycle — never gating paint.
         let sizesCache = await MainActor.run(body: { cachedLocalSizes })
