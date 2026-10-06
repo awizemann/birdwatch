@@ -11,6 +11,7 @@
 		046D22D1EE549453B25705AC /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2904F45AA2420E5BF7240DDC /* ActivityView.swift */; };
 		04B7802343FAFEB97D7B4EE3 /* ConflictSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F7673FA3F758A7251535F2F /* ConflictSource.swift */; };
 		04FEE6174BD1C4483B70BF3B /* UbiquityTransferSourceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBDD78FE41155C2DC7AF72D7 /* UbiquityTransferSourceTests.swift */; };
+		05735795ECCE95C70E9A7159 /* cloudkit-log-ga-27.0.ndjson in Resources */ = {isa = PBXBuildFile; fileRef = 9982D3E830C6539244E258B1 /* cloudkit-log-ga-27.0.ndjson */; };
 		09DF637C97B143EFF349E5F2 /* BrctlParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91A0BB29C5C2831B80905929 /* BrctlParserTests.swift */; };
 		09FE1A1333EBC776963453A8 /* RetryTrashFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33BAFBB800BED5F5DB8BEF14 /* RetryTrashFlowTests.swift */; };
 		0BDD9D52F5C27FA9663DF89C /* UsageAnalyticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0A8A1D2DF59FEEF0A60B3AA /* UsageAnalyticsTests.swift */; };
@@ -37,6 +38,7 @@
 		3EA91E700979CC32A193D6CC /* MockIssueFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1DCEFE66CBFC68CAD43D4E /* MockIssueFixtureTests.swift */; };
 		53646B26DBB4BF9A6968549D /* brctl-dump-excerpt.txt in Resources */ = {isa = PBXBuildFile; fileRef = 4BCE6DB145D8B44DB3F9403C /* brctl-dump-excerpt.txt */; };
 		577267D0CF6482F764A2C547 /* PopoverAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64BC1270C9471D308888B274 /* PopoverAccessibilityTests.swift */; };
+		59743A39EB80CBD4D6C308F3 /* CloudKitGAAttributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F91BB81ECE889DC4A14AC33 /* CloudKitGAAttributionTests.swift */; };
 		599E215BF4FF83B100482997 /* MonitoringPausedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5E8990DDF177B2CEAE6EBB /* MonitoringPausedState.swift */; };
 		5B629AC7FB54DBEEE274A2AA /* CloudDocsSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F9513137AD1E1310CC7D83 /* CloudDocsSource.swift */; };
 		5C131951C021D073B041C8A0 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0EC864673FCCE7495F6A6B3 /* Theme.swift */; };
@@ -117,6 +119,7 @@
 		09A00F245B8C1AAF9FD8F214 /* CloudKitAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitAppTests.swift; sourceTree = "<group>"; };
 		0AE14CEABABEB44DCFA21B0C /* SystemNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemNotifier.swift; sourceTree = "<group>"; };
 		0E0E646B5AC46EC4C7E2865B /* BirdwatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BirdwatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0F91BB81ECE889DC4A14AC33 /* CloudKitGAAttributionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitGAAttributionTests.swift; sourceTree = "<group>"; };
 		161AB8EAA529BEA8DA82E104 /* nettop-sample.csv */ = {isa = PBXFileReference; path = "nettop-sample.csv"; sourceTree = "<group>"; };
 		16AFB2AA15B7B40AC11850F7 /* UsageEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageEvent.swift; sourceTree = "<group>"; };
 		1A21FDC553CCFB94F8DB1787 /* ActivityLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityLog.swift; sourceTree = "<group>"; };
@@ -165,6 +168,7 @@
 		8BF9254A99964C180C9DAD4E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		91A0BB29C5C2831B80905929 /* BrctlParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrctlParserTests.swift; sourceTree = "<group>"; };
 		95A00531EE88B4BECC008F6C /* DaemonStatsSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonStatsSource.swift; sourceTree = "<group>"; };
+		9982D3E830C6539244E258B1 /* cloudkit-log-ga-27.0.ndjson */ = {isa = PBXFileReference; path = "cloudkit-log-ga-27.0.ndjson"; sourceTree = "<group>"; };
 		9A1DCEFE66CBFC68CAD43D4E /* MockIssueFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockIssueFixtureTests.swift; sourceTree = "<group>"; };
 		9FBED504564C269FBAA9BCEB /* TestIssues.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestIssues.swift; sourceTree = "<group>"; };
 		A0EC864673FCCE7495F6A6B3 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -341,6 +345,7 @@
 				E5C3D7DC590D16B7CD24035F /* brctl-quota.txt */,
 				8B4CE3C6C5BAEC884EA781AC /* brctl-status.txt */,
 				DDAF4A7272AACFDF80556D70 /* cloudkit-container-bundles.txt */,
+				9982D3E830C6539244E258B1 /* cloudkit-log-ga-27.0.ndjson */,
 				4DF19BE9168E2F5B40888351 /* cloudkit-log-sample.txt */,
 				AC42819E19EEF1E34D1C7691 /* containers.txt */,
 				F75ECF6620FBCA8ABEB1CBF6 /* logstream.ndjson */,
@@ -361,6 +366,7 @@
 				A57659076237FD3C3FBE7CA1 /* BrctlDumpParserTests.swift */,
 				91A0BB29C5C2831B80905929 /* BrctlParserTests.swift */,
 				09A00F245B8C1AAF9FD8F214 /* CloudKitAppTests.swift */,
+				0F91BB81ECE889DC4A14AC33 /* CloudKitGAAttributionTests.swift */,
 				F418FE30B42B83A851DC8108 /* ConflictSourceTests.swift */,
 				C1371E682251CDD6EE1EA349 /* ContentRouteTests.swift */,
 				36DC3B614ECC6F05071A2417 /* IssueActionTests.swift */,
@@ -544,6 +550,7 @@
 				DFE283CD675478565DAE20A6 /* brctl-quota.txt in Resources */,
 				994057F56F5EA78C7C0064F3 /* brctl-status.txt in Resources */,
 				1E5079318CCB2CF79BC3A4D9 /* cloudkit-container-bundles.txt in Resources */,
+				05735795ECCE95C70E9A7159 /* cloudkit-log-ga-27.0.ndjson in Resources */,
 				68B137AC67C64F0C5A4D2B8D /* cloudkit-log-sample.txt in Resources */,
 				20951AC5781597B8EB40E332 /* containers.txt in Resources */,
 				150DDF37B2138DA8D6B48613 /* logstream.ndjson in Resources */,
@@ -567,6 +574,7 @@
 				D9518D087A6C0455DD7DCD3A /* BrctlDumpParserTests.swift in Sources */,
 				09DF637C97B143EFF349E5F2 /* BrctlParserTests.swift in Sources */,
 				E1C75FB53CD1DA6E14961765 /* CloudKitAppTests.swift in Sources */,
+				59743A39EB80CBD4D6C308F3 /* CloudKitGAAttributionTests.swift in Sources */,
 				B1953C74B687F3622C2FFA0F /* ConflictSourceTests.swift in Sources */,
 				C5067595DEC50322007ACD1D /* ContentRouteTests.swift in Sources */,
 				2247D0F261E4D03237A6B7FC /* IssueActionTests.swift in Sources */,
