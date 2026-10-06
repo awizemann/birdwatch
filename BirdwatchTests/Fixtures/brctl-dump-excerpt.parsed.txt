@@ -1,0 +1,293 @@
+library 1 c{1}m.a{3}e.C{7}s
+library 148 i{4}d.c{1}m.f{7}s.c{5}p
+library 171 i{4}d.c{1}m.m{7}t.O{4}e.E{3}l
+health syncUpError <NSError:0x0(BRCloudDocsErrorDomain:11) - throttled>
+lastMetadataSyncDate (local) 2026-08-14 12:55:04
+▿ BrctlDump
+  ▿ dumpDate: Optional(2026-08-15 00:52:23 +0000)
+    ▿ some: 2026-08-15 00:52:23 +0000
+      - timeIntervalSinceReferenceDate: 808447943.685
+  ▿ databaseVersion: Optional(34104)
+    - some: 34104
+  ▿ fsType: Optional("FPFS")
+    - some: "FPFS"
+  ▿ accountSessionError: Optional("Can\'t get persona for accountID 00000000-0000-0000-0000-000000000000")
+    - some: "Can\'t get persona for accountID 00000000-0000-0000-0000-000000000000"
+  ▿ accountSessionErrorCode: Optional("BRCloudDocsErrorDomain:116")
+    - some: "BRCloudDocsErrorDomain:116"
+  ▿ clientState: BrctlClientState
+    ▿ availableQuotaBytes: Optional(223208176210)
+      - some: 223208176210
+    ▿ nonPurgeableSpaceBytes: Optional(249667584)
+      - some: 249667584
+    ▿ purgeableSpaceBytes: Optional(0)
+      - some: 0
+    ▿ serverChangeToken: Optional("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+      - some: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    - lastMetadataSyncDate: nil
+    ▿ periodicSyncDate: Optional(2026-08-14 14:05:14 +0000)
+      ▿ some: 2026-08-14 14:05:14 +0000
+        - timeIntervalSinceReferenceDate: 808409114.0
+    ▿ lastQuotaFetchDate: Optional(2026-06-02 02:48:22 +0000)
+      ▿ some: 2026-06-02 02:48:22 +0000
+        - timeIntervalSinceReferenceDate: 802061302.0
+    ▿ budget: Optional(BrctlSyncBudget(verdict: nil, minuteUsedPercent: nil, hourUsedPercent: nil, dayUsedPercent: nil, minuteValue: Optional(0.0), hourValue: Optional(19.6), dayValue: Optional(98.3), measuredAgo: nil))
+      ▿ some: BrctlSyncBudget
+        - verdict: nil
+        - minuteUsedPercent: nil
+        - hourUsedPercent: nil
+        - dayUsedPercent: nil
+        ▿ minuteValue: Optional(0.0)
+          - some: 0.0
+        ▿ hourValue: Optional(19.6)
+          - some: 19.6
+        ▿ dayValue: Optional(98.3)
+          - some: 98.3
+        - measuredAgo: nil
+    ▿ hasCompletedPCSMigration: Optional(true)
+      - some: true
+  ▿ scheduler: BrctlSchedulerState
+    ▿ clientItemCount: Optional(133111)
+      - some: 133111
+    ▿ serverItemCount: Optional(133000)
+      - some: 133000
+    - outputMayBeTruncated: true
+    ▿ pushEnvironment: Optional("production")
+      - some: "production"
+    ▿ budget: Optional(BrctlSyncBudget(verdict: Optional("budget available"), minuteUsedPercent: Optional(0.0), hourUsedPercent: Optional(0.0), dayUsedPercent: Optional(0.0), minuteValue: Optional(0.5), hourValue: Optional(20.0), dayValue: Optional(98.7), measuredAgo: Optional(70.0)))
+      ▿ some: BrctlSyncBudget
+        ▿ verdict: Optional("budget available")
+          - some: "budget available"
+        ▿ minuteUsedPercent: Optional(0.0)
+          - some: 0.0
+        ▿ hourUsedPercent: Optional(0.0)
+          - some: 0.0
+        ▿ dayUsedPercent: Optional(0.0)
+          - some: 0.0
+        ▿ minuteValue: Optional(0.5)
+          - some: 0.5
+        ▿ hourValue: Optional(20.0)
+          - some: 20.0
+        ▿ dayValue: Optional(98.7)
+          - some: 98.7
+        ▿ measuredAgo: Optional(70.0)
+          - some: 70.0
+    ▿ periodicSync: Optional("idle")
+      - some: "idle"
+    ▿ availableQuotaBytes: Optional(223208176210)
+      - some: 223208176210
+    ▿ containerMetadata: Optional("has-synced-down")
+      - some: "has-synced-down"
+    ▿ sharedDB: Optional("idle")
+      - some: "idle"
+    ▿ zoneHealth: Optional("idle")
+      - some: "idle"
+    ▿ syncStatus: Optional("itemsNeedUpload|nonIdleItems")
+      - some: "itemsNeedUpload|nonIdleItems"
+    ▿ sideCar: Optional("idle")
+      - some: "idle"
+    ▿ pcsMigration: Optional("complete")
+      - some: "complete"
+  ▿ system: BrctlSystemState
+    ▿ network: Optional("online")
+      - some: "online"
+    ▿ disk: Optional("healthy (APFS)")
+      - some: "healthy (APFS)"
+    ▿ power: Optional("healthy")
+      - some: "healthy"
+    ▿ optimizeStorage: Optional("disabled")
+      - some: "disabled"
+    ▿ cellular: Optional("enabled")
+      - some: "enabled"
+    ▿ redactedDeviceName: Optional("A{15}o")
+      - some: "A{15}o"
+  ▿ devices: 5 elements
+    ▿ BrctlDumpDevice
+      - index: 1
+      - redactedName: "u{5}n"
+      - nameIsRedacted: true
+    ▿ BrctlDumpDevice
+      - index: 2
+      - redactedName: "M{8}o"
+      - nameIsRedacted: true
+    ▿ BrctlDumpDevice
+      - index: 5
+      - redactedName: "A{15}o"
+      - nameIsRedacted: true
+    ▿ BrctlDumpDevice
+      - index: 8
+      - redactedName: "i{15}K"
+      - nameIsRedacted: true
+    ▿ BrctlDumpDevice
+      - index: 30
+      - redactedName: "A{15}o"
+      - nameIsRedacted: true
+  ▿ pendingItems: 4 elements
+    ▿ BrctlPendingItem
+      - itemID: "E0A2E171"
+      ▿ rank: Optional(2255582)
+        - some: 2255582
+      ▿ appLibraryID: Optional(1)
+        - some: 1
+      - uploadState: "needs-upload"
+      - isDirectory: false
+      ▿ redactedName: Optional("REDACTED-1.bin")
+        - some: "REDACTED-1.bin"
+      ▿ fileExtension: Optional("bin")
+        - some: "bin"
+      ▿ byteSize: Optional(62914560)
+        - some: 62914560
+      ▿ deviceIndex: Optional(0)
+        - some: 0
+      ▿ containerPattern: Optional("c{1}m.a{3}e.C{7}s")
+        - some: "c{1}m.a{3}e.C{7}s"
+      ▿ operations: 1 element
+        ▿ BrctlDumpOperation
+          - kind: BrctlDumpOperation.Kind.upload
+          ▿ state: Optional("active")
+            - some: "active"
+          ▿ attempts: Optional(0)
+            - some: 0
+          ▿ lastAttemptAgo: Optional(7.56)
+            - some: 7.56
+          - isReadyToRetry: true
+          - nextRetryIn: nil
+          ▿ cleanupIn: Optional(3592.2)
+            - some: 3592.2
+          - zone: nil
+          - supersededCount: nil
+      ▿ progress: Optional(BrctlDumpProgress(kind: BrctlDumpOperation.Kind.upload, needsCount: 1, needsBytes: 62914560, doneCount: 0, doneBytes: 0))
+        ▿ some: BrctlDumpProgress
+          - kind: BrctlDumpOperation.Kind.upload
+          - needsCount: 1
+          - needsBytes: 62914560
+          - doneCount: 0
+          - doneBytes: 0
+    ▿ BrctlPendingItem
+      - itemID: "documents[171]"
+      ▿ rank: Optional(1338265)
+        - some: 1338265
+      ▿ appLibraryID: Optional(171)
+        - some: 171
+      - uploadState: "needs-sync-up"
+      - isDirectory: true
+      ▿ redactedName: Optional("REDACTED-2")
+        - some: "REDACTED-2"
+      - fileExtension: nil
+      - byteSize: nil
+      - deviceIndex: nil
+      ▿ containerPattern: Optional("i{4}d.c{1}m.m{7}t.O{4}e.E{3}l")
+        - some: "i{4}d.c{1}m.m{7}t.O{4}e.E{3}l"
+      ▿ operations: 1 element
+        ▿ BrctlDumpOperation
+          - kind: BrctlDumpOperation.Kind.syncUp
+          ▿ state: Optional("sync-up-scheduled")
+            - some: "sync-up-scheduled"
+          ▿ attempts: Optional(0)
+            - some: 0
+          ▿ lastAttemptAgo: Optional(6500700.0)
+            - some: 6500700.0
+          - isReadyToRetry: true
+          - nextRetryIn: nil
+          - cleanupIn: nil
+          ▿ zone: Optional(1)
+            - some: 1
+          - supersededCount: nil
+      - progress: nil
+    ▿ BrctlPendingItem
+      - itemID: "documents[148]"
+      ▿ rank: Optional(1338267)
+        - some: 1338267
+      ▿ appLibraryID: Optional(148)
+        - some: 148
+      - uploadState: "needs-sync-up"
+      - isDirectory: true
+      ▿ redactedName: Optional("REDACTED-3")
+        - some: "REDACTED-3"
+      - fileExtension: nil
+      - byteSize: nil
+      - deviceIndex: nil
+      ▿ containerPattern: Optional("i{4}d.c{1}m.f{7}s.c{5}p")
+        - some: "i{4}d.c{1}m.f{7}s.c{5}p"
+      ▿ operations: 1 element
+        ▿ BrctlDumpOperation
+          - kind: BrctlDumpOperation.Kind.syncUp
+          ▿ state: Optional("sync-up-scheduled")
+            - some: "sync-up-scheduled"
+          ▿ attempts: Optional(3)
+            - some: 3
+          ▿ lastAttemptAgo: Optional(750.0)
+            - some: 750.0
+          - isReadyToRetry: false
+          ▿ nextRetryIn: Optional(255.0)
+            - some: 255.0
+          - cleanupIn: nil
+          ▿ zone: Optional(1)
+            - some: 1
+          - supersededCount: nil
+      - progress: nil
+    ▿ BrctlPendingItem
+      - itemID: "15478C83"
+      ▿ rank: Optional(2140040)
+        - some: 2140040
+      ▿ appLibraryID: Optional(1)
+        - some: 1
+      - uploadState: "idle"
+      - isDirectory: false
+      ▿ redactedName: Optional("REDACTED-6.txt")
+        - some: "REDACTED-6.txt"
+      ▿ fileExtension: Optional("txt")
+        - some: "txt"
+      ▿ byteSize: Optional(223841)
+        - some: 223841
+      ▿ deviceIndex: Optional(30)
+        - some: 30
+      ▿ containerPattern: Optional("c{1}m.a{3}e.C{7}s")
+        - some: "c{1}m.a{3}e.C{7}s"
+      ▿ operations: 1 element
+        ▿ BrctlDumpOperation
+          - kind: BrctlDumpOperation.Kind.apply
+          ▿ state: Optional("inactive")
+            - some: "inactive"
+          ▿ attempts: Optional(1)
+            - some: 1
+          ▿ lastAttemptAgo: Optional(229.8)
+            - some: 229.8
+          - isReadyToRetry: false
+          - nextRetryIn: nil
+          ▿ cleanupIn: Optional(3369.0)
+            - some: 3369.0
+          - zone: nil
+          - supersededCount: nil
+      - progress: nil
+  ▿ deviceActivity: 3 elements
+    ▿ BrctlDeviceActivity
+      - index: 0
+      - itemCount: 1
+      ▿ lastModified: Optional(2026-08-15 00:52:09 +0000)
+        ▿ some: 2026-08-15 00:52:09 +0000
+          - timeIntervalSinceReferenceDate: 808447929.0
+    ▿ BrctlDeviceActivity
+      - index: 11
+      - itemCount: 2
+      ▿ lastModified: Optional(2026-03-17 00:26:37 +0000)
+        ▿ some: 2026-03-17 00:26:37 +0000
+          - timeIntervalSinceReferenceDate: 795399997.0
+    ▿ BrctlDeviceActivity
+      - index: 30
+      - itemCount: 1
+      ▿ lastModified: Optional(2026-05-31 15:49:39 +0000)
+        ▿ some: 2026-05-31 15:49:39 +0000
+          - timeIntervalSinceReferenceDate: 801935379.0
+  ▿ syncHealth: BrctlSyncHealthReport
+    - errors: 0 key/value pairs
+  ▿ globalProgress: Optional(BrctlGlobalProgress(fraction: Optional(0.5742), uploadedBytes: Optional(37932224), totalBytes: Optional(66060288)))
+    ▿ some: BrctlGlobalProgress
+      ▿ fraction: Optional(0.5742)
+        - some: 0.5742
+      ▿ uploadedBytes: Optional(37932224)
+        - some: 37932224
+      ▿ totalBytes: Optional(66060288)
+        - some: 66060288
+  - appLibraryPatterns: 0 key/value pairs
+  - itemsTruncated: true

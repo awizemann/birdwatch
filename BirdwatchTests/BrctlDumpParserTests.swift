@@ -284,6 +284,124 @@ struct BrctlDumpParserTests {
     }
 }
 
+// MARK: - macOS 27 GA drift
+
+/// Excerpt of a real macOS 27.0 GA (26A428) `brctl dump -i -o` capture, ANSI
+/// escapes intact. The one user file name is replaced with REDACTED-1.band and
+/// content signatures with a neutral hex run; bird's own redactions
+/// (`D{7}s`, `.{4}h`) and every line shape are verbatim.
+private nonisolated func gaDirFaultFixture() throws -> String {
+    let url = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appending(path: "Fixtures/brctl-dump-ga-dir-fault-excerpt.txt")
+    return try String(contentsOf: url, encoding: .utf8)
+}
+
+@Suite("BrctlDumpParser macOS 27 GA")
+struct BrctlDumpGADriftTests {
+
+    @Test func dirFaultItemIsADirectory() throws {
+        let fixture = BrctlParser.stripANSI(try gaDirFaultFixture())
+        let lines = fixture.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let faultLine = try #require(lines.first { $0.contains(" dir-fault ") })
+        let dirLine = try #require(lines.first { $0.contains("i:<documents[61]>") })
+        let docLine = try #require(lines.first { $0.contains("REDACTED-1.band\" doc ") })
+
+        // `dir-fault` = a directory bird has not listed yet; still a folder on disk.
+        let fault = try #require(BrctlDumpParser.parseItemLine(faultLine))
+        #expect(fault.itemID == "6EEA0C23")
+        #expect(fault.isDirectory == true)
+        #expect(fault.fileExtension == nil)
+        let directory = try #require(BrctlDumpParser.parseItemLine(dirLine))
+        #expect(directory.isDirectory == true)
+        let document = try #require(BrctlDumpParser.parseItemLine(docLine))
+        #expect(document.isDirectory == false)
+    }
+
+    @Test func zeroByteSizeIsNotTakenFromTheNextField() throws {
+        // Real GA line (name and signatures redacted): `sz:0 bytes` has no
+        // parenthesised count, and the `tsz:13 KB (13309)` thumbnail size
+        // that follows must not be read as the item's size.
+        let fixture = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appending(path: "Fixtures/brctl-dump-ga-zero-size-excerpt.txt"),
+            encoding: .utf8)
+        let line = try #require(BrctlParser.stripANSI(fixture).split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.contains("sz:0 bytes") })
+        let item = try #require(BrctlDumpParser.parseItemLine(line))
+        #expect(item.byteSize == 0)
+        #expect(item.redactedName == "REDACTED-2.txt")
+        #expect(item.deviceIndex == 23)
+
+        // Nor from a parenthesised number inside the quoted name.
+        let named = try #require(BrctlDumpParser.parseItemLine(
+            #"r:1 i:<A> al:1 up:needs-upload st{n:"Report (2023).pdf" doc} ct{mt:1 sz:0 bytes n:"Report (2023).pdf" device:2}"#))
+        #expect(named.byteSize == 0)
+        #expect(named.fileExtension == "pdf")
+    }
+
+    @Test func quotedNamesCannotPoseAsFields() throws {
+        // Real GA item-line shape with a synthetic hostile name in both the
+        // st and ct `n:"…"` slots.
+        let hostile = #"a device:7 dir up:idle sz:9 bytes (8) i:<X> al:3.txt"#
+        let line = #"r:1338531 i:<4BD0C5D2> al:61 foid:<f146ca3> up:needs-upload uv:1 st{p:<documents[61]> n:""#
+            + hostile + #"" doc etag:1w2lu bt:1653151386 lu:1653154561 m:rw- hidden-ext creator:0 sc:docs} ct{etag:1w2lr mt:1653154561 sz:3.7 MB (3724015) tsz:21 KB (21179) n:""#
+            + hostile + #"" sig:0123 tsig:0123 device:4 quarantine:Download}"#
+        let item = try #require(BrctlDumpParser.parseItemLine(line))
+        #expect(item.itemID == "4BD0C5D2")
+        #expect(item.uploadState == "needs-upload")
+        #expect(item.appLibraryID == 61)
+        #expect(item.isDirectory == false)
+        #expect(item.byteSize == 3_724_015)
+        #expect(item.deviceIndex == 4)
+        #expect(item.redactedName == hostile)
+        #expect(item.fileExtension == "txt")
+
+        // In a whole dump the name must not defer the item as idle, nor credit device 7.
+        let dump = BrctlDumpParser.parse("1 containers matching '*'\n" + line)
+        #expect(dump.pendingItems.map(\.itemID) == ["4BD0C5D2"])
+        #expect(dump.deviceActivity.map(\.index) == [4])
+    }
+
+    @Test func nonItemLineDetachesAnIdleItemFromLaterOperations() {
+        // An idle item is only promoted by a `>` line that directly follows
+        // it; any other line in between ends the association.
+        let text = "1 containers matching '*'\n"
+            + "r:2 i:<B> al:1 up:idle uv:1 st{n:\"REDACTED-1.bin\" doc}\n"
+            + "sm{qta:1 rcc:1 }\n"
+            + "> apply{[ inactive attempts:1 last:3.83m ago cleanup:56.15m]}"
+        #expect(BrctlDumpParser.parse(text).pendingItems.isEmpty)
+    }
+
+    @Test func unicodeBlankLinesKeepTheOperationAnchor() throws {
+        // An NBSP-only line between an item and its `>` line is blank, exactly
+        // as the old `.whitespaces` trim treated it; an NBSP indent is trimmed.
+        let text = "1 containers matching '*'\n"
+            + "r:1 i:<A> al:1 up:needs-upload uv:1 st{n:\"REDACTED-1.bin\" doc}\n"
+            + "\u{00A0}\u{00A0}\n"
+            + "\u{00A0}> upload{[ active attempts:2 last:1.0m ago next:ready cleanup:ready]}"
+        let dump = BrctlDumpParser.parse(text)
+        #expect(dump.pendingItems.first?.attempts == 2)
+    }
+
+    @Test func dirFaultsAnnotationIsNotAnOperation() throws {
+        #expect(BrctlDumpParser.parseOperationLine("> dir-faults:1") == nil)
+
+        let dump = BrctlDumpParser.parse(try gaDirFaultFixture())
+        // Only the stuck `Documents` folder of [185] is pending; the idle
+        // dir-fault item and its `> dir-faults:1` line leave no trace.
+        #expect(dump.pendingItems.map(\.itemID) == ["documents[185]"])
+        let stuck = try #require(dump.pendingItems.first)
+        #expect(stuck.isDirectory == true)
+        #expect(stuck.operations.count == 1)
+        #expect(stuck.operations.first?.kind == .syncUp)
+        #expect(stuck.operations.first?.lastAttemptAgo == 3054.25 * 3600)
+        #expect(dump.appLibraryPatterns[61] == "F{8}7.c{1}m.a{3}e.m{14}d")
+        #expect(dump.deviceActivity.map(\.index) == [4])
+    }
+}
+
 // MARK: - App-library identifiers
 
 @Suite("BrctlDumpParser app libraries")

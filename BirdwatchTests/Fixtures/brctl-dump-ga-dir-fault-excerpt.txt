@@ -1,0 +1,12 @@
+1 containers matching '*'
+-----------------------------------------------------
+    r:0 i:[33m<root[185]>[39m al:185 foid:<ab9> up:idle uv:0 mt:0 pzone:(null) st{(null)}
+    r:1338447 i:[33m<documents[185]>[39m al:185 foid:<lb9> ld{share-synced-all|st-mode|st-hidden-ext|st-xattr|st-trash-put-back|st-symlink-target} up:[31mneeds-sync-up[39m uv:0 mt:0 st{p:[33m<root[185]>[39m n:"[0;1mD{7}s[0m" dir bt:1741385321 m:rw- creator:0 sc:docs lch:1}
+    > sync-up{[zone:1 [31msync-up-scheduled[39m attempts:0 last:[0;1;34m3054.25h ago[0m next:[0;1;34mready[0m cleanup:[0;1;34mready[0m]}
+    
+    ----------------------F{8}7.c{1}m.a{3}e.m{14}d[61]----------------------
+    r:0 i:[33m<root[61]>[39m al:61 foid:<a3d> up:idle uv:0 mt:0 pzone:(null) st{(null)}
+    r:1338448 i:[33m<documents[61]>[39m al:61 foid:<l3d> up:idle uv:1 mt:1782978696 st{p:[33m<root[61]>[39m n:"[0;1mD{7}s[0m" dir etag:1wctr bt:1563906005 m:rw- creator:0 sc:docs}
+     r:1338542 i:[33m<6EEA0C23>[39m al:61 foid:<n146cae> up:idle uv:0 mt:1653947295 st{p:[33m<documents[61]>[39m n:"[0;1m.{4}h[0m" dir-fault etag:1w7l2 bt:1653153479 m:rw- creator:0 sc:trash}
+     > dir-faults:1 
+     r:1338531 i:[33m<4BD0C5D2>[39m al:61 foid:<f146ca3> up:idle uv:1 st{p:[33m<documents[61]>[39m n:"[0;1mREDACTED-1.band[0m" doc etag:1w2lu bt:1653151386 lu:1653154561 m:rw- hidden-ext creator:0 sc:docs} ct{etag:1w2lr mt:1653154561 sz:[0;1;30m3.7 MB (3724015)[0m tsz:[0;1;30m21 KB (21179)[0m n:"REDACTED-1.band" sig:[0;1;30m0123456789abcdef0123456789abcdef0123456789[0m tsig:[0;1;30m0123456789abcdef0123456789abcdef0123456789[0m device:4 quarantine:Download}

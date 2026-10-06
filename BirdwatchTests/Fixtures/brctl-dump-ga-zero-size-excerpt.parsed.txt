@@ -1,0 +1,51 @@
+▿ BrctlDump
+  - dumpDate: nil
+  - databaseVersion: nil
+  - fsType: nil
+  - accountSessionError: nil
+  - accountSessionErrorCode: nil
+  ▿ clientState: BrctlClientState
+    - availableQuotaBytes: nil
+    - nonPurgeableSpaceBytes: nil
+    - purgeableSpaceBytes: nil
+    - serverChangeToken: nil
+    - lastMetadataSyncDate: nil
+    - periodicSyncDate: nil
+    - lastQuotaFetchDate: nil
+    - budget: nil
+    - hasCompletedPCSMigration: nil
+  ▿ scheduler: BrctlSchedulerState
+    - clientItemCount: nil
+    - serverItemCount: nil
+    - outputMayBeTruncated: false
+    - pushEnvironment: nil
+    - budget: nil
+    - periodicSync: nil
+    - availableQuotaBytes: nil
+    - containerMetadata: nil
+    - sharedDB: nil
+    - zoneHealth: nil
+    - syncStatus: nil
+    - sideCar: nil
+    - pcsMigration: nil
+  ▿ system: BrctlSystemState
+    - network: nil
+    - disk: nil
+    - power: nil
+    - optimizeStorage: nil
+    - cellular: nil
+    - redactedDeviceName: nil
+  - devices: 0 elements
+  - pendingItems: 0 elements
+  ▿ deviceActivity: 1 element
+    ▿ BrctlDeviceActivity
+      - index: 23
+      - itemCount: 1
+      ▿ lastModified: Optional(2020-01-23 18:12:24 +0000)
+        ▿ some: 2020-01-23 18:12:24 +0000
+          - timeIntervalSinceReferenceDate: 601495944.0
+  ▿ syncHealth: BrctlSyncHealthReport
+    - errors: 0 key/value pairs
+  - globalProgress: nil
+  - appLibraryPatterns: 0 key/value pairs
+  - itemsTruncated: false

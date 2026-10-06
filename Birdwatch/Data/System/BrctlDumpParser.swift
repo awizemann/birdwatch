@@ -203,72 +203,96 @@ nonisolated struct BrctlDump: Sendable, Equatable {
 /// accounts; only `deviceActivity` needs it.
 nonisolated enum BrctlDumpParser {
 
+    /// Performance shape (macOS 27 GA, 4.2 MB / ~14k-line `dump -i`): every
+    /// line is classified on raw UTF-8 bytes — prefix and `memmem` checks — and
+    /// only the few hundred lines that carry data become a `String` and meet a
+    /// regex. Swift `Regex` costs tens of µs per call even on a miss, so a
+    /// regex in the per-line path turns a ~0.1 s parse into tens of seconds.
     static func parse(_ raw: String) -> BrctlDump {
-        let text = BrctlParser.stripANSI(raw)
+        let text = stripANSIBytes(raw)
+        // Same bytes with every quoted `n:"…"` value blanked: field keys and
+        // kind tokens are searched here so a file name can never be read as a
+        // field. Offsets match `text`, which still supplies the name itself.
+        var keyText = text
+        maskQuotedNames(&keyText)
         var dump = BrctlDump()
         var section = Section.header
         var lastItemIndex: Int?
-        var idleAnchorLine: String?
 
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(rawLine)
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        text.withUnsafeBufferPointer { buffer in keyText.withUnsafeBufferPointer { keyBuffer in
+            // A deferred `up:idle` item line, kept as bytes until a `>` line
+            // proves it worth a full parse.
+            var idleAnchor: ItemLine?
+            var lineStart = 0
+            while lineStart <= buffer.count {
+                let lineEnd = buffer[lineStart...].firstIndex(of: UInt8(ascii: "\n")) ?? buffer.count
+                let range = trimmedRange(of: lineStart..<lineEnd, in: buffer)
+                let line = Bytes(rebasing: buffer[range])
+                let keys = Bytes(rebasing: keyBuffer[range])
+                lineStart = lineEnd + 1
 
-            if trimmed == "- not done dumping items -" { dump.itemsTruncated = true; continue }
-            if let library = parseAppLibraryIdentifier(trimmed) {
-                // Block headers and the `+ app library:` list agree; whichever
-                // comes first wins, so a later duplicate must not clobber it.
-                dump.appLibraryPatterns[library.id] = dump.appLibraryPatterns[library.id] ?? library.pattern
-                lastItemIndex = nil
-                continue
-            }
-            if let next = Section(header: trimmed) { section = next; lastItemIndex = nil; continue }
-            if trimmed.isEmpty || trimmed.allSatisfy({ $0 == "-" }) { continue }
-
-            switch section {
-            case .header:
-                parseHeaderLine(trimmed, into: &dump)
-            case .clientState:
-                parseClientStateLine(trimmed, into: &dump.clientState)
-            case .devices:
-                if let device = parseDeviceLine(trimmed) { dump.devices.append(device) }
-            case .system:
-                parseSystemLine(trimmed, into: &dump.system)
-            case .scheduler:
-                parseSchedulerLine(trimmed, into: &dump.scheduler)
-            case .syncHealth:
-                parseSyncHealthLine(trimmed, into: &dump.syncHealth)
-            case .containers:
-                if trimmed.hasPrefix("> ") {
-                    // An idle item was only remembered as a raw line; a `>` line
-                    // means it is worth the cost of full field extraction.
-                    if lastItemIndex == nil, let idle = idleAnchorLine, let item = parseItemLine(idle) {
-                        dump.pendingItems.append(item)
-                        lastItemIndex = dump.pendingItems.count - 1
-                    }
-                    applyOperationLine(trimmed, toItemAt: lastItemIndex, in: &dump)
-                } else if isItemLine(trimmed) {
+                if line.isEmpty { continue }
+                if line.elementsEqual("- not done dumping items -".utf8) { dump.itemsTruncated = true; continue }
+                if let library = appLibraryIdentifier(in: line) {
+                    // Block headers and the `+ app library:` list agree; whichever
+                    // comes first wins, so a later duplicate must not clobber it.
+                    dump.appLibraryPatterns[library.id] = dump.appLibraryPatterns[library.id] ?? library.pattern
                     lastItemIndex = nil
-                    idleAnchorLine = nil
-                    if isIdleItemLine(trimmed) {
-                        // ~99% of item lines. Defer the ~8 regex extractions.
-                        idleAnchorLine = trimmed
-                    } else if let item = parseItemLine(trimmed) {
-                        dump.pendingItems.append(item)
-                        lastItemIndex = dump.pendingItems.count - 1
+                    continue
+                }
+                if let next = Section(header: string(line)) { section = next; lastItemIndex = nil; continue }
+                if line.allSatisfy({ $0 == UInt8(ascii: "-") }) { continue }
+
+                switch section {
+                case .header:
+                    parseHeaderLine(string(line), into: &dump)
+                case .clientState:
+                    parseClientStateLine(string(line), into: &dump.clientState)
+                case .devices:
+                    if let device = parseDeviceLine(string(line)) { dump.devices.append(device) }
+                case .system:
+                    parseSystemLine(string(line), into: &dump.system)
+                case .scheduler:
+                    parseSchedulerLine(string(line), into: &dump.scheduler)
+                case .syncHealth:
+                    parseSyncHealthLine(string(line), into: &dump.syncHealth)
+                case .containers:
+                    if hasPrefix(line, "> ") {
+                        // `> dir-faults:N` (macOS 27) annotates a directory fault;
+                        // it is not an operation and must not promote the anchor.
+                        // (The operation grammar rejects it too; this skip makes
+                        // the intent explicit and avoids a wasted item parse.)
+                        if hasPrefix(line, "> dir-faults:") { continue }
+                        // An idle item was only remembered as raw bytes; a `>` line
+                        // means it is worth the cost of full field extraction.
+                        if lastItemIndex == nil, let idle = idleAnchor, let item = parseItemLine(idle) {
+                            dump.pendingItems.append(item)
+                            lastItemIndex = dump.pendingItems.count - 1
+                        }
+                        applyOperationLine(line, toItemAt: lastItemIndex, in: &dump)
+                    } else if isItemLine(keys) {
+                        lastItemIndex = nil
+                        idleAnchor = nil
+                        if contains(keys, "up:idle ") {
+                            // ~99% of item lines. Defer the full field extraction.
+                            idleAnchor = ItemLine(text: line, keys: keys)
+                        } else if let item = parseItemLine(ItemLine(text: line, keys: keys)) {
+                            dump.pendingItems.append(item)
+                            lastItemIndex = dump.pendingItems.count - 1
+                        }
+                    } else {
+                        lastItemIndex = nil
+                        idleAnchor = nil
                     }
-                } else {
-                    lastItemIndex = nil
-                    idleAnchorLine = nil
+                    accumulateDeviceActivity(keys, into: &dump)
+                case .other:
+                    if hasPrefix(line, "global progress") {
+                        dump.globalProgress = parseGlobalProgress(string(line))
+                    }
+                    accumulateDeviceActivity(keys, into: &dump)
                 }
-                accumulateDeviceActivity(trimmed, into: &dump)
-            case .other:
-                if trimmed.hasPrefix("global progress") {
-                    dump.globalProgress = parseGlobalProgress(trimmed)
-                }
-                accumulateDeviceActivity(trimmed, into: &dump)
             }
-        }
+        } }
 
         // Idle items are kept only while parsing, to anchor their `>` operation
         // lines (bird schedules `apply` retries on items whose `up:` state is
@@ -288,6 +312,13 @@ nonisolated enum BrctlDumpParser {
     /// The pattern is length-redacted like every name bird prints, but it names
     /// a container directory, which `RedactedPathResolver` can match on disk.
     static func parseAppLibraryIdentifier(_ line: String) -> (pattern: String, id: Int)? {
+        var line = line
+        return line.withUTF8 { appLibraryIdentifier(in: $0) }
+    }
+
+    /// Reference grammar for `appLibraryIdentifier(in:)`. Only consulted for
+    /// candidate lines containing non-ASCII bytes, where `\S`/`\d` are Unicode-aware.
+    private static func appLibraryIdentifierByRegex(_ line: String) -> (pattern: String, id: Int)? {
         if let m = line.firstMatch(of: /^-{4,}(\S+?)\[(\d+)\]-{4,}$/), let id = Int(m.2) {
             return (String(m.1), id)
         }
@@ -295,6 +326,165 @@ nonisolated enum BrctlDumpParser {
             return (String(m.1), id)
         }
         return nil
+    }
+
+    /// Hand-rolled equivalent of the two regexes above. It is tried on every
+    /// line of the dump, where even a failing Swift `Regex` costs ~50–100 µs.
+    private static func appLibraryIdentifier(in line: Bytes) -> (pattern: String, id: Int)? {
+        let isBlockHeader = hasPrefix(line, "----")
+        guard isBlockHeader || hasPrefix(line, "+") else { return nil }
+        if line.contains(where: { $0 >= 0x80 }) { return appLibraryIdentifierByRegex(string(line)) }
+        return isBlockHeader ? blockHeaderIdentifier(line) : appLibraryListIdentifier(line)
+    }
+
+    /// `^-{4,}(\S+?)\[(\d+)\]-{4,}$`. Everything after the matching `[` is
+    /// digits, `]` and dashes, so it can only be the line's last `[`.
+    private static func blockHeaderIdentifier(_ line: Bytes) -> (pattern: String, id: Int)? {
+        guard let open = line.lastIndex(of: UInt8(ascii: "[")),
+              let (id, close) = bracketedNumber(in: line, at: open),
+              line.count - (close + 1) >= 4,
+              line[(close + 1)...].allSatisfy({ $0 == UInt8(ascii: "-") }) else { return nil }
+        let leadingDashes = line.prefix(while: { $0 == UInt8(ascii: "-") }).count
+        // The greedy dash run leaves at least one character for the pattern.
+        let start = min(leadingDashes, open - 1)
+        guard start >= 4, !line[start..<open].contains(where: isASCIIWhitespace) else { return nil }
+        return (string(Bytes(rebasing: line[start..<open])), id)
+    }
+
+    /// `^\+\s*app library:\s*<(\S+?)\[(\d+)\]\s` — the pattern is the shortest
+    /// non-blank run ending at a `[digits]` that is followed by whitespace.
+    private static func appLibraryListIdentifier(_ line: Bytes) -> (pattern: String, id: Int)? {
+        var i = 1
+        while i < line.count, isASCIIWhitespace(line[i]) { i += 1 }
+        guard hasPrefix(Bytes(rebasing: line[i...]), "app library:") else { return nil }
+        i += "app library:".utf8.count
+        while i < line.count, isASCIIWhitespace(line[i]) { i += 1 }
+        guard i < line.count, line[i] == UInt8(ascii: "<") else { return nil }
+        let start = i + 1
+        var k = start
+        while k < line.count, !isASCIIWhitespace(line[k]) {
+            if k > start, line[k] == UInt8(ascii: "["), let (id, close) = bracketedNumber(in: line, at: k),
+               close + 1 < line.count, isASCIIWhitespace(line[close + 1]) {
+                return (string(Bytes(rebasing: line[start..<k])), id)
+            }
+            k += 1
+        }
+        return nil
+    }
+
+    /// `[digits]` starting at `open` → (value, index of the `]`).
+    private static func bracketedNumber(in line: Bytes, at open: Int) -> (Int, Int)? {
+        var close = open + 1
+        while close < line.count, (0x30...0x39).contains(line[close]) { close += 1 }
+        guard close > open + 1, close < line.count, line[close] == UInt8(ascii: "]"),
+              let value = Int(string(Bytes(rebasing: line[(open + 1)..<close]))) else { return nil }
+        return (value, close)
+    }
+
+    /// The ASCII members of regex `\s`.
+    private static func isASCIIWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || (0x09...0x0D).contains(byte)
+    }
+
+    // MARK: Byte-level line scanning
+
+    /// One trimmed line of the ANSI-stripped dump, as UTF-8 bytes. Only valid
+    /// inside `parse`'s `withUnsafeBufferPointer` scope.
+    private typealias Bytes = UnsafeBufferPointer<UInt8>
+
+    /// An item line twice over: `text` for values (the name), `keys` — the same
+    /// offsets with quoted names blanked — for locating fields and tokens.
+    private struct ItemLine {
+        var text: Bytes
+        var keys: Bytes
+    }
+
+    /// Removes CSI sequences (`ESC [ params intermediates final`) in one pass
+    /// over the UTF-8 bytes. Same grammar as `BrctlParser.stripANSI`'s regex;
+    /// the regex rewrite of a 4 MB dump alone took seconds. Internal for tests.
+    static func stripANSIBytes(_ raw: String) -> [UInt8] {
+        var input = raw
+        return input.withUTF8 { src in
+            var out = [UInt8]()
+            out.reserveCapacity(src.count)
+            var i = 0
+            while i < src.count {
+                if src[i] == 0x1B, i + 1 < src.count, src[i + 1] == UInt8(ascii: "[") {
+                    var j = i + 2
+                    while j < src.count, (0x30...0x39).contains(src[j]) || src[j] == UInt8(ascii: ";") || src[j] == UInt8(ascii: "?") { j += 1 }
+                    while j < src.count, (0x20...0x2F).contains(src[j]) { j += 1 }
+                    // Parameter, intermediate and final byte ranges are disjoint,
+                    // so greedy scanning never needs to backtrack.
+                    if j < src.count, (0x40...0x7E).contains(src[j]) {
+                        i = j + 1
+                        continue
+                    }
+                }
+                out.append(src[i])
+                i += 1
+            }
+            return out
+        }
+    }
+
+    /// `range` of `buffer` without leading/trailing `.whitespaces`. bird indents
+    /// with ASCII spaces, so that is the fast path; a non-ASCII edge byte (an
+    /// NBSP, say) falls back to a Unicode scalar trim, as the old String code did.
+    private static func trimmedRange(of range: Range<Int>, in buffer: Bytes) -> Range<Int> {
+        var start = range.lowerBound, end = range.upperBound
+        while start < end, buffer[start] == 0x20 || buffer[start] == 0x09 { start += 1 }
+        while end > start, buffer[end - 1] == 0x20 || buffer[end - 1] == 0x09 { end -= 1 }
+        guard start < end, buffer[start] >= 0x80 || buffer[end - 1] >= 0x80 else { return start..<end }
+
+        let scalars = string(Bytes(rebasing: buffer[start..<end])).unicodeScalars
+        let isBlank = { (scalar: Unicode.Scalar) in CharacterSet.whitespaces.contains(scalar) }
+        let leading = scalars.prefix(while: isBlank).reduce(0) { $0 + UTF8.width($1) }
+        guard start + leading < end else { return end..<end }
+        let trailing = scalars.reversed().prefix(while: isBlank).reduce(0) { $0 + UTF8.width($1) }
+        return (start + leading)..<(end - trailing)
+    }
+
+    /// Overwrites the inside of every quoted `n:"…"` value with `x`, line by
+    /// line. Mirrors the old `\bn:"([^"]*)"` scan: a value runs to the next
+    /// `"` on the same line, and an unterminated one is left alone.
+    static func maskQuotedNames(_ bytes: inout [UInt8]) {
+        bytes.withUnsafeMutableBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
+            var from = 0
+            while from < buffer.count,
+                  let hitPointer = memmem(base + from, buffer.count - from, "n:\"", 3) {
+                let hit = base.distance(to: hitPointer.assumingMemoryBound(to: UInt8.self))
+                from = hit + 1
+                guard hit == 0 || !isWordByte(buffer[hit - 1]) else { continue }
+                var close = hit + 3
+                while close < buffer.count, buffer[close] != UInt8(ascii: "\""), buffer[close] != UInt8(ascii: "\n") {
+                    close += 1
+                }
+                guard close < buffer.count, buffer[close] == UInt8(ascii: "\"") else { continue }
+                for index in (hit + 3)..<close { buffer[index] = UInt8(ascii: "x") }
+                from = close + 1
+            }
+        }
+    }
+
+    private static func string(_ bytes: Bytes) -> String {
+        String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func hasPrefix(_ line: Bytes, _ prefix: StaticString) -> Bool {
+        line.count >= prefix.utf8CodeUnitCount
+            && memcmp(line.baseAddress!, prefix.utf8Start, prefix.utf8CodeUnitCount) == 0
+    }
+
+    /// Byte offset of the first occurrence of `needle` at or after `from`.
+    private static func find(_ needle: StaticString, in line: Bytes, from: Int = 0) -> Int? {
+        guard from < line.count, let base = line.baseAddress else { return nil }
+        guard let hit = memmem(base + from, line.count - from, needle.utf8Start, needle.utf8CodeUnitCount) else { return nil }
+        return base.distance(to: hit.assumingMemoryBound(to: UInt8.self))
+    }
+
+    private static func contains(_ line: Bytes, _ needle: StaticString) -> Bool {
+        find(needle, in: line) != nil
     }
 
     // MARK: Sections
@@ -463,52 +653,115 @@ nonisolated enum BrctlDumpParser {
 
     // MARK: items
 
-    /// A client-truth item line (`r:… i:<ID> … up:<state> …`). Idle items parse
-    /// too — `parse` uses them to anchor trailing `>` operation lines and drops
-    /// the ones that carry none.
-    /// Cheap literal test used to classify the ~130k item lines of a full dump
-    /// without paying for a regex on each.
-    static func isItemLine(_ line: String) -> Bool {
-        line.contains("up:") && line.contains("i:<")
+    /// Cheap literal pre-filter for a client-truth item line
+    /// (`r:… i:<ID> … up:<state> …`), run on every line without a regex.
+    /// Pass the name-masked bytes so a quoted name cannot qualify a line.
+    private static func isItemLine(_ keys: Bytes) -> Bool {
+        contains(keys, "up:") && contains(keys, "i:<")
     }
 
-    /// `up:idle` items are the overwhelming majority and are only retained when
-    /// an operation line follows, so recognising them must stay allocation-free.
-    static func isIdleItemLine(_ line: String) -> Bool {
-        line.contains("up:idle ")
-    }
-
+    /// Parses one item line. Idle items parse too — `parse` uses them to anchor
+    /// trailing `>` operation lines and drops the ones that carry none.
     static func parseItemLine(_ line: String) -> BrctlPendingItem? {
-        guard isItemLine(line) else { return nil }
-        guard let state = line.firstMatch(of: /\bup:([a-z][a-z-]*)/) else { return nil }
-        guard let id = line.firstMatch(of: /\bi:<([^>]+)>/) else { return nil }
+        let text = Array(line.utf8)
+        var keys = text
+        maskQuotedNames(&keys)
+        return text.withUnsafeBufferPointer { text in
+            keys.withUnsafeBufferPointer { keys in parseItemLine(ItemLine(text: text, keys: keys)) }
+        }
+    }
 
-        var item = BrctlPendingItem(itemID: String(id.1), uploadState: String(state.1))
-        if let m = line.firstMatch(of: /^r:(\d+)/) { item.rank = Int(m.1) }
-        if let m = line.firstMatch(of: /\bal:(\d+)/) { item.appLibraryID = Int(m.1) }
-        item.isDirectory = line.contains(/\bdir\b/)
-        if let m = line.firstMatch(of: /\bn:"([^"]*)"/) {
-            let name = String(m.1)
-            item.redactedName = name
+    /// Byte scan of the fields below (regex spelling in each comment). Runs once
+    /// per pending item, and a bulk upload can schedule thousands of them.
+    /// Keys and tokens are found in `keys`, so a file name such as
+    /// `"a device:7 dir.txt"` cannot pose as a field; only the name is read
+    /// from `text`.
+    private static func parseItemLine(_ item: ItemLine) -> BrctlPendingItem? {
+        let line = item.keys
+        guard isItemLine(line) else { return nil }
+        // `\bup:([a-z][a-z-]*)`
+        guard let state = firstValue(after: "up:", in: line, { start in
+            guard start < line.count, isLowercase(line[start]) else { return nil }
+            var end = start + 1
+            while end < line.count, isLowercase(line[end]) || line[end] == UInt8(ascii: "-") { end += 1 }
+            return start..<end
+        }) else { return nil }
+        // `\bi:<([^>]+)>`
+        guard let id = firstValue(after: "i:<", in: line, { start in
+            guard let close = line[start...].firstIndex(of: UInt8(ascii: ">")), close > start else { return nil }
+            return start..<close
+        }) else { return nil }
+
+        var result = BrctlPendingItem(itemID: text(line, id), uploadState: text(line, state))
+        // `^r:(\d+)`
+        if hasPrefix(line, "r:"), let rank = digitRun(in: line, at: 2) { result.rank = Int(text(line, rank)) }
+        // `\bal:(\d+)`
+        if let library = firstValue(after: "al:", in: line, { digitRun(in: line, at: $0) }) {
+            result.appLibraryID = Int(text(line, library))
+        }
+        // The kind is a bare space-delimited token after the name: `dir`, `doc`,
+        // and on macOS 27 also `dir-fault` — a directory bird has not listed
+        // yet (seen on `.Trash` entries, followed by a `> dir-faults:N` line).
+        // It is still a folder on disk, which `RedactedPathResolver` matches
+        // against, so both tokens mean directory.
+        result.isDirectory = hasKindToken("dir", in: line) || hasKindToken("dir-fault", in: line)
+        // `\bn:"([^"]*)"` — located in `keys`, read from `text`.
+        if let name = firstValue(after: "n:\"", in: line, { start in
+            line[start...].firstIndex(of: UInt8(ascii: "\"")).map { start..<$0 }
+        }) {
+            let name = text(item.text, name)
+            result.redactedName = name
             if let dot = name.lastIndex(of: "."), dot != name.startIndex {
-                item.fileExtension = String(name[name.index(after: dot)...])
+                result.fileExtension = String(name[name.index(after: dot)...])
             }
         }
-        // Prefer the exact byte count in parentheses; `sz:0 bytes` has none.
-        if let m = line.firstMatch(of: /\bsz:[^(]*\((\d+)\)/) {
-            item.byteSize = Int64(m.1)
-        } else if let m = line.firstMatch(of: /\bsz:(\d+) bytes/) {
-            item.byteSize = Int64(m.1)
+        // `sz:0 bytes` (`\bsz:(\d+) bytes`) first: it has no parenthesised
+        // count, and the next field often does (`tsz:13 KB (13309)`). Otherwise
+        // the exact count in parentheses, which must belong to this value —
+        // `\bsz:[^(:]*\((\d+)\)`, i.e. no other `key:` before the `(`.
+        let size = firstValue(after: "sz:", in: line, { start -> Range<Int>? in
+            guard let digits = digitRun(in: line, at: start),
+                  hasPrefix(Bytes(rebasing: line[digits.upperBound...]), " bytes") else { return nil }
+            return digits
+        }) ?? firstValue(after: "sz:", in: line, { start -> Range<Int>? in
+            guard let open = line[start...].firstIndex(where: { $0 == UInt8(ascii: "(") || $0 == UInt8(ascii: ":") }),
+                  line[open] == UInt8(ascii: "("),
+                  let digits = digitRun(in: line, at: open + 1),
+                  digits.upperBound < line.count, line[digits.upperBound] == UInt8(ascii: ")") else { return nil }
+            return digits
+        })
+        if let size { result.byteSize = Int64(text(line, size)) }
+        // `\bdevice:(\d+)`
+        if let device = firstValue(after: "device:", in: line, { digitRun(in: line, at: $0) }) {
+            result.deviceIndex = Int(text(line, device))
         }
-        if let m = line.firstMatch(of: /\bdevice:(\d+)/) { item.deviceIndex = Int(m.1) }
-        return item
+        return result
     }
 
-    private static func applyOperationLine(_ line: String, toItemAt index: Int?, in dump: inout BrctlDump) {
+    /// `token` standing alone: preceded by the line start or whitespace and
+    /// followed by whitespace, `}` or the line end. Deliberately narrower than
+    /// the old `\bdir\b` (which also fired after `{`, `"`, `-`, …): bird always
+    /// prints the kind after a space.
+    private static func hasKindToken(_ token: StaticString, in line: Bytes) -> Bool {
+        var from = 0
+        while let hit = find(token, in: line, from: from) {
+            let end = hit + token.utf8CodeUnitCount
+            if hit == 0 || isASCIIWhitespace(line[hit - 1]),
+               end == line.count || isASCIIWhitespace(line[end]) || line[end] == UInt8(ascii: "}") {
+                return true
+            }
+            from = hit + 1
+        }
+        return false
+    }
+
+    private static func applyOperationLine(_ line: Bytes, toItemAt index: Int?, in dump: inout BrctlDump) {
         guard let index, dump.pendingItems.indices.contains(index) else { return }
-        if let progress = parseProgressLine(line) {
+        // Progress lines are rare; only they carry `{needs:(`, so the regex
+        // never runs on the common operation lines.
+        if contains(line, "{needs:("), let progress = parseProgressLine(string(line)) {
             dump.pendingItems[index].progress = progress
-        } else if let operation = parseOperationLine(line) {
+        } else if let operation = parseOperationLine(bytes: line) {
             dump.pendingItems[index].operations.append(operation)
         }
     }
@@ -536,29 +789,124 @@ nonisolated enum BrctlDumpParser {
     /// `> sync-up{[zone:1 sync-up-scheduled attempts:0 last:1805.75h ago next:ready cleanup:ready]}`
     /// `> upload{[1 old]}`
     static func parseOperationLine(_ line: String) -> BrctlDumpOperation? {
-        guard let m = line.firstMatch(of: /^>\s*([a-z-]+)\{\[(.*)\]\}/) else { return nil }
-        let kind = BrctlDumpOperation.Kind(rawValue: String(m.1)) ?? .unknown
-        let body = String(m.2)
+        var line = line
+        return line.withUTF8 { parseOperationLine(bytes: $0) }
+    }
+
+    /// Byte scan of `^>\s*([a-z-]+)\{\[(.*)\]\}` and the body fields (regex
+    /// spelling in each comment). One per pending item, like `parseItemLine`.
+    private static func parseOperationLine(bytes line: Bytes) -> BrctlDumpOperation? {
+        guard hasPrefix(line, ">") else { return nil }
+        var kindStart = 1
+        while kindStart < line.count, isASCIIWhitespace(line[kindStart]) { kindStart += 1 }
+        var kindEnd = kindStart
+        while kindEnd < line.count, isLowercase(line[kindEnd]) || line[kindEnd] == UInt8(ascii: "-") { kindEnd += 1 }
+        guard kindEnd > kindStart, hasPrefix(Bytes(rebasing: line[kindEnd...]), "{[") else { return nil }
+        // `(.*)` is greedy: the body runs to the line's last `]}`.
+        let bodyStart = kindEnd + 2
+        var bodyEnd = line.count - 2
+        while bodyEnd >= bodyStart, !(line[bodyEnd] == UInt8(ascii: "]") && line[bodyEnd + 1] == UInt8(ascii: "}")) {
+            bodyEnd -= 1
+        }
+        guard bodyEnd >= bodyStart else { return nil }
+
+        let kind = BrctlDumpOperation.Kind(rawValue: text(line, kindStart..<kindEnd)) ?? .unknown
+        let body = Bytes(rebasing: line[bodyStart..<bodyEnd])
         var operation = BrctlDumpOperation(kind: kind)
 
-        if let old = body.firstMatch(of: /^(\d+) old$/) {
-            operation.supersededCount = Int(old.1)
+        // `^(\d+) old$`
+        if let count = digitRun(in: body, at: 0),
+           Bytes(rebasing: body[count.upperBound...]).elementsEqual(" old".utf8) {
+            operation.supersededCount = Int(text(body, count))
             return operation
         }
-        if let m = body.firstMatch(of: /\bzone:(\d+)/) { operation.zone = Int(m.1) }
-        if let m = body.firstMatch(of: /\battempts:(\d+)/) { operation.attempts = Int(m.1) }
-        if let m = body.firstMatch(of: /\blast:([0-9.]+[smhd]) ago/) { operation.lastAttemptAgo = parseDuration(String(m.1)) }
-        if let m = body.firstMatch(of: /\bnext:(\S+?)(?:\s|$|\])/) {
-            let next = String(m.1)
+        // `\bzone:(\d+)`, `\battempts:(\d+)`
+        if let zone = firstValue(after: "zone:", in: body, { digitRun(in: body, at: $0) }) {
+            operation.zone = Int(text(body, zone))
+        }
+        if let attempts = firstValue(after: "attempts:", in: body, { digitRun(in: body, at: $0) }) {
+            operation.attempts = Int(text(body, attempts))
+        }
+        // `\blast:([0-9.]+[smhd]) ago`
+        if let last = firstValue(after: "last:", in: body, { start -> Range<Int>? in
+            var end = start
+            while end < body.count, isDecimal(body[end]) { end += 1 }
+            guard end > start, end < body.count, isDurationUnit(body[end]),
+                  hasPrefix(Bytes(rebasing: body[(end + 1)...]), " ago") else { return nil }
+            return start..<(end + 1)
+        }) {
+            operation.lastAttemptAgo = parseDuration(text(body, last))
+        }
+        // `\bnext:(\S+?)(?:\s|$|\])`
+        if let next = firstValue(after: "next:", in: body, { schedulingWord(in: body, at: $0) }) {
+            let next = text(body, next)
             operation.isReadyToRetry = next == "ready"
             operation.nextRetryIn = parseDuration(next)
         }
-        if let m = body.firstMatch(of: /\bcleanup:(\S+?)(?:\s|$|\])/) { operation.cleanupIn = parseDuration(String(m.1)) }
+        // `\bcleanup:(\S+?)(?:\s|$|\])`
+        if let cleanup = firstValue(after: "cleanup:", in: body, { schedulingWord(in: body, at: $0) }) {
+            operation.cleanupIn = parseDuration(text(body, cleanup))
+        }
         // State = the leading words before `attempts:`, minus the zone token.
-        let head = body.split(separator: "attempts:", maxSplits: 1).first.map(String.init) ?? body
+        let bodyText = string(body)
+        let head = bodyText.split(separator: "attempts:", maxSplits: 1).first.map(String.init) ?? bodyText
         let words = head.split(separator: " ").map(String.init).filter { !$0.hasPrefix("zone:") }
         if !words.isEmpty { operation.state = words.joined(separator: " ") }
         return operation
+    }
+
+    /// `(\S+?)(?:\s|$|\])` at `start`: at least one non-blank byte, then up to
+    /// (not including) the next whitespace or `]`.
+    private static func schedulingWord(in line: Bytes, at start: Int) -> Range<Int>? {
+        guard start < line.count, !isASCIIWhitespace(line[start]) else { return nil }
+        var end = start + 1
+        while end < line.count, !isASCIIWhitespace(line[end]), line[end] != UInt8(ascii: "]") { end += 1 }
+        return start..<end
+    }
+
+    // MARK: Byte-level field helpers
+
+    /// The first occurrence of `key` at a word start (regex `\b`: line start or
+    /// a preceding byte outside `[A-Za-z0-9_]`) whose following bytes `value`
+    /// accepts — the same "keep searching" behaviour as `firstMatch(of:)`.
+    /// Swift `Regex`'s default `\b` follows UAX #29, which also sees no word
+    /// start in `up:sz:` (letter `:` letter); bird separates its keys with
+    /// spaces, so the simpler ASCII rule gives identical results on real dumps.
+    private static func firstValue(
+        after key: StaticString, in line: Bytes, _ value: (Int) -> Range<Int>?
+    ) -> Range<Int>? {
+        var from = 0
+        while let hit = find(key, in: line, from: from) {
+            if hit == 0 || !isWordByte(line[hit - 1]), let range = value(hit + key.utf8CodeUnitCount) {
+                return range
+            }
+            from = hit + 1
+        }
+        return nil
+    }
+
+    /// A non-empty ASCII digit run starting at `start`.
+    private static func digitRun(in line: Bytes, at start: Int) -> Range<Int>? {
+        var end = start
+        while end < line.count, (0x30...0x39).contains(line[end]) { end += 1 }
+        return end > start ? start..<end : nil
+    }
+
+    private static func text(_ line: Bytes, _ range: Range<Int>) -> String {
+        string(Bytes(rebasing: line[range]))
+    }
+
+    /// Non-ASCII bytes count as word characters, so a key glued to a Unicode
+    /// letter is never mistaken for a word start.
+    private static func isWordByte(_ byte: UInt8) -> Bool {
+        (0x30...0x39).contains(byte) || (0x41...0x5A).contains(byte) || (0x61...0x7A).contains(byte)
+            || byte == UInt8(ascii: "_") || byte >= 0x80
+    }
+
+    private static func isLowercase(_ byte: UInt8) -> Bool { (0x61...0x7A).contains(byte) }
+    private static func isDecimal(_ byte: UInt8) -> Bool { (0x30...0x39).contains(byte) || byte == UInt8(ascii: ".") }
+    private static func isDurationUnit(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: "s") || byte == UInt8(ascii: "m") || byte == UInt8(ascii: "h") || byte == UInt8(ascii: "d")
     }
 
     // MARK: device activity
@@ -566,13 +914,13 @@ nonisolated enum BrctlDumpParser {
     /// Hand-rolled scan rather than a regex: this runs on every one of ~130k
     /// item lines in a full dump, where the equivalent backtracking regex costs
     /// ~0.3ms/line (≈40s) against ~0.02ms here.
-    private static func accumulateDeviceActivity(_ line: String, into dump: inout BrctlDump) {
-        guard let ct = line.range(of: "ct{") else { return }
-        let tail = line[ct.upperBound...]
-        guard let mtRange = tail.range(of: "mt:"),
-              let deviceRange = tail.range(of: "device:"),
-              let epoch = TimeInterval(digits(in: tail, from: mtRange.upperBound)),
-              let index = Int(digits(in: tail, from: deviceRange.upperBound)) else { return }
+    private static func accumulateDeviceActivity(_ line: Bytes, into dump: inout BrctlDump) {
+        guard let ct = find("ct{", in: line) else { return }
+        let tail = ct + 3
+        guard let mt = find("mt:", in: line, from: tail),
+              let device = find("device:", in: line, from: tail),
+              let epoch = TimeInterval(digits(in: line, from: mt + 3)),
+              let index = Int(digits(in: line, from: device + 7)) else { return }
         let date = Date(timeIntervalSince1970: epoch)
         if let existing = dump.deviceActivity.firstIndex(where: { $0.index == index }) {
             dump.deviceActivity[existing].itemCount += 1
@@ -583,8 +931,11 @@ nonisolated enum BrctlDumpParser {
         }
     }
 
-    private static func digits(in text: Substring, from start: Substring.Index) -> String {
-        String(text[start...].prefix(while: \.isNumber))
+    /// The ASCII digit run starting at `start` ("" when there is none).
+    private static func digits(in line: Bytes, from start: Int) -> String {
+        var end = start
+        while end < line.count, (0x30...0x39).contains(line[end]) { end += 1 }
+        return string(Bytes(rebasing: line[start..<end]))
     }
 
     // MARK: global progress
@@ -604,12 +955,16 @@ nonisolated enum BrctlDumpParser {
     // MARK: scalars
 
     /// "3.83m" → 229.8, "1805.75h", "9.89s", "2.5d". "ready"/unknown → nil.
+    /// Byte form of `^([0-9.]+)([smhd])$`.
     static func parseDuration(_ text: String) -> TimeInterval? {
-        guard let m = text.firstMatch(of: /^([0-9.]+)([smhd])$/), let value = Double(m.1) else { return nil }
-        switch m.2 {
-        case "s": return value
-        case "m": return value * 60
-        case "h": return value * 3600
+        let bytes = Array(text.utf8)
+        guard let unit = bytes.last, isDurationUnit(unit), bytes.count > 1,
+              bytes.dropLast().allSatisfy(isDecimal),
+              let value = Double(String(decoding: bytes.dropLast(), as: UTF8.self)) else { return nil }
+        switch unit {
+        case UInt8(ascii: "s"): return value
+        case UInt8(ascii: "m"): return value * 60
+        case UInt8(ascii: "h"): return value * 3600
         default: return value * 86_400
         }
     }

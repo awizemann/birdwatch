@@ -1,0 +1,82 @@
+library 61 F{8}7.c{1}m.a{3}e.m{14}d
+▿ BrctlDump
+  - dumpDate: nil
+  - databaseVersion: nil
+  - fsType: nil
+  - accountSessionError: nil
+  - accountSessionErrorCode: nil
+  ▿ clientState: BrctlClientState
+    - availableQuotaBytes: nil
+    - nonPurgeableSpaceBytes: nil
+    - purgeableSpaceBytes: nil
+    - serverChangeToken: nil
+    - lastMetadataSyncDate: nil
+    - periodicSyncDate: nil
+    - lastQuotaFetchDate: nil
+    - budget: nil
+    - hasCompletedPCSMigration: nil
+  ▿ scheduler: BrctlSchedulerState
+    - clientItemCount: nil
+    - serverItemCount: nil
+    - outputMayBeTruncated: false
+    - pushEnvironment: nil
+    - budget: nil
+    - periodicSync: nil
+    - availableQuotaBytes: nil
+    - containerMetadata: nil
+    - sharedDB: nil
+    - zoneHealth: nil
+    - syncStatus: nil
+    - sideCar: nil
+    - pcsMigration: nil
+  ▿ system: BrctlSystemState
+    - network: nil
+    - disk: nil
+    - power: nil
+    - optimizeStorage: nil
+    - cellular: nil
+    - redactedDeviceName: nil
+  - devices: 0 elements
+  ▿ pendingItems: 1 element
+    ▿ BrctlPendingItem
+      - itemID: "documents[185]"
+      ▿ rank: Optional(1338447)
+        - some: 1338447
+      ▿ appLibraryID: Optional(185)
+        - some: 185
+      - uploadState: "needs-sync-up"
+      - isDirectory: true
+      ▿ redactedName: Optional("D{7}s")
+        - some: "D{7}s"
+      - fileExtension: nil
+      - byteSize: nil
+      - deviceIndex: nil
+      - containerPattern: nil
+      ▿ operations: 1 element
+        ▿ BrctlDumpOperation
+          - kind: BrctlDumpOperation.Kind.syncUp
+          ▿ state: Optional("sync-up-scheduled")
+            - some: "sync-up-scheduled"
+          ▿ attempts: Optional(0)
+            - some: 0
+          ▿ lastAttemptAgo: Optional(10995300.0)
+            - some: 10995300.0
+          - isReadyToRetry: true
+          - nextRetryIn: nil
+          - cleanupIn: nil
+          ▿ zone: Optional(1)
+            - some: 1
+          - supersededCount: nil
+      - progress: nil
+  ▿ deviceActivity: 1 element
+    ▿ BrctlDeviceActivity
+      - index: 4
+      - itemCount: 1
+      ▿ lastModified: Optional(2022-05-21 17:36:01 +0000)
+        ▿ some: 2022-05-21 17:36:01 +0000
+          - timeIntervalSinceReferenceDate: 674847361.0
+  ▿ syncHealth: BrctlSyncHealthReport
+    - errors: 0 key/value pairs
+  - globalProgress: nil
+  - appLibraryPatterns: 0 key/value pairs
+  - itemsTruncated: false
