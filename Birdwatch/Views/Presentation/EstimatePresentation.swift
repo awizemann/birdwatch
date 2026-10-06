@@ -44,7 +44,12 @@ enum StorageCapLabel {
     }
 
     /// Storage → local usage headline when no account tier is shown.
-    static func usageHeadline(used: Int64, cap: Int64?, capIsEstimated: Bool) -> String {
+    /// `planIsAmbiguous`: the quota is known but fits more than one plan, so
+    /// account usage is unknown and only its floor is stated.
+    static func usageHeadline(used: Int64, cap: Int64?, capIsEstimated: Bool, planIsAmbiguous: Bool = false) -> String {
+        if cap == nil, planIsAmbiguous {
+            return "Account usage unknown — at least \(Format.capacity(used)) on this Mac"
+        }
         guard let cap else { return "\(Format.gigabytes(used)) of iCloud files on this Mac" }
         return capIsEstimated
             ? "\(Format.gigabytes(used)) of ≈ \(Format.gigabytes(cap)) used · estimated plan"
@@ -76,6 +81,86 @@ enum StorageCapLabel {
     /// VoiceOver wording for the same value ("≈" is read as a symbol name).
     static func accountPartAccessibility(_ bytes: Int64, isEstimated: Bool) -> String {
         isEstimated ? "about \(Format.size(bytes)), estimated" : Format.size(bytes)
+    }
+
+    /// The plan card when the live quota contradicts the plan setting: the
+    /// setting is shown, but marked as contested rather than "Set by you".
+    static func planCardLine(_ storage: StorageInfo) -> String {
+        guard storage.planCapBelowRemaining, let remaining = storage.remainingBytes else {
+            return storage.planPriceLine
+        }
+        return "Set by you — contested: iCloud reports \(Format.capacity(remaining)) available, more than this plan holds"
+    }
+
+    /// Shown instead of any usage figure when iCloud reports more remaining
+    /// than the plan setting allows: the setting is wrong, not the quota.
+    static func planDisagreement(cap: Int64, remaining: Int64) -> String {
+        "Your plan setting (\(Format.capacity(cap))) looks too small — iCloud reports \(Format.capacity(remaining)) still available."
+    }
+}
+
+/// The plan question's choices. Single tiers sit on the segmented control;
+/// anything else — a stacked plan such as Apple One 2 TB + iCloud+ 6 TB, or
+/// a size Birdwatch doesn't list — is a custom total in GB or TB.
+enum PlanPromptChoice {
+    /// What to pre-select: the cap the user already chose when the quota
+    /// agrees with it; otherwise the derived plan (smallest purchasable total
+    /// that holds this Mac's files plus the remaining quota).
+    /// When several plans fit, the smallest that holds the floor is offered
+    /// as the starting choice; nothing is stored until the user confirms.
+    static func suggestedCap(_ storage: StorageInfo) -> Int64? {
+        if storage.capSource == .userChosen, !storage.planCapBelowRemaining { return storage.totalBytes }
+        if let remaining = storage.remainingBytes,
+           let smallest = StorageBreakdownSource.planCandidates(
+               floorBytes: max(storage.usedBytes, 0) + remaining).first {
+            return smallest.bytes
+        }
+        return storage.trustedCapBytes
+    }
+
+    struct Seed: Equatable {
+        /// Index into `StorageBreakdownSource.tiers`, or nil for custom.
+        var tierIndex: Int?
+        var customText: String = ""
+        var customIsTB: Bool = true
+    }
+
+    static func seed(for cap: Int64?, locale: Locale = .current) -> Seed {
+        guard let cap else { return Seed(tierIndex: 0) }
+        if let index = StorageBreakdownSource.tiers.firstIndex(where: { $0.bytes == cap }) {
+            return Seed(tierIndex: index)
+        }
+        if cap >= 1_000_000_000_000 {
+            return Seed(tierIndex: nil, customText: number(Double(cap) / 1_000_000_000_000, locale), customIsTB: true)
+        }
+        return Seed(tierIndex: nil, customText: number(Double(cap) / 1_000_000_000, locale), customIsTB: false)
+    }
+
+    /// The custom total in bytes, read in the user's locale; nil for anything
+    /// that isn't an unambiguous positive number. A grouping separator is
+    /// accepted only in real groups of three ("1,000" in English is 1000;
+    /// "2,2" there is rejected rather than guessed as 22 or 2.2), and the
+    /// locale's decimal separator is the only one accepted.
+    static func customCap(text: String, isTB: Bool, locale: Locale = .current) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let decimal = locale.decimalSeparator ?? "."
+        let grouping = locale.groupingSeparator ?? ","
+        let parts = trimmed.components(separatedBy: decimal)
+        guard parts.count <= 2, let integer = parts.first, !integer.isEmpty else { return nil }
+        let fraction = parts.count == 2 ? parts[1] : ""
+        guard fraction.allSatisfy({ ("0"..."9").contains($0) }) else { return nil }
+        let groups = integer.components(separatedBy: grouping)
+        guard groups.allSatisfy({ !$0.isEmpty && $0.allSatisfy { ("0"..."9").contains($0) } }) else { return nil }
+        if groups.count > 1 {
+            guard groups[0].count <= 3, groups.dropFirst().allSatisfy({ $0.count == 3 }) else { return nil }
+        }
+        guard let value = Double(groups.joined() + (fraction.isEmpty ? "" : "." + fraction)),
+              value > 0, value.isFinite else { return nil }
+        return Int64((value * (isTB ? 1_000_000_000_000 : 1_000_000_000)).rounded())
+    }
+
+    private static func number(_ value: Double, _ locale: Locale) -> String {
+        value.formatted(.number.precision(.fractionLength(0...2)).grouping(.never).locale(locale))
     }
 }
 

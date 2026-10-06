@@ -24,12 +24,32 @@ final class ActivityLog {
     private(set) var events: [ActivityEvent] = []
     private var previous: [TransferItem] = []
     private var counter = 0
+    /// What was in flight when watching paused; nil while watching.
+    private var heldAcrossPause: [TransferItem]?
+
+    /// The transfer watcher is paused: nothing it reports now is a change.
+    /// Items vanishing from the (cleared) list are NOT completions — nobody
+    /// saw them finish — so no event is derived until watching resumes.
+    func pause() {
+        if heldAcrossPause == nil { heldAcrossPause = previous }
+        previous = []
+    }
 
     /// Feed the latest transfer snapshot; returns the full feed, newest first,
     /// capped at `capacity`.
+    ///
+    /// First record after a pause: items seen before the pause and seen
+    /// again are not "started" again; items that are gone finished while
+    /// monitoring was paused — when is unknown, so no event is invented.
     @discardableResult
     func record(_ transfers: [TransferItem], now: Date = Date()) -> [ActivityEvent] {
-        let descriptors = Self.diff(old: previous, new: transfers)
+        var old = previous
+        if let held = heldAcrossPause {
+            let present = Set(transfers.map(\.id))
+            old = held.filter { present.contains($0.id) }
+            heldAcrossPause = nil
+        }
+        let descriptors = Self.diff(old: old, new: transfers)
         previous = transfers
         guard !descriptors.isEmpty else { return events }
         let stamped = descriptors.map { d -> ActivityEvent in

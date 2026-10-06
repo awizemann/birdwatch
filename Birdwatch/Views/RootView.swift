@@ -113,15 +113,15 @@ struct RootView: View {
                 skipNextTick = started.duration(to: .now) >= .seconds(15)
             }
         }
+        // Appear and close go through the store's one rule
+        // (TransferWatchPolicy.shouldWatch) like every other surface: paused
+        // monitoring keeps the watcher off, and closing the window stops it
+        // only if the popover isn't open showing transfers.
         .onAppear {
-            // Paused monitoring keeps the watcher off; togglePauseAll resumes it.
-            guard TransferWatchPolicy.shouldResumeOnAppear(monitoringPaused: store.isGloballyPaused) else { return }
-            NotificationCenter.default.post(name: UbiquityTransferSource.resumeRequest, object: nil)
+            store.syncTransferWatcher(mainWindowOnScreen: true)
         }
         .onDisappear {
-            // Window closed: retire the FSEvents watcher + probe ticker (they
-            // otherwise run forever with only the menu-bar extra left).
-            NotificationCenter.default.post(name: UbiquityTransferSource.pauseRequest, object: nil)
+            store.syncTransferWatcher(mainWindowOnScreen: false)
         }
         // Minimise/restore and full cover/uncover fire no onAppear: re-apply
         // the watcher policy whenever the window goes on or off screen, or a

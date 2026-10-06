@@ -232,12 +232,23 @@ actor SnapshotGate {
 @Suite("Transfer watch policy")
 struct TransferWatchPolicyTests {
 
-    // The RootView and popover appear handlers both ask this; fails if a
-    // surface appearing while paused would restart the watcher.
-    @Test("A surface appearing resumes the watcher only while monitoring runs")
-    func appear() {
-        #expect(TransferWatchPolicy.shouldResumeOnAppear(monitoringPaused: false))
-        #expect(!TransferWatchPolicy.shouldResumeOnAppear(monitoringPaused: true))
+    // RootView's onDisappear used to post a pause directly, stopping the
+    // watcher under an open popover. It now asks the store's rule.
+    @MainActor @Test("Closing the window keeps watching while the popover is open")
+    func closeWithPopoverOpen() {
+        let calls = WatchCalls()
+        let store = SyncStore(source: StubSyncSource(snapshot: .minimal()), notifier: noBanners,
+                              setTransferWatching: { calls.values.append($0) },
+                              isMainWindowVisible: { true })   // NSApp not caught up yet
+        store.isMenuBarPopoverOpen = true
+        store.syncTransferWatcher(mainWindowOnScreen: false)
+        #expect(calls.values == [true])
+        store.isMenuBarPopoverOpen = false
+        store.syncTransferWatcher(mainWindowOnScreen: false)
+        #expect(calls.values == [true, false], "the closing window's own word beats a stale NSApp.windows")
+        store.togglePauseAll()
+        store.syncTransferWatcher(mainWindowOnScreen: true)
+        #expect(calls.values.last == false, "appearing while paused never resumes")
     }
 
     // A minimised window is not on screen: it must not hold the watcher on,
@@ -255,6 +266,20 @@ struct TransferWatchPolicyTests {
         ) == expected)
     }
 
+    // Alan's rule: no surprise TCC prompt. Without CONFIRMED Full Disk
+    // Access nothing reads ~/Desktop or ~/Documents (watcher roots, size
+    // walk, breakdown walk all follow this); a grant turns them on.
+    @Test("Desktop & Documents are read only with the feature on and FDA granted", arguments: [
+        (true, PermissionState?.some(.granted), true),
+        (true, PermissionState?.some(.denied), false),
+        (true, PermissionState?.some(.unknown), false),
+        (true, PermissionState?.none, false),          // not probed yet
+        (false, PermissionState?.some(.granted), false),
+    ])
+    func readsDesktopDocuments(featureOn: Bool, fda: PermissionState?, expected: Bool) {
+        #expect(TransferWatchPolicy.readsDesktopDocuments(featureOn: featureOn, fullDiskAccess: fda) == expected)
+    }
+
     // Fails on the old "visible and not an NSPanel" test, which the always-
     // visible NSStatusBarWindow (identifier nil, not a panel) satisfied.
     @Test("Only the visible window identified 'main' counts as the main window")
@@ -267,3 +292,5 @@ struct TransferWatchPolicyTests {
         #expect(!TransferWatchPolicy.isMainWindow(identifier: "main-AppWindow-1", isVisible: true, isPanel: false))
     }
 }
+
+@MainActor private final class WatchCalls { var values: [Bool] = [] }

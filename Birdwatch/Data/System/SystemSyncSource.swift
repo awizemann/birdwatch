@@ -80,6 +80,11 @@ final class SystemSyncSource: SyncSource {
     @MainActor private var cachedDump: (value: BrctlDump, mapped: MappedDump, at: Date)?
     @MainActor private var dumpScanInFlight = false
     @MainActor private var lastDumpAttempt: Date?
+    // No dump may be claimed before this: set when a brctl read timed out,
+    // because bird keeps serving the killed request for its remaining 15–28 s
+    // and the next read would queue behind it. Separate from the pacing
+    // clock, so shortening the pacing (forgetRetryQueueItem) keeps it.
+    @MainActor private var dumpHoldUntil: Date?
     // Why the most recent dump refresh failed (nil after a success), and how
     // many in a row — the engine card says "timed out", not "check FDA", and
     // a dump that keeps failing backs off (see `dumpRetryInterval`).
@@ -141,12 +146,34 @@ final class SystemSyncSource: SyncSource {
     /// pass a recording stub.
     nonisolated init(
         brctlRunner: any ProcessRunning = ProcessRunner(),
-        pathCandidates: @escaping @Sendable () -> [PathCandidate] = { RedactedPathResolver.candidates() }
+        pathCandidates: @escaping @Sendable () -> [PathCandidate] = { RedactedPathResolver.candidates() },
+        desktopDocumentsReaders: DesktopDocumentsReaders = .live
     ) {
         cloudDocs = CloudDocsSource(runner: brctlRunner)
         dumpSource = BrctlDumpSource(runner: brctlRunner)
         self.pathCandidates = pathCandidates
+        self.readers = desktopDocumentsReaders
     }
+
+    /// Everything on the snapshot path that can read ~/Desktop or ~/Documents
+    /// (plus the permissions probe that gates it), injectable so a test can
+    /// prove the Full Disk Access gate reaches every one of them.
+    nonisolated struct DesktopDocumentsReaders: Sendable {
+        var permissions: @Sendable () async -> [PermissionStatus]
+        var localSizes: @Sendable ([AppContainerSource.Container], Bool) async -> [String: LocalSize]
+        var breakdown: @Sendable (Bool) async -> (totals: [StorageCategory: Int64], isPartial: Bool)
+
+        static let live = DesktopDocumentsReaders(
+            permissions: { await PermissionsProbe.currentPermissions() },
+            localSizes: { await AppContainerSource.localSizes(containers: $0, includeDesktopDocuments: $1) },
+            breakdown: { await StorageBreakdownSource.currentTotals(includeDesktopDocuments: $0) }
+        )
+    }
+    private let readers: DesktopDocumentsReaders
+
+    /// Test seam: the transfer watcher the gate drives (normally created
+    /// lazily by the first snapshot).
+    @MainActor func installTransferWatcherForTesting(_ watcher: UbiquityTransferSource) { metadata = watcher }
 
     func currentSnapshot() async -> SyncSnapshot {
         // Lazily start the metadata query on first use (needs the main runloop).
@@ -159,7 +186,14 @@ final class SystemSyncSource: SyncSource {
             if activityLog == nil { activityLog = ActivityLog() }
             let transfers = metadata?.transfers ?? []
             // Feed the fresh snapshot; the log diffs against the previous one.
-            let activity = activityLog?.record(transfers) ?? []
+            // While the watcher is paused its (cleared) list is not news.
+            let activity: [ActivityEvent]
+            if metadata?.isPaused == true {
+                activityLog?.pause()
+                activity = activityLog?.events ?? []
+            } else {
+                activity = activityLog?.record(transfers) ?? []
+            }
             return (transfers, activity)
         }
 
@@ -201,15 +235,19 @@ final class SystemSyncSource: SyncSource {
         // confirms it, and a later FAILED read keeps the last-known answer
         // instead of flapping the watcher.
         let desktopDocumentsSynced = statusRead.desktopDocumentsSynced
-        await MainActor.run { metadata?.setIncludesDesktopDocuments(desktopDocumentsSynced) }
-        let permissions: [PermissionStatus]
-        let cached = await MainActor.run(body: { cachedPermissions })
-        if let cached, Date().timeIntervalSince(cached.at) < 300 {
-            permissions = cached.values
-        } else {
-            permissions = await PermissionsProbe.currentPermissions()
-            await MainActor.run { cachedPermissions = (permissions, Date()) }
-        }
+        // Containers first: the footprint walks below need them.
+        // One capped, shallow container enumeration, time-boxed like every other
+        // system scan (§6) and single-flight on its own queue like the folder
+        // scan: on timeout the last completed result is served.
+        let containerReading = await containerScan.reading(within: 5)
+        let containers = containerReading.value ?? []
+        let gate = await applyDesktopDocumentsGate(
+            featureOn: desktopDocumentsSynced, containers: containers, now: Date())
+        let permissions = gate.permissions
+        let fullDiskAccess = gate.fullDiskAccess
+        let readsDesktopDocuments = gate.readsDesktopDocuments
+        let localSizes = gate.localSizes
+        let breakdownCache = gate.breakdownCache
 
         let conflicts: [ConflictSource.FoundConflict]
         let cachedC = await MainActor.run(body: { usableConflictCache(now: Date()) })
@@ -231,56 +269,6 @@ final class SystemSyncSource: SyncSource {
                     await MainActor.run {
                         self.completeConflictScan(scanned?.found, resolvedBeforeScan: resolvedBeforeScan,
                                                   isCapped: scanned?.isCapped ?? false)
-                    }
-                }
-            }
-        }
-
-        // One capped, shallow container enumeration, time-boxed like every other
-        // system scan (§6) and single-flight on its own queue like the folder
-        // scan: on timeout the last completed result is served.
-        let containerReading = await containerScan.reading(within: 5)
-        let containers = containerReading.value ?? []
-        // Local footprint: served stale-or-empty, refreshed in the background at
-        // most every 5 minutes. Sizes land on a later cycle — never gating paint.
-        let sizesCache = await MainActor.run(body: { cachedLocalSizes })
-        let localSizes = sizesCache?.values ?? [:]
-        if Self.footprintCacheIsDue(sizesCache.map { ($0.at, $0.includedDesktopDocuments) }, desktopDocuments: desktopDocumentsSynced, now: Date()) {
-            let claimed = await MainActor.run { () -> Bool in
-                guard !sizeScanInFlight else { return false }
-                sizeScanInFlight = true
-                return true
-            }
-            if claimed {
-                Task { [weak self] in
-                    let measured = await AppContainerSource.localSizes(
-                        containers: containers, includeDesktopDocuments: desktopDocumentsSynced)
-                    guard let self else { return }
-                    await MainActor.run {
-                        self.cachedLocalSizes = (measured, Date(), desktopDocumentsSynced)
-                        self.sizeScanInFlight = false
-                    }
-                }
-            }
-        }
-
-        // File-type breakdown: identical discipline. Served stale-or-nil, so the
-        // Storage view shows its breakdown from a later cycle, never blocking one.
-        let breakdownCache = await MainActor.run(body: { cachedBreakdown })
-        if Self.footprintCacheIsDue(breakdownCache.map { ($0.at, $0.includedDesktopDocuments) }, desktopDocuments: desktopDocumentsSynced, now: Date()) {
-            let claimed = await MainActor.run { () -> Bool in
-                guard !breakdownScanInFlight else { return false }
-                breakdownScanInFlight = true
-                return true
-            }
-            if claimed {
-                Task { [weak self] in
-                    let measured = await StorageBreakdownSource.currentTotals(
-                        includeDesktopDocuments: desktopDocumentsSynced)
-                    guard let self else { return }
-                    await MainActor.run {
-                        self.cachedBreakdown = (measured.totals, measured.isPartial, Date(), desktopDocumentsSynced)
-                        self.breakdownScanInFlight = false
                     }
                 }
             }
@@ -327,7 +315,8 @@ final class SystemSyncSource: SyncSource {
             localSizes: localSizes,
             cloudKitApps: observedCloudKit,
             stateNote: cloudDocsRead.staleNote,
-            desktopDocuments: statusRead.desktopDocuments(now: Date())
+            desktopDocuments: statusRead.desktopDocuments(now: Date()),
+            desktopDocumentsReadable: readsDesktopDocuments
         )
 
         // Per-producer delivery (see SyncSnapshot.issueProducers). Only a
@@ -359,7 +348,7 @@ final class SystemSyncSource: SyncSource {
             retryQueueTotal: mapped?.retryQueueTotal ?? 0,
             engine: Self.engine(
                 reading: cloudDocsRead, mapped: mapped, dumpFailure: dumpFailure,
-                fullDiskAccess: permissions.first { $0.name == "Full Disk Access" }?.state ?? .unknown
+                fullDiskAccess: fullDiskAccess
             ),
             permissions: permissions,
             bandwidth: bandwidth,                 // nettop deltas — estimated
@@ -435,6 +424,7 @@ final class SystemSyncSource: SyncSource {
         guard !dumpScanInFlight else { return false }
         let interval = Self.dumpRetryInterval(consecutiveFailures: dumpConsecutiveFailures)
         guard lastDumpAttempt.map({ now.timeIntervalSince($0) >= interval }) ?? true else { return false }
+        guard dumpHoldUntil.map({ now >= $0 }) ?? true else { return false }
         dumpScanInFlight = true
         lastDumpAttempt = now
         return true
@@ -477,7 +467,11 @@ final class SystemSyncSource: SyncSource {
                 forgottenRetryIDs = applied.keptIDs
                 cachedDump = (fresh.dump, applied.mapped, Date())
             }
-            // Claim the status read in the same hop.
+            // Claim the status read in the same hop — unless the dump just
+            // timed out: bird is still working on the abandoned dump, so a
+            // status now would queue behind it and time out too. Not marked
+            // as an attempt, so it is due again on the next refresh.
+            if case .failure(.timedOut) = read { return false }
             guard statusCache.isDue(now: Date()) else { return false }
             statusCache.markAttempt(at: Date())
             return true
@@ -490,10 +484,90 @@ final class SystemSyncSource: SyncSource {
                 // bird keeps serving it for the rest of its 15–28 s. Restart
                 // the dump's clock now so the next dump does not queue behind
                 // it, time out, and blame itself.
-                if case .failure = result { lastDumpAttempt = Date() }
+                if case .failure = result { dumpHoldUntil = Date() + Self.dumpTTL }
             }
         }
         await MainActor.run { dumpScanInFlight = false }
+    }
+
+    // MARK: - Desktop & Documents gate (the only path that may read them)
+
+    struct DesktopDocumentsGate {
+        let permissions: [PermissionStatus]
+        let fullDiskAccess: PermissionState
+        let readsDesktopDocuments: Bool
+        let localSizes: [String: LocalSize]
+        let breakdownCache: (totals: [StorageCategory: Int64], isPartial: Bool, at: Date, includedDesktopDocuments: Bool)?
+    }
+
+    /// Probes permissions (5-minute cache), decides whether ~/Desktop and
+    /// ~/Documents may be read (`TransferWatchPolicy.readsDesktopDocuments`:
+    /// the feature on AND Full Disk Access granted — without it, touching
+    /// them raises a surprise TCC prompt), and hands that ONE decision to all
+    /// three readers: the transfer watcher's roots, the local size walk and
+    /// the Storage breakdown walk. The walks are single-flight background
+    /// Tasks served stale-or-empty; their caches are stamped with the
+    /// decision, so a grant (or revocation) re-walks on the next cycle.
+    func applyDesktopDocumentsGate(
+        featureOn: Bool, containers: [AppContainerSource.Container], now: Date
+    ) async -> DesktopDocumentsGate {
+        let permissions: [PermissionStatus]
+        let cached = await MainActor.run(body: { cachedPermissions })
+        if let cached, now.timeIntervalSince(cached.at) < 300 {
+            permissions = cached.values
+        } else {
+            permissions = await readers.permissions()
+            await MainActor.run { cachedPermissions = (permissions, now) }
+        }
+        let fullDiskAccess = permissions.first { $0.name == "Full Disk Access" }?.state ?? .unknown
+        let reads = TransferWatchPolicy.readsDesktopDocuments(featureOn: featureOn, fullDiskAccess: fullDiskAccess)
+        await MainActor.run { metadata?.setIncludesDesktopDocuments(reads) }
+
+        // Local footprint: served stale-or-empty, refreshed in the background at
+        // most every 5 minutes. Sizes land on a later cycle — never gating paint.
+        let readers = readers
+        let sizesCache = await MainActor.run(body: { cachedLocalSizes })
+        if Self.footprintCacheIsDue(sizesCache.map { ($0.at, $0.includedDesktopDocuments) }, desktopDocuments: reads, now: now) {
+            let claimed = await MainActor.run { () -> Bool in
+                guard !sizeScanInFlight else { return false }
+                sizeScanInFlight = true
+                return true
+            }
+            if claimed {
+                Task { [weak self] in
+                    let measured = await readers.localSizes(containers, reads)
+                    guard let self else { return }
+                    await MainActor.run {
+                        self.cachedLocalSizes = (measured, Date(), reads)
+                        self.sizeScanInFlight = false
+                    }
+                }
+            }
+        }
+
+        // File-type breakdown: identical discipline. Served stale-or-nil, so the
+        // Storage view shows its breakdown from a later cycle, never blocking one.
+        let breakdownCache = await MainActor.run(body: { cachedBreakdown })
+        if Self.footprintCacheIsDue(breakdownCache.map { ($0.at, $0.includedDesktopDocuments) }, desktopDocuments: reads, now: now) {
+            let claimed = await MainActor.run { () -> Bool in
+                guard !breakdownScanInFlight else { return false }
+                breakdownScanInFlight = true
+                return true
+            }
+            if claimed {
+                Task { [weak self] in
+                    let measured = await readers.breakdown(reads)
+                    guard let self else { return }
+                    await MainActor.run {
+                        self.cachedBreakdown = (measured.totals, measured.isPartial, Date(), reads)
+                        self.breakdownScanInFlight = false
+                    }
+                }
+            }
+        }
+        return DesktopDocumentsGate(
+            permissions: permissions, fullDiskAccess: fullDiskAccess, readsDesktopDocuments: reads,
+            localSizes: sizesCache?.values ?? [:], breakdownCache: breakdownCache)
     }
 
     // MARK: - Conflict scan bookkeeping (MainActor; split out for tests)
@@ -601,6 +675,9 @@ final class SystemSyncSource: SyncSource {
             if let count = cachedDump?.mapped.retryQueueTotal, count > 0 {
                 cachedDump?.mapped.retryQueueTotal = count - 1
             }
+            // Refresh soon so bird's own view catches up — by shortening the
+            // pacing clock only. `dumpHoldUntil` (a status read that timed
+            // out is still running inside bird) is left alone.
             lastDumpAttempt = nil
         }
     }
@@ -670,7 +747,8 @@ final class SystemSyncSource: SyncSource {
         localSizes: [String: LocalSize] = [:],
         cloudKitApps: [AppSyncState] = [],
         stateNote: String? = nil,
-        desktopDocuments: DesktopDocumentsFlag? = nil
+        desktopDocuments: DesktopDocumentsFlag? = nil,
+        desktopDocumentsReadable: Bool = true
     ) -> [AppSyncState] {
         var apps: [AppSyncState] = []
         let home = NSHomeDirectory()
@@ -691,7 +769,8 @@ final class SystemSyncSource: SyncSource {
                 // absent rather than a placeholder zero.
                 itemCount: nil, pendingItems: own.count,
                 localSize: localSizes[id],     // background size pass; nil until it lands
-                locationPath: location
+                locationPath: location,
+                lastActivityNote: stateNote
             )
         }
 
@@ -717,11 +796,14 @@ final class SystemSyncSource: SyncSource {
                 id: "desktop-documents", name: "Desktop & Documents", tile: "ffa62b",
                 location: "~/Desktop · ~/Documents"
             )
+            if !desktopDocumentsReadable {
+                Self.markNeedsFullDiskAccess(&row)
+            }
             if let lastKnown {
                 // Visible in the list and popover too, not just the detail
                 // callout: this row must not read as freshly confirmed.
                 row.statusLine += " · last-known setting"
-                row.infoCallout = lastKnown
+                row.infoCallout = [row.infoCallout, lastKnown].compactMap { $0 }.joined(separator: " ")
             }
             apps.append(row)
         }
@@ -761,10 +843,22 @@ final class SystemSyncSource: SyncSource {
         return apps
     }
 
+    /// The Desktop & Documents row while Birdwatch is not reading those
+    /// folders (no Full Disk Access): nothing is watched or measured, so no
+    /// status, pending count or size may be claimed (C1) — the row says why.
+    nonisolated static func markNeedsFullDiskAccess(_ row: inout AppSyncState) {
+        row.status = .unknown
+        row.statusLine = "Transfers need Full Disk Access"
+        row.pendingItems = nil
+        row.localSize = LocalSize(bytes: 0, isUnreadable: true)
+        row.needsFullDiskAccess = true
+        row.infoCallout = "Desktop & Documents transfers need Full Disk Access. Without it Birdwatch doesn't watch or measure ~/Desktop and ~/Documents, so macOS never prompts you for them."
+    }
+
     /// Status of a built-in CloudDocs row. Every claim needs evidence (C1):
     /// - file transfers seen → syncing;
-    /// - no CloudDocs state at all → unknown, never "synced";
-    /// - bird's client state not idle → busy (the engine is working even
+    /// - no CloudDocs state at all → `.unknown` (neutral), never "synced";
+    /// - bird's client state not idle → `.active` (the engine is working even
     ///   though no file-level transfer is visible);
     /// - idle → up to date, worded as what bird said, not "all files synced".
     /// A not-current state carries its `stateNote` ("last-known, … ago").
@@ -778,15 +872,14 @@ final class SystemSyncSource: SyncSource {
         }
         let suffix = stateNote.map { " · \($0)" } ?? ""
         guard let state else {
-            // TODO: a neutral "unknown" status case would read better than
-            // `.issue`; until one exists, never fall back to `.upToDate`.
-            return (.issue("Sync state unknown"), "Sync state unknown")
+            // Neutral, never `.issue` (a red "Needs attention" on every first
+            // launch before the dump lands) and never `.upToDate`.
+            return (.unknown, "Sync state unknown")
         }
         if !state.isIdle {
-            // TODO(.active): use `AppSyncStatus.active` (work in progress, no
-            // progress figure) once it lands; `.syncing(progress: 0)` is the
-            // closest case on this base and is not "up to date".
-            return (.syncing(progress: 0), "Sync engine busy, no file transfers seen" + suffix)
+            // Work without a progress figure: `.active`, never `.syncing(0)`,
+            // which would drag the overall progress mean to zero.
+            return (.active, "Sync engine busy, no file transfers seen" + suffix)
         }
         return (.upToDate, "Sync engine idle" + suffix)
     }
@@ -797,7 +890,7 @@ final class SystemSyncSource: SyncSource {
         return [IssueItem(
             id: "issue-low-quota", severity: .warning,
             title: "iCloud storage is nearly full",
-            meta: "Storage · \(Format.sizeNonisolated(quota)) remaining",
+            meta: "Storage · \(Format.capacity(quota)) remaining",
             reason: "Your account is close to its storage limit. Sync of new files may fail until you free space or upgrade your plan.",
             action: .manageStorage, symbolName: "externaldrive.badge.exclamationmark",
             // Account-level: no app owns the quota, so no per-app mute can
@@ -941,7 +1034,4 @@ final class SystemSyncSource: SyncSource {
 extension Format {
     /// Nonisolated byte formatting for non-view contexts (Format itself is
     /// MainActor for the view layer).
-    nonisolated static func sizeNonisolated(_ bytes: Int64) -> String {
-        String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
-    }
 }

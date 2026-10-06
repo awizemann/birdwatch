@@ -81,6 +81,19 @@ struct IssuesEmptyState: Equatable {
         fullDiskAccess: PermissionState?, isPaused: Bool,
         deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?
     ) {
+        let lines = Self.qualifiers(fullDiskAccess: fullDiskAccess, isPaused: isPaused,
+                                    deliveredProducers: deliveredProducers, conflictScanCap: conflictScanCap)
+        title = "No issues detected"
+        isClean = lines.isEmpty
+        self.lines = isClean ? ["Birdwatch hasn't found anything that needs your attention."] : lines
+    }
+
+    /// Why the issue list (empty or not) may be incomplete. Shared by the
+    /// empty state, the lines above a non-empty list, and the Overview tile.
+    static func qualifiers(
+        fullDiskAccess: PermissionState?, isPaused: Bool,
+        deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?
+    ) -> [String] {
         var lines: [String] = []
         if isPaused {
             lines.append("Monitoring is paused, so new issues aren't being detected.")
@@ -107,8 +120,25 @@ struct IssuesEmptyState: Equatable {
         if let cap = conflictScanCap {
             lines.append("The conflict check stopped after \(cap.formatted()) items, so files beyond that weren't checked.")
         }
-        title = "No issues detected"
-        isClean = lines.isEmpty
-        self.lines = isClean ? ["Birdwatch hasn't found anything that needs your attention."] : lines
+        return lines
+    }
+}
+
+/// The Overview "Issues" tile. A bare "0" is a claim that nothing is wrong;
+/// when checks are incomplete it is "—" (none found, but not fully checked),
+/// and a non-zero count says it may be incomplete.
+enum IssuesTile {
+    static func display(count: Int, qualifiers: [String]) -> (value: String, caption: String?) {
+        guard !qualifiers.isEmpty else { return ("\(count)", nil) }
+        return count == 0 ? ("—", "None found — not fully checked") : ("\(count)", "May be incomplete")
+    }
+}
+
+/// Activity feed with no events yet.
+enum ActivityEmptyState {
+    static func text(paused: Bool) -> String {
+        paused
+            ? "Monitoring is paused — no new activity is being recorded."
+            : "No sync activity seen since Birdwatch started."
     }
 }

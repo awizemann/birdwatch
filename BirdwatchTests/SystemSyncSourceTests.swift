@@ -94,7 +94,7 @@ struct SystemSyncSourceAssemblyTests {
         )
         let busyDrive = busy.first { $0.id == "icloud-drive" }
         #expect(busyDrive?.statusLine == "Sync engine busy, no file transfers seen")
-        #expect(busyDrive?.status != .upToDate, "a busy engine is not up to date")
+        #expect(busyDrive?.status == .active, "busy without progress is .active, never .syncing(0)")
 
         let idle = SystemSyncSource.buildApps(
             status: Self.status(isIdle: true), transfers: [], fileProviderDomains: []
@@ -104,7 +104,8 @@ struct SystemSyncSourceAssemblyTests {
 
         let unknown = SystemSyncSource.buildApps(status: nil, transfers: [], fileProviderDomains: [])
         #expect(unknown.first { $0.id == "icloud-drive" }?.statusLine == "Sync state unknown")
-        #expect(unknown.first { $0.id == "icloud-drive" }?.status != .upToDate)
+        #expect(unknown.first { $0.id == "icloud-drive" }?.status == .unknown,
+                "no state yet is neutral — not .issue (red) and not .upToDate")
 
         let stale = SystemSyncSource.buildApps(
             status: Self.status(isIdle: true), transfers: [], fileProviderDomains: [],
@@ -186,7 +187,7 @@ struct SystemSyncSourceAssemblyTests {
         let issue = try #require(issues.first)
         #expect(issue.id == "issue-low-quota")
         #expect(issue.severity == .warning)
-        #expect(issue.meta.contains("5.0 GB"))
+        #expect(issue.meta.contains("5 GB"))
         #expect(issue.appID == nil)
     }
 
@@ -466,6 +467,29 @@ struct SystemSyncSourceAssemblyTests {
         #expect(row.statusLine == "Sync engine idle · last-known setting")
     }
 
+    // Without FDA the Desktop & Documents row must not claim "idle", a
+    // pending count of none or a size — Birdwatch isn't reading the folders.
+    @Test("Without Full Disk Access the Desktop & Documents row says transfers need it")
+    func desktopDocumentsNeedsFDA() throws {
+        let apps = SystemSyncSource.buildApps(
+            status: Self.desktopOn, transfers: [], fileProviderDomains: [],
+            localSizes: ["desktop-documents": LocalSize(bytes: 42)],
+            desktopDocumentsReadable: false)
+        let row = try #require(apps.first { $0.id == "desktop-documents" })
+        #expect(row.statusLine == "Transfers need Full Disk Access")
+        #expect(row.status == .unknown)
+        #expect(row.pendingItems == nil)
+        #expect(row.localSize?.isUnreadable == true)
+        #expect(row.needsFullDiskAccess)
+        #expect(row.infoCallout?.hasPrefix("Desktop & Documents transfers need Full Disk Access") == true)
+
+        let granted = SystemSyncSource.buildApps(
+            status: Self.desktopOn, transfers: [], fileProviderDomains: [], desktopDocumentsReadable: true)
+        let readable = try #require(granted.first { $0.id == "desktop-documents" })
+        #expect(!readable.needsFullDiskAccess)
+        #expect(readable.statusLine == "Sync engine idle")
+    }
+
     @Test("Container state comes from the dump; per-app lines only from status; status alone is aged")
     func cloudDocsReadingMerge() throws {
         var cache = CloudDocsStatusCache()
@@ -512,8 +536,12 @@ private nonisolated final class RecordingBrctlRunner: ProcessRunning {
     }
     let state = OSAllocatedUnfairLock(initialState: State())
     let statusTimesOut: Bool
+    let dumpTimesOut: Bool
 
-    init(statusTimesOut: Bool = false) { self.statusTimesOut = statusTimesOut }
+    init(statusTimesOut: Bool = false, dumpTimesOut: Bool = false) {
+        self.statusTimesOut = statusTimesOut
+        self.dumpTimesOut = dumpTimesOut
+    }
 
     static let dump = """
         1 containers matching '*'
@@ -533,6 +561,7 @@ private nonisolated final class RecordingBrctlRunner: ProcessRunning {
         defer { state.withLock { $0.events.append("end \(kind)"); $0.inFlight -= 1 } }
         switch kind {
         case "dump":
+            if dumpTimesOut { throw RunnerError.timeout }
             if let flag = arguments.firstIndex(of: "-o"), flag + 1 < arguments.count {
                 try Self.dump.write(toFile: arguments[flag + 1], atomically: true, encoding: .utf8)
             }
@@ -560,14 +589,39 @@ struct BrctlRefreshOrderingTests {
         let runner = RecordingBrctlRunner()
         let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
         let now = Date()
-        #expect(await source.claimDumpRefresh(now: now))
-        #expect(await !source.claimDumpRefresh(now: now + 3600), "single flight while the refresh runs")
+        #expect(source.claimDumpRefresh(now: now))
+        #expect(!source.claimDumpRefresh(now: now + 3600), "single flight while the refresh runs")
         await source.performDumpRefresh()
 
         #expect(runner.events == ["start dump", "end dump", "start status", "end status"])
         #expect(runner.maxInFlight == 1)
         let flag = source.statusCacheForTesting.desktopDocuments(now: Date())
         #expect(flag == .on(lastKnown: nil))
+    }
+
+    // bird keeps serving a dump we abandoned at its timeout; a status sent
+    // right after would queue behind it and time out as well.
+    @Test("A timed-out dump skips status this cycle without consuming its attempt")
+    func dumpTimeoutSkipsStatus() async {
+        let runner = RecordingBrctlRunner(dumpTimesOut: true)
+        let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        #expect(source.claimDumpRefresh(now: Date()))
+        await source.performDumpRefresh()
+        #expect(runner.events == ["start dump", "end dump"], "no status after a dump timeout")
+        #expect(source.statusCacheForTesting.isDue(now: Date()), "status was not marked as attempted")
+    }
+
+    // Forgetting a retry item shortens the pacing so bird's view refreshes
+    // soon — but must not let a dump queue behind a status that timed out.
+    @Test("Forgetting a retry item keeps the hold after a status timeout")
+    func forgetKeepsStatusTimeoutHold() async {
+        let runner = RecordingBrctlRunner(statusTimesOut: true)
+        let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        #expect(source.claimDumpRefresh(now: Date() - 600))
+        await source.performDumpRefresh()
+        await source.forgetRetryQueueItem(id: "x")
+        #expect(!source.claimDumpRefresh(now: Date() + 1))
+        #expect(source.claimDumpRefresh(now: Date() + 61))
     }
 
     // A timed-out status keeps bird busy for its remaining 15–28 s; the next
@@ -578,10 +632,10 @@ struct BrctlRefreshOrderingTests {
         let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
         // Claimed "long ago": without the re-stamp, a claim right after the
         // refresh would pass the 60 s gate.
-        #expect(await source.claimDumpRefresh(now: Date() - 600))
+        #expect(source.claimDumpRefresh(now: Date() - 600))
         await source.performDumpRefresh()
         #expect(runner.events.last == "end status")
-        #expect(await !source.claimDumpRefresh(now: Date() + 1))
-        #expect(await source.claimDumpRefresh(now: Date() + 61))
+        #expect(!source.claimDumpRefresh(now: Date() + 1))
+        #expect(source.claimDumpRefresh(now: Date() + 61))
     }
 }

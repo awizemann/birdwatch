@@ -93,17 +93,73 @@ struct DerivePlanTests {
         #expect(StorageBreakdownSource.derivePlan(usedBytes: 10_000_000_000, remainingBytes: nil) == nil)
     }
 
-    @Test("Beyond the largest tier Apple sells, no plan is claimed")
+    // The largest purchasable total is Apple One's 2 TB stacked with 12 TB.
+    @Test("Beyond the largest plan Apple sells, no plan is claimed")
     func aboveLargestTier() {
         #expect(StorageBreakdownSource.derivePlan(
-            usedBytes: 12_000_000_000_000, remainingBytes: 1_000_000_000_000) == nil)
+            usedBytes: 14_000_000_000_000, remainingBytes: 1_000_000_000_000) == nil)
+    }
+
+    private static let tb: Int64 = 1_000_000_000_000
+
+    /// derivePlan for a floor given in TB (used = 0, remaining = floor).
+    private static func derive(floorTB: Double) -> Int64? {
+        StorageBreakdownSource.derivePlan(usedBytes: 0, remainingBytes: Int64(floorTB * Double(tb)))?.capBytes
+    }
+
+    // The stacked totals (2.05/2.2/4/8/14 TB) made common single plans
+    // worse: a 6 TB user with a 3 TB floor was told "4 TB (2 TB + 2 TB)".
+    // A plan is derived only when exactly one total fits up to the next
+    // single tier; otherwise nothing is claimed and the user is asked.
+    @Test("2, 6, 8 and 12 TB users: derived only when one plan fits, else unknown")
+    func derivationPerPlan() {
+        // 2 TB user (1.8 TB floor): nothing else fits up to 2 TB.
+        #expect(Self.derive(floorTB: 1.8) == 2 * Self.tb)
+        // 6 TB user, nearly full (5.5 TB floor): only 6 TB fits.
+        #expect(Self.derive(floorTB: 5.5) == 6 * Self.tb)
+        // 6 TB user with a 3 TB floor: 4 TB stacked or 6 TB — ambiguous.
+        #expect(Self.derive(floorTB: 3.0) == nil)
+        #expect(StorageBreakdownSource.planIsAmbiguous(usedBytes: 0, remainingBytes: 3 * Self.tb))
+        // 12 TB user (10 TB floor): only 12 TB fits.
+        #expect(Self.derive(floorTB: 10) == 12 * Self.tb)
+        // Alan, 8 TB stacked: 91 GB here + 6.78 TB remaining ≈ 6.87 TB floor
+        // fits 8 TB (2 + 6) and 12 TB. Ambiguous — no cap, no usage.
+        #expect(StorageBreakdownSource.derivePlan(
+            usedBytes: 91_000_000_000, remainingBytes: 6_780_000_000_000) == nil)
+        #expect(StorageBreakdownSource.planCandidates(floorBytes: 6_871_000_000_000).map(\.bytes)
+                == [8 * Self.tb, 12 * Self.tb])
+        // Above every single tier only 14 TB (2 + 12) remains.
+        #expect(Self.derive(floorTB: 13) == 14 * Self.tb)
+        #expect(StorageBreakdownSource.planName(forCap: 8 * Self.tb) == "iCloud+ 8 TB (2 TB + 6 TB)")
+        // Never below the floor.
+        for floorTB in stride(from: 0.0, through: 14.0, by: 0.37) {
+            if let cap = Self.derive(floorTB: floorTB) { #expect(cap >= Int64(floorTB * Double(Self.tb))) }
+        }
+    }
+
+    @Test("An ambiguous plan states only a floor and asks")
+    func ambiguousStorageInfo() throws {
+        let info = try #require(StorageBreakdownSource.makeStorageInfo(
+            totals: [.documents: 91_000_000_000], remainingBytes: 6_780_000_000_000, planCapOverride: nil))
+        #expect(info.totalBytes == nil)
+        #expect(info.capSource == .unknown)
+        #expect(info.planIsAmbiguous)
+        #expect(info.accountUsedBytes == nil)
+        #expect(info.planName == "iCloud plan not confirmed")
+        #expect(StorageCapLabel.usageHeadline(used: info.usedBytes, cap: nil, capIsEstimated: false,
+                                              planIsAmbiguous: true)
+                == "Account usage unknown — at least 91 GB on this Mac")
+        // A user choice settles it.
+        let chosen = try #require(SyncStore.applyPlanCap(8 * Self.tb, to: info))
+        #expect(!chosen.planIsAmbiguous)
+        #expect(chosen.accountUsedBytes == 8 * Self.tb - 6_780_000_000_000)
     }
 
     @Test("Custom caps get an honest label")
     func customLabel() {
         #expect(StorageBreakdownSource.planName(forCap: 200_000_000_000) == "iCloud+ 200 GB")
         #expect(StorageBreakdownSource.planName(forCap: 100_000_000_000) == "iCloud 100 GB")
-        #expect(StorageBreakdownSource.planName(forCap: 3_000_000_000_000) == "iCloud+ 3.0 TB")
+        #expect(StorageBreakdownSource.planName(forCap: 3_000_000_000_000) == "iCloud+ 3 TB")
     }
 }
 
@@ -275,8 +331,7 @@ struct StorageAccountTierTests {
     @Test("Account usage is cap minus the live remaining quota")
     func accountUsedMath() throws {
         let account = try #require(StorageBreakdownSource.accountUsed(capBytes: cap, remainingBytes: remaining))
-        #expect(account.bytes == 1_794_670_000_000)
-        #expect(account.isClamped == false)
+        #expect(account == .used(1_794_670_000_000))
     }
 
     @Test("Either half unknown → no account figure at all")
@@ -288,12 +343,13 @@ struct StorageAccountTierTests {
         #expect(StorageBreakdownSource.accountUsed(capBytes: cap, remainingBytes: -1) == nil)
     }
 
-    @Test("Remaining larger than the cap clamps to zero and raises the flag")
-    func accountUsedClamped() throws {
+    // Fails on the old clamp, which reported "0 used" as a fact.
+    @Test("Remaining larger than the cap computes no usage at all")
+    func accountUsedCapBelowRemaining() throws {
         let account = try #require(StorageBreakdownSource.accountUsed(
             capBytes: 200_000_000_000, remainingBytes: 500_000_000_000))
-        #expect(account.bytes == 0)
-        #expect(account.isClamped)
+        #expect(account == .capBelowRemaining)
+        #expect(account.bytes == nil)
     }
 
     @Test("makeStorageInfo carries the account tier when the quota allows it")
@@ -303,7 +359,7 @@ struct StorageAccountTierTests {
         #expect(info.hasAccountTier)
         #expect(info.remainingBytes == remaining)
         #expect(info.accountUsedBytes == 1_794_670_000_000)
-        #expect(info.isAccountUsedClamped == false)
+        #expect(info.planCapBelowRemaining == false)
         // Local measurement is untouched by the account math.
         #expect(info.usedBytes == 91_000_000_000)
         // Two honest segments that sum back to account usage.
@@ -369,11 +425,11 @@ struct StorageAccountTierTests {
             totals: localTotals, remainingBytes: nil, planCapOverride: nil))
         #expect(noCap.footerFigure == .localOnly(used: 91_000_000_000))
 
-        // A clamped account figure is never trusted in the footer.
-        let clamped = try #require(StorageBreakdownSource.makeStorageInfo(
+        // A cap the quota contradicts is never used as a denominator.
+        let tooSmall = try #require(StorageBreakdownSource.makeStorageInfo(
             totals: localTotals, remainingBytes: 500_000_000_000, planCapOverride: 200_000_000_000))
-        #expect(clamped.isAccountUsedClamped)
-        #expect(clamped.footerFigure == .local(used: 91_000_000_000, cap: 200_000_000_000))
+        #expect(tooSmall.planCapBelowRemaining)
+        #expect(tooSmall.footerFigure == .localOnly(used: 91_000_000_000))
     }
 
     @Test("Footer progress divides by the cap and never leaves 0…1")
@@ -465,5 +521,68 @@ struct PlanCapPersistenceTests {
         #expect(store.storage?.capSource == .derived)
         // Dismissing/answering is still remembered, so the prompt stays closed.
         #expect(store.planCapConfirmed)
+    }
+}
+
+
+// Alan's Mac: a 2 TB plan setting while brctl quota reports 6.78 TB left on
+// a stacked 8 TB plan. The old code clamped usage and showed "0 GB of 2 TB
+// used" as fact.
+@MainActor
+@Suite("Storage — plan setting smaller than the remaining quota")
+struct PlanDisagreementTests {
+    private let localTotals: [StorageCategory: Int64] = [.documents: 61_000_000_000, .images: 30_000_000_000]
+    private let remaining: Int64 = 6_780_000_000_000
+    private let twoTB: Int64 = 2_000_000_000_000
+
+    @Test("A too-small plan setting computes no usage and is never a denominator")
+    func noUsageFromContradictedCap() throws {
+        let derived = try #require(StorageBreakdownSource.makeStorageInfo(
+            totals: localTotals, remainingBytes: remaining, planCapOverride: nil))
+        let info = try #require(SyncStore.applyPlanCap(twoTB, to: derived))
+        #expect(info.planCapBelowRemaining)
+        #expect(info.accountUsedBytes == nil)
+        #expect(!info.hasAccountTier)
+        #expect(info.trustedCapBytes == nil)
+        #expect(info.availableBytes == nil)
+        #expect(info.barDenominator == info.usedBytes)
+        #expect(info.footerFigure == .localOnly(used: 91_000_000_000))
+        #expect(StorageCapLabel.planDisagreement(cap: twoTB, remaining: remaining)
+                == "Your plan setting (2 TB) looks too small — iCloud reports 6.78 TB still available.")
+    }
+
+    @Test("Changing the plan suggests the derived stacked total, as a custom TB value")
+    func suggestionAfterDisagreement() throws {
+        let derived = try #require(StorageBreakdownSource.makeStorageInfo(
+            totals: localTotals, remainingBytes: remaining, planCapOverride: nil))
+        #expect(derived.totalBytes == nil, "8 TB stacked and 12 TB both fit: no cap is derived")
+        #expect(derived.planIsAmbiguous)
+        // The prompt starts from the smallest plan that fits; nothing is stored.
+        #expect(PlanPromptChoice.suggestedCap(derived) == 8_000_000_000_000)
+        let tooSmall = try #require(SyncStore.applyPlanCap(twoTB, to: derived))
+        let suggested = PlanPromptChoice.suggestedCap(tooSmall)
+        #expect(suggested == 8_000_000_000_000)
+        #expect(PlanPromptChoice.seed(for: suggested)
+                == .init(tierIndex: nil, customText: "8", customIsTB: true))
+        // An agreeing user choice is kept as the suggestion.
+        let agreeing = try #require(SyncStore.applyPlanCap(12_000_000_000_000, to: derived))
+        #expect(PlanPromptChoice.suggestedCap(agreeing) == 12_000_000_000_000)
+        #expect(PlanPromptChoice.seed(for: 12_000_000_000_000).tierIndex == 5)
+    }
+
+    @Test("Custom totals accept GB or TB and reject non-numbers")
+    func customTotals() throws {
+        #expect(PlanPromptChoice.customCap(text: "8", isTB: true) == 8_000_000_000_000)
+        #expect(PlanPromptChoice.customCap(text: " 2.2 ", isTB: true, locale: Locale(identifier: "en_US")) == 2_200_000_000_000)
+        #expect(PlanPromptChoice.customCap(text: "250", isTB: false) == 250_000_000_000)
+        #expect(PlanPromptChoice.customCap(text: "0", isTB: true) == nil)
+        #expect(PlanPromptChoice.customCap(text: "lots", isTB: true) == nil)
+        // A stacked custom total reads back as a named plan, and agrees with the quota.
+        let derived = try #require(StorageBreakdownSource.makeStorageInfo(
+            totals: localTotals, remainingBytes: remaining, planCapOverride: nil))
+        let eight = try #require(SyncStore.applyPlanCap(8_000_000_000_000, to: derived))
+        #expect(!eight.planCapBelowRemaining)
+        #expect(eight.planName == "iCloud+ 8 TB (2 TB + 6 TB)")
+        #expect(eight.accountUsedBytes == 8_000_000_000_000 - remaining)
     }
 }

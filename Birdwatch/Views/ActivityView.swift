@@ -9,7 +9,14 @@ struct ActivityView: View {
             ViewHeader(title: MonitorView.activity.title, subtitle: MonitorView.activity.subtitle)
 
             Card(padding: 0) {
-                LazyVStack(spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if store.activity.isEmpty {
+                        Text(ActivityEmptyState.text(paused: store.isGloballyPaused))
+                            .scaledFont(size: 12.5)
+                            .foregroundStyle(Surface.fg2)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                    }
                     ForEach(Array(store.activity.enumerated()), id: \.element.id) { index, event in
                         if index > 0 { Divider().overlay(Surface.cardLine) }
                         ActivityRow(event: event)

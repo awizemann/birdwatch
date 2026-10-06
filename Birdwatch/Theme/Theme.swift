@@ -184,24 +184,24 @@ enum Format {
         }
     }
 
-    static func gigabytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
-    }
+    /// Same formatter as `capacity` — one way to write a storage figure.
+    static func gigabytes(_ bytes: Int64) -> String { capacity(bytes) }
 
-    /// Plan-scale sizes: TB above a terabyte, GB below, trailing zeros trimmed
-    /// so it reads the way System Settings does ("1.8 TB", "2 TB", "205.3 GB").
-    nonisolated static func capacity(_ bytes: Int64) -> String {
+    /// Plan-scale sizes: TB above a terabyte, GB below, trailing zeros
+    /// dropped, in the user's locale — it reads the way System Settings does
+    /// ("1.8 TB", "2 TB", "205.3 GB"; "1,79 TB" in German). The one storage
+    /// formatter: storage headlines, plan lines, the low-quota issue.
+    nonisolated static func capacity(_ bytes: Int64, locale: Locale = .current) -> String {
         let tb = Double(bytes) / 1_000_000_000_000
-        if tb >= 1 { return trimmed(String(format: "%.2f", tb)) + " TB" }
-        return trimmed(String(format: "%.1f", Double(bytes) / 1_000_000_000)) + " GB"
+        if tb >= 1 {
+            return tb.formatted(.number.precision(.fractionLength(0...2)).grouping(.never).locale(locale)) + " TB"
+        }
+        let gb = Double(bytes) / 1_000_000_000
+        return gb.formatted(.number.precision(.fractionLength(0...1)).grouping(.never).locale(locale)) + " GB"
     }
 
-    /// "2.00" → "2", "1.80" → "1.8", "205.3" → "205.3".
-    private nonisolated static func trimmed(_ value: String) -> String {
-        guard value.contains(".") else { return value }
-        var out = value
-        while out.hasSuffix("0") { out.removeLast() }
-        if out.hasSuffix(".") { out.removeLast() }
-        return out
+    /// "54%" in the user's locale (French "54 %", etc.).
+    nonisolated static func percent(_ fraction: Double, locale: Locale = .current) -> String {
+        fraction.formatted(.percent.precision(.fractionLength(0)).locale(locale))
     }
 }

@@ -24,9 +24,11 @@ enum SyncBackend: String, Sendable, Hashable, Codable {
         }
     }
 
+    /// What the backend says about progress. CloudDocs' unentitled channel
+    /// is a per-file boolean (in flight or not) — never a percentage.
     var progressDetail: String {
         switch self {
-        case .cloudDocs: "Per-file exact"
+        case .cloudDocs: "In flight / done only (no percentage)"
         case .cloudKit, .fileProvider: "Status only"
         }
     }
@@ -44,13 +46,17 @@ enum AppSyncStatus: Sendable, Hashable {
     case active
     case paused
     case issue(String)
+    /// Nothing has been read yet that says what the engine is doing (e.g. the
+    /// first `brctl dump -i` has not landed). Neutral: neither a problem nor
+    /// "up to date" — it is not counted as idle, active or an issue (C1).
+    case unknown
 
     var isSyncing: Bool { if case .syncing = self { true } else { false } }
     /// Syncing with or without progress — anything that is doing work.
     var isActive: Bool {
         switch self {
         case .syncing, .active: true
-        case .upToDate, .paused, .issue: false
+        case .upToDate, .paused, .issue, .unknown: false
         }
     }
 }
@@ -96,9 +102,19 @@ struct AppSyncState: Sendable, Hashable, Identifiable {
     var queueCounts: [Int] = []
     var infoCallout: String?         // backend-limits explainer shown in detail
     var retryWarning: String?        // e.g. "3 items stuck — attempt 12 of 62"
-
-    static func == (lhs: AppSyncState, rhs: AppSyncState) -> Bool { lhs.id == rhs.id && lhs.status == rhs.status && lhs.statusLine == rhs.statusLine && lhs.lastActivity == rhs.lastActivity && lhs.pendingItems == rhs.pendingItems }
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    /// The recency tile's label when "Last synced" would be wrong — e.g. a
+    /// container row's date is the directory's modification time.
+    var lastActivityLabel: String? = nil
+    /// Qualifies `lastActivity` when it comes from a last-known (not
+    /// current) read: "last-known, brctl dump 4 min ago".
+    var lastActivityNote: String? = nil
+    /// Birdwatch deliberately isn't reading this app's folders until Full
+    /// Disk Access is granted (Desktop & Documents); the detail view offers
+    /// the settings deep link.
+    var needsFullDiskAccess = false
+    // Equatable/Hashable are synthesized over EVERY stored field: a custom
+    // == that ignored size, counts, callouts or backend let SwiftUI skip a
+    // real change.
 }
 
 // MARK: - Transfers
@@ -481,12 +497,21 @@ struct StorageInfo: Sendable, Hashable {
     /// available. This is the only account-scoped number Apple exposes.
     var remainingBytes: Int64? = nil
     /// TRUE account usage = cap − remaining. Non-nil only when BOTH the plan cap
-    /// and the live remaining quota are known; this is the figure that matches
-    /// System Settings → iCloud. Clamped at 0.
+    /// and the live remaining quota are known AND agree; this is the figure
+    /// that matches System Settings → iCloud.
     var accountUsedBytes: Int64? = nil
-    /// TRUE when `remainingBytes` exceeded the cap and account usage was clamped
-    /// to 0 — the cap and the quota disagree, so the tier is not trustworthy.
-    var isAccountUsedClamped: Bool = false
+    /// TRUE when iCloud reports more remaining than the plan cap — the plan
+    /// setting is too small (e.g. a stacked plan). No usage is computed and
+    /// the cap is not used as a denominator anywhere (`trustedCapBytes`).
+    var planCapBelowRemaining: Bool = false
+
+    /// No cap could be derived because several purchasable plans fit the
+    /// quota (and the user hasn't chosen one): account usage is unknown and
+    /// the plan question is asked.
+    var planIsAmbiguous: Bool = false
+
+    /// The cap, unless the live quota contradicts it.
+    var trustedCapBytes: Int64? { planCapBelowRemaining ? nil : totalBytes }
 
     /// The account headline is only shown when both halves of the sum are known.
     var hasAccountTier: Bool { accountUsedBytes != nil && totalBytes != nil }
@@ -515,10 +540,10 @@ struct StorageInfo: Sendable, Hashable {
     /// Sidebar footer selection: prefer the account figure so the footer agrees
     /// with System Settings; fall back to the local measurement.
     var footerFigure: StorageFooterFigure {
-        if let accountUsedBytes, let totalBytes, !isAccountUsedClamped {
+        if let accountUsedBytes, let totalBytes = trustedCapBytes {
             return .account(used: accountUsedBytes, cap: totalBytes)
         }
-        if let totalBytes { return .local(used: usedBytes, cap: totalBytes) }
+        if let totalBytes = trustedCapBytes { return .local(used: usedBytes, cap: totalBytes) }
         return .localOnly(used: usedBytes)
     }
 
@@ -527,12 +552,12 @@ struct StorageInfo: Sendable, Hashable {
     /// LOCAL footprint: allocated bytes on this Mac. Evicted files, Photos and
     /// device backups are not part of this number.
     var usedBytes: Int64 { segments.reduce(0) { $0 + $1.bytes } }
-    var availableBytes: Int64? { totalBytes.map { $0 - usedBytes } }
+    var availableBytes: Int64? { trustedCapBytes.map { $0 - usedBytes } }
     /// Denominator for the LOCAL bar. When the account tier is on screen the
     /// local card is its own scale (the cap belongs to the account bar);
     /// otherwise the cap when known, else the measured total.
     var barDenominator: Int64 {
-        max(hasAccountTier ? usedBytes : (totalBytes ?? usedBytes), 1)
+        max(hasAccountTier ? usedBytes : (trustedCapBytes ?? usedBytes), 1)
     }
 }
 

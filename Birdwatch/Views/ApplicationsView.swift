@@ -28,7 +28,7 @@ struct ApplicationsView: View {
             appGroup(label: "Apple apps", apps: apple)
             appGroup(label: "Third-party apps", apps: thirdParty)
 
-            SourceFootnote(text: "Per-app status from brctl (CloudDocs), cloudd item counts (CloudKit) and fileproviderd domain status (File Provider).")
+            SourceFootnote(text: "Per-app status from brctl dump -i and FSEvents transfer flags (CloudDocs), cloudd activity in the unified log over the last 30 min — no per-item progress or counts (CloudKit) — and fileproviderd domain status (File Provider).")
         }
     }
 
@@ -136,7 +136,7 @@ private struct AppRow: View {
         .focusEffectDisabled(false)
         .onHover { hovering = $0 }
         .accessibilityLabel(
-            "\(app.name), \(app.backend.badgeLabel), \(display.label)"
+            "\(app.name), \(app.backend.badgeLabel), \(display.label), \(app.statusLine)"
             + (app.localSize.map { $0.bytes > 0 ? ", \(LocalSizeText.text($0)) on this Mac" : "" } ?? "")
         )
         .accessibilityHint("Shows sync details")

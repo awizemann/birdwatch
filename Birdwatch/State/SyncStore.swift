@@ -54,7 +54,9 @@ enum MonitorView: String, CaseIterable, Identifiable, Hashable {
 @Observable
 final class SyncStore {
     // Snapshot data
-    private(set) var apps: [AppSyncState] = []
+    private(set) var apps: [AppSyncState] = [] {
+        didSet { recomputeEffectiveApps() }
+    }
     private(set) var transfers: [TransferItem] = []
     private(set) var driveFolders: [DriveFolder] = []
     private(set) var devices: [DeviceItem] = []
@@ -127,7 +129,9 @@ final class SyncStore {
     // BIRDWATCH'S MONITORING (macOS has no supported sync-pause API); the
     // per-app set MUTES an app's rows/notifications. Neither claims to touch
     // iCloud sync itself.
-    var isGloballyPaused = false
+    var isGloballyPaused = false {
+        didSet { recomputeEffectiveApps() }
+    }
     var pausedAppIDs: Set<String> = []
 
     private let source: any SyncSource
@@ -181,10 +185,13 @@ final class SyncStore {
     /// Runs or stops the transfer watcher per `TransferWatchPolicy.shouldWatch`.
     /// Called on pause/resume, after every fetch, and by the surfaces when
     /// they open, close, minimise or restore.
-    func syncTransferWatcher() {
+    /// - Parameter mainWindowOnScreen: what the caller knows for certain
+    ///   (the window's own appear/disappear), when NSApp.windows may not have
+    ///   caught up yet; nil asks `isMainWindowVisible`.
+    func syncTransferWatcher(mainWindowOnScreen: Bool? = nil) {
         setTransferWatching(TransferWatchPolicy.shouldWatch(
             monitoringPaused: isGloballyPaused,
-            mainWindowOnScreen: isMainWindowVisible(),
+            mainWindowOnScreen: mainWindowOnScreen ?? isMainWindowVisible(),
             popoverOpen: isMenuBarPopoverOpen
         ))
     }
@@ -248,11 +255,27 @@ final class SyncStore {
 
     // MARK: - Derived facts (single source of truth — never recomputed in views)
 
-    var effectiveApps: [AppSyncState] {
-        let date = self.now()
-        return apps.map { app in
-            var app = Self.agingCloudKitActivity(app, now: date)
-            if isGloballyPaused {
+    /// The apps as screens show them: CloudKit activity aged against the
+    /// clock and the paused overlay applied. Stored, not computed — every
+    /// derived fact below and several views read it, and rebuilding it per
+    /// read cost 6–7 passes per body. Recomputed when `apps` or the pause
+    /// flag changes, and on the freshness tick (`reageApps(now:)`).
+    private(set) var effectiveApps: [AppSyncState] = []
+
+    private func recomputeEffectiveApps(now date: Date? = nil) {
+        let next = Self.effectiveApps(apps, paused: isGloballyPaused, now: date ?? self.now())
+        if next != effectiveApps { effectiveApps = next }
+    }
+
+    /// Called on the 15 s freshness tick that Overview and the popover
+    /// already run: a CloudKit `.active` row ages out while a surface stays
+    /// open, not only when the next snapshot lands.
+    func reageApps(now date: Date) { recomputeEffectiveApps(now: date) }
+
+    static func effectiveApps(_ apps: [AppSyncState], paused: Bool, now date: Date) -> [AppSyncState] {
+        apps.map { app in
+            var app = agingCloudKitActivity(app, now: date)
+            if paused {
                 // Honest overlay: monitoring stopped, so every app keeps its
                 // LAST KNOWN status — we never claim the app's sync is paused.
                 app.statusLine = "Monitoring paused"
@@ -282,6 +305,14 @@ final class SyncStore {
     /// Every app doing work — with progress (`.syncing`) or without (`.active`).
     /// What "Active apps", the transfers card and the popover list count.
     var activeApps: [AppSyncState] { effectiveApps.filter { $0.status.isActive } }
+    /// Apps whose sync state has not been read yet — neutral, neither idle
+    /// nor an issue (the hero's idle claim names them). Rows Birdwatch is
+    /// deliberately not watching (no Full Disk Access) are counted apart.
+    var unknownStateAppCount: Int {
+        effectiveApps.filter { $0.status == .unknown && !$0.needsFullDiskAccess }.count
+    }
+    /// Rows not watched because Full Disk Access is missing.
+    var unwatchedApps: [AppSyncState] { effectiveApps.filter(\.needsFullDiskAccess) }
 
     /// Full Disk Access as the permissions probe last saw it (nil: not probed).
     var fullDiskAccess: PermissionState? {
@@ -341,12 +372,17 @@ final class SyncStore {
     /// Overall condition for headers. `.active`: no file is transferring, but
     /// some apps report work without any progress (CloudKit). `.idle` is only
     /// "nothing detected" — Birdwatch cannot prove every app is synced.
-    enum OverallState: Equatable { case paused, syncing(appCount: Int), active(appCount: Int), idle }
+    /// `.syncing` carries the apps with no progress too (`alsoActive`), so
+    /// every header counts the same apps as the "Active apps" tile and the
+    /// popover list: "Syncing 1 app · activity in 2 more".
+    enum OverallState: Equatable {
+        case paused, syncing(appCount: Int, alsoActive: Int = 0), active(appCount: Int), idle
+    }
     var overallState: OverallState {
         if isGloballyPaused { return .paused }
         let count = syncingApps.count
-        if count > 0 { return .syncing(appCount: count) }
         let active = effectiveApps.filter { $0.status == .active }.count
+        if count > 0 { return .syncing(appCount: count, alsoActive: active) }
         return active > 0 ? .active(appCount: active) : .idle
     }
 
@@ -604,7 +640,8 @@ final class SyncStore {
             capSource: .userChosen,
             remainingBytes: info.remainingBytes,
             accountUsedBytes: account?.bytes,
-            isAccountUsedClamped: account?.isClamped ?? false
+            planCapBelowRemaining: account == .capBelowRemaining,
+            planIsAmbiguous: false
         )
     }
 

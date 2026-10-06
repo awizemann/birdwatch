@@ -131,10 +131,40 @@ final class UbiquityTransferSource {
     func setIncludesDesktopDocuments(_ include: Bool) {
         guard include != includesDesktopDocuments else { return }
         includesDesktopDocuments = include
+        // Turning Desktop & Documents OFF (Full Disk Access revoked, or the
+        // feature switched off) must stop every read of those folders NOW:
+        // the 1 Hz probe would otherwise keep calling resourceValues on
+        // candidates under ~/Desktop — the very TCC prompt the gate prevents.
+        if !include { dropPathsOutsideRoots() }
         guard isStarted, !isPaused else { return }
         endWatching()
         beginWatching()
     }
+
+    /// The roots that may be read right now.
+    private var currentRoots: [String] {
+        rootsOverride ?? Self.defaultRoots(homeDirectory: homeDirectory, includeDesktopDocuments: includesDesktopDocuments)
+    }
+
+    /// Forgets candidates, transfers and completions outside `currentRoots`.
+    private func dropPathsOutsideRoots() {
+        let roots = currentRoots
+        candidates = candidates.filter { Self.isUnder($0.key, roots: roots) }
+        transfers.removeAll { !Self.isUnder($0.id, roots: roots) }
+        recentlyCompleted.removeAll { !Self.isUnder($0.item.id, roots: roots) }
+        probeCursor = 0
+    }
+
+    /// Path containment by whole components ("/a/Doc" is not under "/a/Do").
+    nonisolated static func isUnder(_ path: String, roots: [String]) -> Bool {
+        roots.contains { root in
+            let base = root.hasSuffix("/") ? String(root.dropLast()) : root
+            return path == base || path.hasPrefix(base + "/")
+        }
+    }
+
+    /// Home directory the default roots hang off — a test seam.
+    private let homeDirectory: String
 
     /// The shallow directory sweep (seed and rescan). Injected only so a test
     /// can hold a sweep open; production always lists the directories.
@@ -149,9 +179,11 @@ final class UbiquityTransferSource {
 
     init(
         roots: [String]? = nil,
+        homeDirectory: String = NSHomeDirectory(),
         sweep: @escaping @Sendable ([String]) async -> [String] = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) }
     ) {
         rootsOverride = roots
+        self.homeDirectory = homeDirectory
         self.sweep = sweep
         // Self-wiring: the instance listens for the app-wide pause/resume
         // signals itself, so no owner has to forward them.
@@ -192,12 +224,21 @@ final class UbiquityTransferSource {
 
     /// Tears down the FSEvents stream and the probe ticker (the whole cost)
     /// while keeping the notification observers, so `resume()` is one call.
-    /// `transfers` keeps its last value so a popover opened while paused still
-    /// shows something.
+    ///
+    /// Nothing observed before the pause is served as live (C1): `transfers`
+    /// and the completion buffer are cleared — a frozen list would read as
+    /// "in flight" in every snapshot taken while paused. Candidates are kept
+    /// (so resume can re-probe them) but forget that they were seen in
+    /// flight: one that finished while nobody watched is never stamped as
+    /// "completed now" on resume; it just ages out. One still in flight is
+    /// seen again by the first probe.
     func pause() {
         guard isStarted, !isPaused else { return }
         endWatching()
         isPaused = true
+        transfers.removeAll()
+        recentlyCompleted.removeAll()
+        candidates = candidates.mapValues { var c = $0; c.wasInFlight = false; return c }
         logger.info("transfer watcher paused")
     }
 
@@ -216,7 +257,7 @@ final class UbiquityTransferSource {
     // MARK: - Watching
 
     private func beginWatching() {
-        let roots = rootsOverride ?? Self.defaultRoots(includeDesktopDocuments: includesDesktopDocuments)
+        let roots = currentRoots
         guard !roots.isEmpty else {
             logger.warning("no ubiquity roots present; transfer watching disabled")
             return
@@ -311,7 +352,10 @@ final class UbiquityTransferSource {
             guard let self else { return }
             self.sweepTask = nil
             guard self.isStarted, !self.isPaused else { return }
-            self.ingest(paths: swept, at: sweptAt)
+            // The roots may have narrowed while the sweep ran (Desktop &
+            // Documents turned off): never ingest what may no longer be read.
+            let roots = self.currentRoots
+            self.ingest(paths: swept.filter { Self.isUnder($0, roots: roots) }, at: sweptAt)
             self.startQueuedSweep()
         }
     }
@@ -364,10 +408,16 @@ final class UbiquityTransferSource {
             if lingering != transfers { transfers = lingering }
             return
         }
-        let results = await Self.probe(paths: paths)
+        let probed = await Self.probe(paths: paths)
         guard isStarted, !isPaused else { return }
-        let now = Date()
-        let inFlight = Self.transferItems(from: results)
+        apply(probed, now: Date())
+    }
+
+    private func apply(_ probed: [UbiquityProbeResult], now: Date) {
+        // Same rule for a probe that was in flight when the roots narrowed.
+        let roots = currentRoots
+        let results = probed.filter { Self.isUnder($0.path, roots: roots) }
+        let inFlight = Self.transferItems(from: results, homeDirectory: homeDirectory)
         let before = candidates
         candidates = Self.reduce(candidates, results: results, now: now)
         // A candidate that WAS in flight and is now gone from the table
@@ -389,7 +439,10 @@ final class UbiquityTransferSource {
     // MARK: - Test seams (the probe budget is stateful, so it cannot be pure)
 
     func ingestForTesting(paths: [String], at date: Date) { ingest(paths: paths, at: date) }
+    var candidatePathsForTesting: Set<String> { Set(candidates.keys) }
     func probeBatchForTesting() -> [String] { probeBatch() }
+    /// One probe tick with injected results (no file system).
+    func applyProbeForTesting(_ results: [UbiquityProbeResult], now: Date) { apply(results, now: now) }
 
     // MARK: - Pure state machine (nonisolated for headless tests)
 

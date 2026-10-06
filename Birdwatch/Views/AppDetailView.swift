@@ -27,9 +27,14 @@ struct AppDetailView: View {
                 if let callout = app.infoCallout {
                     InfoCallout(text: callout)
                 }
+                if app.needsFullDiskAccess {
+                    Button("Open Full Disk Access Settings…") {
+                        PermissionsProbe.openFullDiskAccessSettings()
+                    }
+                }
 
                 if app.backend == .cloudDocs {
-                    transfersCard
+                    transfersCard(app)
                 }
 
                 if !app.queueLabels.isEmpty {
@@ -141,16 +146,25 @@ struct AppDetailView: View {
 
     // MARK: - Transfers (CloudDocs only)
 
-    private var transfersCard: some View {
+    private func transfersCard(_ app: AppSyncState) -> some View {
         let transfers = store.transfers(for: appID)
+        let note = TransferWatchNotes.qualifier(
+            paused: store.isGloballyPaused, unwatched: app.needsFullDiskAccess ? [app] : [])
         return VStack(alignment: .leading, spacing: 10) {
             SectionLabel(text: "Files in transfer")
             Card {
-                VStack(spacing: 12) {
-                    ForEach(transfers) { item in
-                        TransferRow(item: item)
-                        if item.id != transfers.last?.id {
-                            Divider().overlay(Surface.cardLine)
+                VStack(alignment: .leading, spacing: 12) {
+                    if transfers.isEmpty || app.needsFullDiskAccess {
+                        Text(note ?? "No files in transfer right now.")
+                            .scaledFont(size: 12.5)
+                            .foregroundStyle(Surface.fg2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(transfers) { item in
+                            TransferRow(item: item)
+                            if item.id != transfers.last?.id {
+                                Divider().overlay(Surface.cardLine)
+                            }
                         }
                     }
                 }
@@ -248,7 +262,7 @@ struct AppDetailView: View {
         case .cloudDocs:
             "Data source: bird via brctl dump -i and brctl status, plus FSEvents and per-file ubiquity flags — in flight or not, no per-file percentage."
         case .cloudKit:
-            "Data source: cloudd status and item counts — CloudKit exposes no per-item progress API."
+            "Data source: cloudd activity in the unified log (last 30 min) — no per-item progress or counts."
         case .fileProvider:
             "Data source: fileproviderd domain status — File Provider reports domain-level status only."
         }

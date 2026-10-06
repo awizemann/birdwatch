@@ -11,8 +11,8 @@ struct BandwidthView: View {
                 // Every figure is attributed from daemon traffic (C2), so each
                 // carries "≈"; a rate that wasn't measured says so (C1).
                 HStack(spacing: 14) {
-                    statTile(label: "Uploaded today", value: BandwidthPresentation.totalText(bandwidth.uploadedTodayBytes, hours: bandwidth.hours), tint: Palette.accent)
-                    statTile(label: "Downloaded today", value: BandwidthPresentation.totalText(bandwidth.downloadedTodayBytes, hours: bandwidth.hours), tint: Palette.success)
+                    statTile(label: "Uploaded since Birdwatch started (today)", value: BandwidthPresentation.totalText(bandwidth.uploadedTodayBytes, hours: bandwidth.hours), tint: Palette.accent)
+                    statTile(label: "Downloaded since Birdwatch started (today)", value: BandwidthPresentation.totalText(bandwidth.downloadedTodayBytes, hours: bandwidth.hours), tint: Palette.success)
                     statTile(label: "Current rate", value: BandwidthPresentation.rateText(bandwidth),
                              tint: bandwidth.rateIsMeasured && !bandwidth.lastSampleFailed ? Surface.fg : Surface.fg3)
                 }

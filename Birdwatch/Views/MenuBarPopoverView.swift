@@ -76,7 +76,9 @@ struct MenuBarPopoverView: View {
             progress: store.overallProgress,
             progressIsIndeterminate: store.overallProgressIsIndeterminate,
             inFlightCount: store.inFlightTransfers.count,
-            pendingFileCount: store.pendingFileCount
+            pendingFileCount: store.pendingFileCount,
+            unknownAppCount: store.unknownStateAppCount,
+            unwatchedAppCount: store.unwatchedApps.count
         )
         return VStack(alignment: .leading, spacing: 0) {
             header(state: state, overall: overall)
@@ -99,7 +101,7 @@ struct MenuBarPopoverView: View {
                     // The chart carried no caption at all: sighted users saw
                     // bars with no unit and no hint that the figures are
                     // attributed, not measured (C2).
-                    Text("iCloud traffic per hour today, estimated")
+                    Text("iCloud traffic per hour, today since Birdwatch started, estimated")
                         .scaledFont(size: 10.5)
                         .foregroundStyle(Surface.fg2)
                         // The chart element already speaks this line as its
@@ -172,7 +174,7 @@ struct MenuBarPopoverView: View {
                     .monospacedDigit()
                     .padding(.leading, 15)
             }
-            FreshnessText(lastRefresh: store.lastRefresh, size: 11)
+            FreshnessText(lastRefresh: store.lastRefresh, size: 11, onTick: { store.reageApps(now: $0) })
                 .padding(.leading, 15)
         }
         .accessibilityElement(children: .combine)
@@ -345,7 +347,7 @@ struct Sparkline: View {
         // popover, unreadable to VoiceOver. Summarize the series instead of
         // exposing 24 unlabeled bars, and keep the estimate wording (C2).
         .accessibilityElement()
-        .accessibilityLabel("iCloud traffic per hour today, estimated")
+        .accessibilityLabel("iCloud traffic per hour, today since Birdwatch started, estimated")
         .accessibilityValue(Self.summary(of: hours))
     }
 

@@ -21,7 +21,7 @@ struct OverviewView: View {
                 activeTransfersColumn(active: active, paused: paused)
                 recentActivityColumn
             }
-            SourceFootnote(text: "Aggregated from brctl status (bird), cloudd item counts and fileproviderd domain status.")
+            SourceFootnote(text: "Aggregated from brctl dump -i (bird engine state), FSEvents transfer flags, cloudd activity in the unified log and fileproviderd domain status.")
         }
     }
 
@@ -37,7 +37,9 @@ struct OverviewView: View {
             progress: progress,
             progressIsIndeterminate: store.overallProgressIsIndeterminate,
             inFlightCount: store.inFlightTransfers.count,
-            pendingFileCount: store.pendingFileCount
+            pendingFileCount: store.pendingFileCount,
+            unknownAppCount: store.unknownStateAppCount,
+            unwatchedAppCount: store.unwatchedApps.count
         )
         let tint: Color = switch hero.tone {
         case .paused: Palette.warning
@@ -62,7 +64,7 @@ struct OverviewView: View {
                         .scaledFont(size: 13)
                         .foregroundStyle(Surface.fg2)
                         .monospacedDigit()
-                    FreshnessText(lastRefresh: store.lastRefresh)
+                    FreshnessText(lastRefresh: store.lastRefresh, onTick: { store.reageApps(now: $0) })
                     if hero.showsBar {
                         MiniProgressBar(progress: progress, tint: tint, height: 6,
                                         label: "Overall sync progress", indeterminate: hero.barIsIndeterminate)
@@ -77,14 +79,20 @@ struct OverviewView: View {
     // MARK: - Stat grid
 
     private func statGrid(activeCount: Int) -> some View {
-        let uploadingBytes = remainingBytes(direction: .upload)
-        let downloadingBytes = remainingBytes(direction: .download)
+        let unwatched = store.unwatchedApps
+        let up = TransferWatchNotes.tile(bytes: remainingBytes(direction: .upload),
+                                         paused: store.isGloballyPaused, unwatched: unwatched)
+        let down = TransferWatchNotes.tile(bytes: remainingBytes(direction: .download),
+                                           paused: store.isGloballyPaused, unwatched: unwatched)
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-            StatTile(label: "Uploading", value: Format.size(uploadingBytes), tint: Palette.accent)
-            StatTile(label: "Downloading", value: Format.size(downloadingBytes), tint: Palette.success)
+            StatTile(label: "Uploading", value: up.value, tint: Palette.accent, caption: up.caption)
+            StatTile(label: "Downloading", value: down.value, tint: Palette.success, caption: down.caption)
             StatTile(label: "Active apps", value: "\(activeCount)", tint: Surface.fg)
-            StatTile(label: "Issues", value: "\(store.issueCount)",
-                     tint: store.issueCount > 0 ? Palette.warning : Surface.fg)
+            let issues = IssuesTile.display(count: store.issueCount, qualifiers: IssuesEmptyState.qualifiers(
+                fullDiskAccess: store.fullDiskAccess, isPaused: store.isGloballyPaused,
+                deliveredProducers: store.deliveredIssueProducers, conflictScanCap: store.conflictScanCap))
+            StatTile(label: "Issues", value: issues.value,
+                     tint: store.issueCount > 0 ? Palette.warning : Surface.fg, caption: issues.caption)
         }
     }
 
@@ -100,16 +108,23 @@ struct OverviewView: View {
         VStack(alignment: .leading, spacing: 10) {
             SectionLabel(text: "Active transfers")
             Card {
-                if paused || active.isEmpty {
-                    Text(paused ? "Monitoring is paused — transfer activity is not being watched." : "No apps are actively transferring.")
-                        .scaledFont(size: 12.5)
-                        .foregroundStyle(Surface.fg2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-                } else {
-                    VStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if paused || active.isEmpty {
+                        Text(paused ? "Monitoring is paused — transfer activity is not being watched." : "No apps are actively transferring.")
+                            .scaledFont(size: 12.5)
+                            .foregroundStyle(Surface.fg2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                    } else {
                         ForEach(active.prefix(4)) { app in
                             activeTransferRow(app)
+                        }
+                    }
+                    // A row Birdwatch can't watch is shown, with "—", not
+                    // silently left out of "nothing transferring".
+                    if !paused {
+                        ForEach(store.unwatchedApps) { app in
+                            unwatchedRow(app)
                         }
                     }
                 }
@@ -156,6 +171,25 @@ struct OverviewView: View {
         .accessibilityElement(children: .combine)
     }
 
+    private func unwatchedRow(_ app: AppSyncState) -> some View {
+        HStack(spacing: 10) {
+            ColorTile(colorHex: app.tileColorHex, letter: app.name, size: 26)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(app.name)
+                    .scaledFont(size: 12.5, weight: .semibold)
+                    .foregroundStyle(Surface.fg)
+                Text("Not watched — needs Full Disk Access")
+                    .scaledFont(size: 11.5)
+                    .foregroundStyle(Surface.fg2)
+            }
+            Spacer()
+            Text("—")
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(Surface.fg2)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private var recentActivityColumn: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -170,6 +204,13 @@ struct OverviewView: View {
             }
             Card {
                 VStack(spacing: 12) {
+                    if store.activity.isEmpty {
+                        Text(ActivityEmptyState.text(paused: store.isGloballyPaused))
+                            .scaledFont(size: 12.5)
+                            .foregroundStyle(Surface.fg2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                    }
                     ForEach(store.activity.prefix(4)) { event in
                         activityRow(event)
                     }
@@ -317,6 +358,8 @@ private struct StatTile: View {
     let label: String
     let value: String
     let tint: Color
+    /// What limits the figure ("Excludes Desktop & Documents").
+    var caption: String? = nil
 
     var body: some View {
         Card(padding: 14) {
@@ -326,9 +369,16 @@ private struct StatTile: View {
                     .foregroundStyle(Surface.fg2)
                 Text(value)
                     .scaledFont(size: 22, weight: .bold)
-                    .foregroundStyle(tint)
+                    .foregroundStyle(value == "—" ? Surface.fg2 : tint)
                     .monospacedDigit()
+                if let caption {
+                    Text(caption)
+                        .scaledFont(size: 11)
+                        .foregroundStyle(Surface.fg3)
+                        .lineLimit(2)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
     }

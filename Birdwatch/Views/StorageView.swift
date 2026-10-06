@@ -17,7 +17,7 @@ struct StorageView: View {
             if let storage = store.storage {
                 if isPromptVisible(storage) {
                     PlanPromptCard(
-                        derivedCap: storage.totalBytes,
+                        derivedCap: PlanPromptChoice.suggestedCap(storage),
                         onConfirm: { cap in
                             store.setPlanCap(cap)
                             promptOpen = false
@@ -28,7 +28,10 @@ struct StorageView: View {
                         }
                     )
                 }
-                if storage.hasAccountTier {
+                if storage.planCapBelowRemaining, let cap = storage.totalBytes,
+                   let remaining = storage.remainingBytes {
+                    planDisagreementCard(cap: cap, remaining: remaining)
+                } else if storage.hasAccountTier {
                     accountCard(storage)
                 }
                 usageCard(storage)
@@ -45,6 +48,9 @@ struct StorageView: View {
     private func isPromptVisible(_ storage: StorageInfo) -> Bool {
         if let promptOpen { return promptOpen }
         guard storage.capSource != .userChosen else { return false }
+        // Several plans fit the quota: account usage stays unknown until the
+        // user says which, so the question stays up even if dismissed before.
+        if storage.planIsAmbiguous { return true }
         return !store.planCapConfirmed
     }
 
@@ -52,7 +58,9 @@ struct StorageView: View {
         let capPhrase = switch storage.capSource {
         case .userChosen: "set by you"
         case .derived: "derived from the remaining quota iCloud reports"
-        case .unknown: "not known — iCloud reported no remaining quota"
+        case .unknown: storage.planIsAmbiguous
+            ? "not confirmed — more than one plan fits the quota iCloud reports"
+            : "not known — iCloud reported no remaining quota"
         }
         if storage.hasAccountTier {
             return "Account totals come from your live iCloud quota; the breakdown below is only the iCloud Drive files stored on this Mac. Your plan total is \(capPhrase)."
@@ -197,6 +205,32 @@ struct StorageView: View {
         .fixedSize()
     }
 
+    // MARK: - Plan setting contradicted by the live quota
+
+    /// Replaces the account card when iCloud reports more remaining than the
+    /// chosen plan: no "0 of 2 TB used" — the setting is what's wrong.
+    private func planDisagreementCard(cap: Int64, remaining: Int64) -> some View {
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                Label {
+                    Text(StorageCapLabel.planDisagreement(cap: cap, remaining: remaining))
+                        .scaledFont(size: 13.5, weight: .bold)
+                        .foregroundStyle(Surface.fg)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.circle")
+                        .foregroundStyle(Palette.warning)
+                }
+                Text("Account usage is your plan size minus what iCloud reports as available, so Birdwatch won't show it until the plan matches. Stacked plans (for example Apple One 2 TB plus iCloud+ 6 TB) count as their total.")
+                    .scaledFont(size: 12.5)
+                    .foregroundStyle(Surface.fg2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Change plan…") { promptOpen = true }
+                    .accessibilityHint("Choose which iCloud plan you're on")
+            }
+        }
+    }
+
     // MARK: - Quota-only (breakdown not measured yet)
 
     private func quotaCard(remaining: Int64?) -> some View {
@@ -257,8 +291,11 @@ struct StorageView: View {
         if storage.hasAccountTier {
             return "iCloud Drive on this Mac — \(Format.gigabytes(storage.usedBytes))"
         }
+        // `trustedCapBytes`: a plan setting the live quota contradicts is
+        // never shown as the denominator.
         return StorageCapLabel.usageHeadline(
-            used: storage.usedBytes, cap: storage.totalBytes, capIsEstimated: storage.capSource == .derived)
+            used: storage.usedBytes, cap: storage.trustedCapBytes, capIsEstimated: storage.capSource == .derived,
+            planIsAmbiguous: storage.planIsAmbiguous)
     }
 
     private func segmentedBar(_ storage: StorageInfo) -> some View {
@@ -301,7 +338,7 @@ struct StorageView: View {
                         .scaledFont(size: 12.5)
                         .foregroundStyle(Surface.fg2)
                         .monospacedDigit()
-                    Text(String(format: "%.0f%%", share))
+                    Text(Format.percent(share / 100))
                         .scaledFont(size: 11.5)
                         .foregroundStyle(Surface.fg3)
                         .monospacedDigit()
@@ -324,9 +361,9 @@ struct StorageView: View {
                     Text(storage.planName)
                         .scaledFont(size: 13.5, weight: .bold)
                         .foregroundStyle(Surface.fg)
-                    Text(storage.planPriceLine)
+                    Text(StorageCapLabel.planCardLine(storage))
                         .scaledFont(size: 12.5)
-                        .foregroundStyle(Surface.fg2)
+                        .foregroundStyle(storage.planCapBelowRemaining ? Palette.warning : Surface.fg2)
                         .monospacedDigit()
                     Button("Change plan") { promptOpen = true }
                         .buttonStyle(.link)
@@ -348,9 +385,10 @@ private struct PlanPromptCard: View {
     let onConfirm: (Int64?) -> Void
     let onDismiss: () -> Void
 
-    /// Index into the tier list, or `custom` for the free-form GB field.
+    /// Index into the tier list, or `custom` for the free-form total.
     @State private var selection: Int = 0
-    @State private var customGB: String = ""
+    @State private var customText: String = ""
+    @State private var customIsTB = true
     @State private var didSeed = false
 
     private static let customTag = -1
@@ -372,7 +410,7 @@ private struct PlanPromptCard: View {
                     .foregroundStyle(Surface.fg3)
                     .accessibilityLabel("Dismiss plan question")
                 }
-                Text("Birdwatch can only measure the iCloud files on this Mac, so it can't tell your plan size on its own. Telling it once makes the bar accurate.")
+                Text("Birdwatch can only measure the iCloud files on this Mac, so it can't tell your plan size on its own. Telling it once makes the bar accurate. For stacked plans (Apple One plus iCloud+), choose Custom and enter the total.")
                     .scaledFont(size: 12.5)
                     .foregroundStyle(Surface.fg2)
 
@@ -388,13 +426,18 @@ private struct PlanPromptCard: View {
 
                 HStack(spacing: 10) {
                     if selection == Self.customTag {
-                        TextField("GB", text: $customGB)
+                        TextField(customIsTB ? "TB" : "GB", text: $customText)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 90)
-                            .accessibilityLabel("Custom plan size in gigabytes")
-                        Text("GB")
-                            .scaledFont(size: 12.5)
-                            .foregroundStyle(Surface.fg2)
+                            .accessibilityLabel("Custom plan total")
+                        Picker("Unit", selection: $customIsTB) {
+                            Text("GB").tag(false)
+                            Text("TB").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 90)
+                        .accessibilityLabel("Custom plan unit")
                     }
                     Spacer()
                     Button("Confirm") { onConfirm(chosenCap()) }
@@ -407,17 +450,20 @@ private struct PlanPromptCard: View {
         .task {
             guard !didSeed else { return }
             didSeed = true
-            if let derivedCap,
-               let index = StorageBreakdownSource.tiers.firstIndex(where: { $0.bytes == derivedCap }) {
+            let seed = PlanPromptChoice.seed(for: derivedCap)
+            if let index = seed.tierIndex {
                 selection = index
+            } else {
+                selection = Self.customTag
+                customText = seed.customText
+                customIsTB = seed.customIsTB
             }
         }
     }
 
     private func chosenCap() -> Int64? {
         if selection == Self.customTag {
-            guard let gb = Double(customGB.trimmingCharacters(in: .whitespaces)), gb > 0 else { return nil }
-            return Int64(gb * 1_000_000_000)
+            return PlanPromptChoice.customCap(text: customText, isTB: customIsTB)
         }
         guard StorageBreakdownSource.tiers.indices.contains(selection) else { return nil }
         return StorageBreakdownSource.tiers[selection].bytes

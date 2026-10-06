@@ -306,6 +306,9 @@ struct SyncSpinner: View {
 struct FreshnessText: View {
     let lastRefresh: Date?
     var size: CGFloat = 11.5
+    /// Runs on each 15 s tick — the store re-ages time-bound states on it
+    /// (`SyncStore.reageApps`), so an open surface never shows stale activity.
+    var onTick: ((Date) -> Void)? = nil
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
@@ -313,6 +316,7 @@ struct FreshnessText: View {
                 .scaledFont(size: size)
                 .foregroundStyle(Surface.fg3)
                 .monospacedDigit()
+                .onChange(of: context.date) { _, date in onTick?(date) }
         }
     }
 }

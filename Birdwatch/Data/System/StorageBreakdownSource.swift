@@ -190,20 +190,62 @@ enum StorageBreakdownSource {
         (12_000_000_000_000, "iCloud+ 12 TB"),
     ]
 
-    /// Smallest tier that can hold `usedBytes + remainingBytes`.
+    /// The 2 TB that Apple One Premier includes. An iCloud+ plan bought on
+    /// top of it STACKS (e.g. 2 TB + 6 TB = 8 TB), so totals between and
+    /// above the single tiers are real plans.
+    nonisolated static let stackBaseBytes: Int64 = 2_000_000_000_000
+
+    /// Every total a plan can have, smallest first: the single tiers, plus
+    /// Apple One Premier's 2 TB stacked with each paid iCloud+ tier. Kept to
+    /// that one stack on purpose — enough for the common 2 + 6 = 8 TB case
+    /// without inventing combinations; anything else is a custom size.
+    nonisolated static let purchasablePlans: [(bytes: Int64, name: String)] = {
+        let stacked = tiers.dropFirst().map { tier in
+            (bytes: stackBaseBytes + tier.bytes,
+             name: "iCloud+ \(Format.capacity(stackBaseBytes + tier.bytes)) (2 TB + \(tierSize(tier.name)))")
+        }
+        return (tiers + stacked).sorted { $0.bytes < $1.bytes }
+    }()
+
+    /// "iCloud+ 6 TB" → "6 TB".
+    private nonisolated static func tierSize(_ name: String) -> String {
+        name.replacingOccurrences(of: "iCloud+ ", with: "").replacingOccurrences(of: "iCloud ", with: "")
+    }
+
+    /// Every purchasable total that could be the plan for a given floor:
+    /// those from the floor up to and including the next SINGLE tier at or
+    /// above it (a bigger total is never the simplest explanation). With no
+    /// single tier that large, every purchasable total at or above the floor.
+    nonisolated static func planCandidates(floorBytes: Int64) -> [(bytes: Int64, name: String)] {
+        let ceiling = tiers.first(where: { $0.bytes >= floorBytes })?.bytes ?? Int64.max
+        return purchasablePlans.filter { $0.bytes >= floorBytes && $0.bytes <= ceiling }
+    }
+
+    /// The plan, when the evidence picks exactly one.
     ///
     /// `remainingBytes` is bird's live `brctl quota` figure (account-wide), so
     /// used + remaining is a LOWER BOUND on the plan: `usedBytes` is only this
-    /// Mac's footprint, which is why the result is offered to the user for
-    /// confirmation rather than asserted. nil when remaining is unknown, or when
-    /// the sum exceeds the largest tier Apple sells.
+    /// Mac's footprint (evicted files, Photos and backups are missing). The
+    /// plan is derived only when exactly ONE purchasable total lies between
+    /// that floor and the next single tier — e.g. a 1.8 TB floor is 2 TB. When
+    /// several fit (a 3 TB floor could be 4 TB stacked or 6 TB; Alan's
+    /// 6.9 TB floor could be 8 TB stacked or 12 TB) nothing is derived: a
+    /// guessed cap would make "account used" wrong by terabytes. nil then,
+    /// when remaining is unknown, or when no plan Apple sells is that large.
     nonisolated static func derivePlan(
         usedBytes: Int64, remainingBytes: Int64?
     ) -> (capBytes: Int64, tierName: String)? {
         guard let remainingBytes, remainingBytes >= 0 else { return nil }
-        let floorBytes = max(usedBytes, 0) + remainingBytes
-        guard let tier = tiers.first(where: { $0.bytes >= floorBytes }) else { return nil }
-        return (tier.bytes, tier.name)
+        let candidates = planCandidates(floorBytes: max(usedBytes, 0) + remainingBytes)
+        guard candidates.count == 1, let plan = candidates.first else { return nil }
+        return (plan.bytes, plan.name)
+    }
+
+    /// TRUE when the quota is known but more than one plan fits it, so the
+    /// plan (and with it account usage) is left for the user to confirm.
+    nonisolated static func planIsAmbiguous(usedBytes: Int64, remainingBytes: Int64?) -> Bool {
+        guard let remainingBytes, remainingBytes >= 0 else { return false }
+        return planCandidates(floorBytes: max(usedBytes, 0) + remainingBytes).count > 1
     }
 
     // MARK: - Account usage (pure)
@@ -215,23 +257,31 @@ enum StorageBreakdownSource {
     /// the plan cap known, the subtraction reproduces the number System
     /// Settings shows — no private API and no per-service guessing.
     ///
-    /// nil when either half is unknown. `isClamped` marks the contradictory case
-    /// where the reported remaining exceeds the cap (a wrong user-chosen plan,
-    /// or a stale quota); usage is then reported as 0 rather than negative.
+    /// nil when either half is unknown. `.capBelowRemaining` is the
+    /// contradictory case where iCloud reports MORE remaining than the cap
+    /// (a plan setting that is too small — e.g. a 2 TB choice on a stacked
+    /// 8 TB plan): no usage is computed at all, since "0 used" would be an
+    /// invented fact (C1).
+    nonisolated enum AccountUsage: Equatable, Sendable {
+        case used(Int64)
+        case capBelowRemaining
+        var bytes: Int64? { if case .used(let b) = self { b } else { nil } }
+    }
+
     nonisolated static func accountUsed(
         capBytes: Int64?, remainingBytes: Int64?
-    ) -> (bytes: Int64, isClamped: Bool)? {
+    ) -> AccountUsage? {
         guard let capBytes, capBytes > 0, let remainingBytes, remainingBytes >= 0 else { return nil }
         let used = capBytes - remainingBytes
-        return used < 0 ? (0, true) : (used, false)
+        return used < 0 ? .capBelowRemaining : .used(used)
     }
 
     /// Human tier label for an arbitrary cap (used for a custom/override value).
     nonisolated static func planName(forCap capBytes: Int64) -> String {
-        if let tier = tiers.first(where: { $0.bytes == capBytes }) { return tier.name }
+        if let tier = purchasablePlans.first(where: { $0.bytes == capBytes }) { return tier.name }
         return capBytes >= 1_000_000_000_000
-            ? String(format: "iCloud+ %.1f TB", Double(capBytes) / 1_000_000_000_000)
-            : String(format: "iCloud %.0f GB", Double(capBytes) / 1_000_000_000)
+            ? "iCloud+ \(Format.capacity(capBytes))"
+            : "iCloud \(Format.capacity(capBytes))"
     }
 
     // MARK: - Assembly (pure)
@@ -262,8 +312,12 @@ enum StorageBreakdownSource {
         } else {
             cap = nil
             source = .unknown
-            name = "iCloud plan size unknown"
+            name = planIsAmbiguous(usedBytes: used, remainingBytes: remainingBytes)
+                ? "iCloud plan not confirmed"
+                : "iCloud plan size unknown"
         }
+        let ambiguous = (planCapOverride ?? 0) <= 0 && derived == nil
+            && planIsAmbiguous(usedBytes: used, remainingBytes: remainingBytes)
 
         let account = accountUsed(capBytes: cap, remainingBytes: remainingBytes)
 
@@ -277,10 +331,12 @@ enum StorageBreakdownSource {
             priceLine = account != nil
                 ? "Derived from your iCloud quota"
                 : (remainingBytes.map {
-                    "Derived from \(Format.sizeNonisolated($0)) remaining reported by iCloud"
+                    "Derived from \(Format.capacity($0)) remaining reported by iCloud"
                 } ?? "Derived from your account's remaining quota")
         case .unknown:
-            priceLine = "iCloud didn't report a remaining quota — set your plan to see how much is left"
+            priceLine = ambiguous
+                ? "More than one plan fits what iCloud reports available — confirm yours to see account usage"
+                : "iCloud didn't report a remaining quota — set your plan to see how much is left"
         }
 
         return StorageInfo(
@@ -291,7 +347,8 @@ enum StorageBreakdownSource {
             capSource: source,
             remainingBytes: remainingBytes,
             accountUsedBytes: account?.bytes,
-            isAccountUsedClamped: account?.isClamped ?? false
+            planCapBelowRemaining: account == .capBelowRemaining,
+            planIsAmbiguous: ambiguous
         )
     }
 }

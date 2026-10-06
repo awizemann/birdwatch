@@ -279,7 +279,7 @@ nonisolated enum BrctlDumpMapper {
         if let progress = dump.globalProgress, let fraction = progress.fraction {
             var line = "\(percent(fraction * 100)) of the current upload batch"
             if let done = progress.uploadedBytes, let total = progress.totalBytes, total > 0 {
-                line += " · \(Format.sizeNonisolated(done)) of \(Format.sizeNonisolated(total))"
+                line += " · \(Format.capacity(done)) of \(Format.capacity(total))"
             }
             engine.globalProgressLine = line
         }

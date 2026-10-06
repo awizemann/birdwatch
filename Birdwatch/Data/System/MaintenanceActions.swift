@@ -32,16 +32,21 @@ nonisolated enum MaintenanceError: Error, Equatable {
 actor MaintenanceActions {
     private let runner: any ProcessRunning
     private let respawnPollInterval: Duration
+    private let respawnDeadline: @Sendable () -> ContinuousClock.Instant
 
     /// Cheap by design (C4): no spawn until an action runs. `runner` and the
     /// poll interval are injectable so the signal path is testable with a fake
     /// runner — tests must never send a real signal to a system daemon.
+    /// `respawnDeadline` is a test seam too: a test passes a deadline already
+    /// reached after N polls without waiting out the real 12 s window.
     init(
         runner: any ProcessRunning = ProcessRunner(),
-        respawnPollInterval: Duration = .milliseconds(250)
+        respawnPollInterval: Duration = .milliseconds(250),
+        respawnDeadline: (@Sendable () -> ContinuousClock.Instant)? = nil
     ) {
         self.runner = runner
         self.respawnPollInterval = respawnPollInterval
+        self.respawnDeadline = respawnDeadline ?? { ContinuousClock.now + MaintenanceActions.respawnWait }
     }
 
     /// Daemon display name → launchd service label (verified live). Kept as the
@@ -70,6 +75,16 @@ actor MaintenanceActions {
     /// a caution rather than claiming a restart we did not witness.
     static let respawnNotObserved = "Signal sent, respawn not observed"
 
+    /// Returned when the signal landed, no new pid was seen, AND at least one
+    /// `ps` poll after the signal failed: Birdwatch could not look the whole
+    /// time, so it claims neither a restart nor its absence.
+    static let restartNotConfirmed = "Signal sent; restart not confirmed"
+
+    /// Both "signal sent but no confirmed respawn" outcomes (tinted caution).
+    static func isUnconfirmed(_ result: String) -> Bool {
+        result == respawnNotObserved || result == restartNotConfirmed
+    }
+
     /// The command string shown in the UI and in the confirm sheet. It must be
     /// what we actually run — a stale `launchctl kickstart` line here is how the
     /// dead button shipped in the first place.
@@ -83,11 +98,13 @@ actor MaintenanceActions {
     /// `respawnWait`, or "Signal sent, respawn not observed" when the poll
     /// expires — never a success claim we did not witness.
     ///
-    /// A failing `ps` is thrown, not read as "no pids": before the signal that
-    /// would have reported a running daemon as not running, and after it a
-    /// restart as "respawn not observed". Cancellation ends the poll at once
-    /// (it used to make the sleep return immediately, spawning `ps`
-    /// back-to-back for the whole 12 s window).
+    /// A failing `ps` BEFORE the signal is thrown — reading it as "no pids"
+    /// would report a running daemon as not running. AFTER the signal the
+    /// restart has already happened from our side, so one transient `ps`
+    /// failure must not report it as failed: the poll carries on, and if no
+    /// new pid is seen the result is "Signal sent; restart not confirmed"
+    /// (never "respawn not observed", which would claim we watched).
+    /// Cancellation ends the poll at once.
     func restartDaemon(name: String) async throws -> String {
         guard Self.serviceLabels[name] != nil else {
             throw MaintenanceError.unknownDaemon(name)
@@ -100,16 +117,25 @@ actor MaintenanceActions {
         }
         logger.info("Signalled \(name, privacy: .public) pid(s) \(before.map(String.init).joined(separator: ","), privacy: .public) with SIGTERM")
 
-        let deadline = ContinuousClock.now + Self.respawnWait
-        while ContinuousClock.now < deadline {
+        let deadline = respawnDeadline()
+        var pollFailed = false
+        repeat {
             try await Task.sleep(for: respawnPollInterval)   // throws on cancellation
-            let after = try await hostPIDs(name: name)
+            let after: [Int32]
+            do {
+                after = try await hostPIDs(name: name)
+            } catch {
+                try Task.checkCancellation()
+                pollFailed = true
+                logger.warning("respawn poll for \(name, privacy: .public): ps failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
+                continue
+            }
             if let fresh = after.first(where: { !before.contains($0) }) {
                 return "Restarted (new pid \(fresh))"
             }
-        }
-        logger.warning("\(name, privacy: .public) did not respawn within the poll window")
-        return Self.respawnNotObserved
+        } while ContinuousClock.now < deadline
+        logger.warning("\(name, privacy: .public) did not respawn within the poll window (ps failures: \(pollFailed, privacy: .public))")
+        return pollFailed ? Self.restartNotConfirmed : Self.respawnNotObserved
     }
 
     /// pids of the REAL system daemon owned by this user. Reuses

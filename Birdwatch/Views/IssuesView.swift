@@ -107,6 +107,12 @@ struct IssuesView: View {
             if store.issues.isEmpty {
                 emptyState
             } else {
+                // A non-empty list can be incomplete for the same reasons.
+                ForEach(IssuesEmptyState.qualifiers(
+                    fullDiskAccess: store.fullDiskAccess, isPaused: store.isGloballyPaused,
+                    deliveredProducers: store.deliveredIssueProducers,
+                    conflictScanCap: store.conflictScanCap
+                ), id: \.self) { SourceFootnote(text: $0) }
                 ForEach(store.issues) { issue in
                     IssueCard(issue: issue)
                 }

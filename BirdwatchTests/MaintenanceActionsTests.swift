@@ -101,17 +101,36 @@ struct MaintenanceActionsTests {
         #expect(await runner.killArguments.isEmpty)
     }
 
-    // Fails on the old `try?`: a failing ps after the signal read as "no new
-    // pid" and the restart was reported as "respawn not observed".
-    @Test("A failing ps during the respawn poll is reported, not read as 'respawn not observed'")
-    func psFailureDuringPollPropagates() async throws {
+    // After the SIGTERM, one transient ps failure must not turn a restart
+    // into a reported failure: the poll carries on and still sees the new pid.
+    @Test("A transient ps failure during the respawn poll is tolerated")
+    func psFailureDuringPollIsTolerated() async throws {
         let failure = RunnerError.nonZeroExit(code: 1, stderr: "ps: boom")
-        let runner = ScriptedRunner(ps: [.success(Self.ps(birdPID: 4242)), .failure(failure)])
+        let runner = ScriptedRunner(ps: [.success(Self.ps(birdPID: 4242)), .failure(failure),
+                                         .success(Self.ps(birdPID: 5151))])
         let actions = MaintenanceActions(runner: runner, respawnPollInterval: .zero)
-        await #expect(throws: failure) {
-            _ = try await actions.restartDaemon(name: "bird")
-        }
-        #expect(await runner.psCallCount == 2)
+        let result = try await actions.restartDaemon(name: "bird")
+        #expect(result == "Restarted (new pid 5151)")
+        #expect(await runner.psCallCount == 3)
+    }
+
+    // A poll that could not look and saw no new pid claims neither outcome.
+    // The deadline is already past, so exactly one poll runs — no waiting.
+    @Test("A failed poll with no new pid ends 'Signal sent; restart not confirmed'")
+    func failedPollIsNotConfirmed() async throws {
+        let runner = ScriptedRunner(ps: [.success(Self.ps(birdPID: 4242)), .failure(.timeout)])
+        let actions = MaintenanceActions(runner: runner, respawnPollInterval: .zero,
+                                         respawnDeadline: { .now - .seconds(1) })
+        let result = try await actions.restartDaemon(name: "bird")
+        #expect(result == MaintenanceActions.restartNotConfirmed)
+        #expect(MaintenanceActions.isUnconfirmed(result))
+        #expect(await runner.killArguments == [["-TERM", "4242"]])
+
+        let quiet = ScriptedRunner(ps: [.success(Self.ps(birdPID: 4242))])
+        let watched = try await MaintenanceActions(runner: quiet, respawnPollInterval: .zero,
+                                                   respawnDeadline: { .now - .seconds(1) })
+            .restartDaemon(name: "bird")
+        #expect(watched == MaintenanceActions.respawnNotObserved)
     }
 
     // Fails on the old `try? Task.sleep`: once the caller was cancelled the

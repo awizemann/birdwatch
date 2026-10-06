@@ -14,8 +14,10 @@ nonisolated enum BrctlReadFailure: Error, Sendable, Equatable {
         case .timeout: self = .timedOut(seconds: Int(timeout.components.seconds))
         case .launchFailed: self = .failed("could not be launched")
         case .nonZeroExit(let code, _): self = .failed("exited with status \(code)")
-        // A partial status/dump is not parsed: its missing tail is exactly
-        // where the container line or Desktop & Documents flag may sit.
+        // Never parse a capped capture. `brctl status` output is short (the
+        // Desktop & Documents flag is on its fourth line), so hitting the
+        // 4 MB cap means the output is not what we expect; the dump is read
+        // from its -o file, not through the capture, so this is defensive.
         case .outputTruncated: self = .failed("output exceeded the capture limit")
         case nil: self = .failed("failed")
         }

@@ -105,7 +105,7 @@ struct DiagnosticsView: View {
             SectionLabel(text: "System Access")
             systemAccessCard
 
-            SourceFootnote(text: "Daemon stats via proc_pid_rusage · engine state via brctl status · retry queue, budgets and item counts via brctl dump -i")
+            SourceFootnote(text: "Daemon stats via proc_pid_rusage · engine state, retry queue, budgets and item counts via brctl dump -i · Desktop & Documents setting via brctl status")
         }
         // The three transient-status timers are the only tasks this screen
         // owns, and they outlive it: each sleeps 10s before clearing a line
@@ -161,7 +161,7 @@ struct DiagnosticsView: View {
                 // set with no user data in it. The results do not (C7).
                 logger.info("\(title, privacy: .public) succeeded: \(result, privacy: .private)")
                 let tone: ActionStatus.Tone =
-                    result == MaintenanceActions.respawnNotObserved ? .caution : .success
+                    MaintenanceActions.isUnconfirmed(result) ? .caution : .success
                 show(ActionStatus(text: "\(title): \(result)", tone: tone))
                 store.record(.maintenanceRun(.restart_daemon, daemon: daemon, outcome: .ok, errorKind: nil))
             } catch {
@@ -313,6 +313,12 @@ struct DiagnosticsView: View {
                         Divider().overlay(Surface.cardLine)
                         engineRow(label: "Upload batch", value: progress)
                     }
+                } else {
+                    Text("Sync engine state hasn't been read yet — it comes from brctl dump -i, which runs in the background.")
+                        .scaledFont(size: 12.5)
+                        .foregroundStyle(Surface.fg2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
                 }
             }
         }

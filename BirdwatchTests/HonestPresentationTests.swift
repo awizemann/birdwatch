@@ -332,7 +332,7 @@ struct StorageCapLabelTests {
         let figure = StorageFooterFigure.local(used: 5_000_000_000, cap: 50_000_000_000)
         #expect(!StorageCapLabel.footerText(figure, capIsEstimated: false).contains("≈"))
         #expect(!StorageCapLabel.footerAccessibilityValue(figure, capIsEstimated: false).contains("estimated"))
-        #expect(StorageCapLabel.footerText(.localOnly(used: 5_000_000_000), capIsEstimated: true) == "5.0 GB on this Mac",
+        #expect(StorageCapLabel.footerText(.localOnly(used: 5_000_000_000), capIsEstimated: true) == "5 GB on this Mac",
                 "no cap shown → nothing to label")
         #expect(StorageCapLabel.usageHeadline(used: 1, cap: nil, capIsEstimated: true).contains("on this Mac"))
     }
@@ -500,5 +500,99 @@ struct HeadlineTests {
         #expect(s.lastRefresh == nil)
         await s.refresh(force: true)
         #expect(s.lastRefresh == fixed)
+    }
+}
+
+
+// MARK: - Unknown and busy-without-progress CloudDocs state (S7 × S8a)
+
+@MainActor
+@Suite("Unknown and active built-in rows")
+struct UnknownAndActiveStateTests {
+
+    @Test("Unknown state is neutral: no red, no spinner, never 'Up to date'")
+    func unknownDisplayIsNeutral() {
+        let display = SyncStatusDisplay(status: .unknown, backend: .cloudDocs, progressIsIndeterminate: false)
+        #expect(display.tone == .neutral)
+        #expect(display.label == "State unknown")
+        #expect(display.bar == nil)
+        #expect(!display.showsSpinner)
+        #expect(!AppSyncStatus.unknown.isActive)
+    }
+
+    @Test("Busy bird (.active) shows activity without a bar or percentage")
+    func activeDisplay() {
+        let display = SyncStatusDisplay(status: .active, backend: .cloudDocs, progressIsIndeterminate: false)
+        #expect(display.label == "Active")
+        #expect(display.bar == nil)
+        #expect(display.tone == .working)
+    }
+
+    @Test("An unknown row is neither active nor idle nor an issue in the store")
+    func storeCountsUnknownNeutrally() async {
+        let s = await store(.minimal(apps: [app("icloud-drive", status: .unknown)]))
+        #expect(s.overallState == .idle)
+        #expect(s.activeApps.isEmpty)
+        #expect(s.unknownStateAppCount == 1)
+        #expect(s.overallProgress == 1)
+        #expect(s.issueCount == 0)
+    }
+
+    @Test("A busy engine is .active overall and does not drag the progress mean to zero")
+    func busyEngineDoesNotZeroProgress() async {
+        let mixed = await store(.minimal(apps: [
+            app("icloud-drive", status: .active),
+            app("other", status: .syncing(progress: 0.6)),
+        ]))
+        #expect(mixed.overallState == .syncing(appCount: 1, alsoActive: 1))
+        #expect(mixed.overallProgress == 0.6)
+        // Hero, popover header and the "Active apps" tile count the same apps.
+        #expect(mixed.activeApps.count == 2)
+        let hero = OverviewHeroDisplay(state: mixed.overallState, progress: 0.6, progressIsIndeterminate: false,
+                                       inFlightCount: 1, pendingFileCount: 1)
+        #expect(hero.title == "Syncing 1 app · activity in 1 more")
+        #expect(PopoverSummary.headerTitle(mixed.overallState) == "Syncing 1 app · activity in 1 more")
+        let alone = await store(.minimal(apps: [app("icloud-drive", status: .active)]))
+        #expect(alone.overallState == .active(appCount: 1))
+    }
+
+    @Test("Hero and popover name unknown apps instead of folding them into idle")
+    func heroAndPopoverMentionUnknown() {
+        let hero = OverviewHeroDisplay(state: .idle, progress: 1, progressIsIndeterminate: false,
+                                       inFlightCount: 0, pendingFileCount: 0, unknownAppCount: 1)
+        #expect(hero.subtitle == "Nothing is transferring right now. 1 app not read yet.")
+        #expect(PopoverSummary.idleAppsLine([app("a", status: .unknown)]) == "1 app with state unknown")
+        #expect(PopoverSummary.idleAppsLine([
+            app("a", status: .upToDate), app("b", status: .unknown),
+        ]) == "1 app up to date · 1 with state unknown")
+    }
+
+    // Without FDA the Desktop & Documents row is unwatched, not "not read
+    // yet" — which would otherwise be claimed forever.
+    @Test("Unwatched rows are counted apart: 'not watched — needs Full Disk Access'")
+    func unwatchedCountedApart() async {
+        var dd = app("desktop-documents", status: .unknown)
+        dd.needsFullDiskAccess = true
+        let s = await store(.minimal(apps: [dd, app("icloud-drive")]))
+        #expect(s.unknownStateAppCount == 0)
+        #expect(s.unwatchedApps.map(\.id) == ["desktop-documents"])
+        let hero = OverviewHeroDisplay(state: s.overallState, progress: 1, progressIsIndeterminate: false,
+                                       inFlightCount: 0, pendingFileCount: 0,
+                                       unknownAppCount: s.unknownStateAppCount,
+                                       unwatchedAppCount: s.unwatchedApps.count)
+        #expect(hero.subtitle == "Nothing is transferring right now. 1 app not watched — needs Full Disk Access.")
+        #expect(PopoverSummary.idleAppsLine(s.effectiveApps)
+                == "1 app up to date · 1 not watched — needs Full Disk Access")
+    }
+
+    // An open popover re-ages CloudKit activity on its 15 s tick.
+    @Test("CloudKit activity ages out on the freshness tick, without a new snapshot")
+    func reageOnTick() async {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let photos = app("photos", backend: .cloudKit, status: .active, lastActivity: t0)
+        let s = await store(.minimal(apps: [photos]), now: { t0 })
+        #expect(s.overallState == .active(appCount: 1))
+        s.reageApps(now: t0 + CloudKitLogParser.activeWindow + 15)
+        #expect(s.overallState == .idle)
     }
 }

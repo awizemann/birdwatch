@@ -30,11 +30,15 @@ struct DriveView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
 
+                    let engineUnknown = store.app(withID: "icloud-drive")?.status == .unknown
+                    let ddUnwatched = store.unwatchedApps.contains { $0.id == "desktop-documents" }
                     ForEach(store.driveFolders) { folder in
                         Divider().overlay(Surface.cardLine)
-                        FolderRow(folder: folder, display: SyncStatusDisplay(
-                            status: folder.status, backend: .cloudDocs,
-                            progressIsIndeterminate: store.progressIsIndeterminate(folderName: folder.name)
+                        FolderRow(folder: folder, display: DriveFolderDisplay.display(
+                            folder,
+                            progressIsIndeterminate: store.progressIsIndeterminate(folderName: folder.name),
+                            engineStateUnknown: engineUnknown, paused: store.isGloballyPaused,
+                            desktopDocumentsUnwatched: ddUnwatched
                         ))
                     }
                 }
@@ -43,13 +47,31 @@ struct DriveView: View {
             // Files in transfer card
             SectionLabel(text: "Files in transfer")
                 .padding(.top, 4)
+            let note = TransferWatchNotes.qualifier(paused: store.isGloballyPaused, unwatched: store.unwatchedApps)
             Card(padding: 0) {
-                VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    // While paused the note below is the whole answer.
+                    if store.transfers.isEmpty && !store.isGloballyPaused {
+                        Text("No files in transfer right now.")
+                            .scaledFont(size: 12.5)
+                            .foregroundStyle(Surface.fg2)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                    }
                     ForEach(Array(store.transfers.enumerated()), id: \.element.id) { index, transfer in
                         if index > 0 { Divider().overlay(Surface.cardLine) }
                         TransferRow(transfer: transfer)
                     }
+                    if let note {
+                        Divider().overlay(Surface.cardLine)
+                        Text(note)
+                            .scaledFont(size: 12)
+                            .foregroundStyle(Surface.fg2)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             SourceFootnote(text: "Read from bird (CloudDocs) via brctl dump -i (engine state) and brctl status (Desktop & Documents setting); file transfers via FSEvents and per-file ubiquity flags.")
