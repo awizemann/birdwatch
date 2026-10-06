@@ -11,7 +11,14 @@
 #      or a copy an agent is compiling while you work).
 #   2. INSTALLS a decoupled, visually-distinct copy at ~/Applications/<App>-dev.app that shows up
 #      as "<App> Dev" in the Dock / Cmd-Tab, so you can tell your dogfood copy apart from any copy
-#      an agent is running. It keeps the real bundle id, so iCloud/CloudKit keep working.
+#      an agent is running. It gets its OWN bundle id (DEV_BUNDLE_ID, via the command-line build
+#      setting BW_BUNDLE_ID_SUFFIX — release builds keep com.wizemann.birdwatch), so it does not
+#      share UserDefaults/onboarding state or LaunchServices identity with an installed release,
+#      and Sparkle refuses to install a release update over it (bundle-id mismatch).
+#      TCC CONSEQUENCE: privacy grants are per bundle id, so the dev copy needs its OWN Full Disk
+#      Access grant (System Settings → Privacy & Security → Full Disk Access → add
+#      ~/Applications/<App>-dev.app). The release's grant no longer covers it — and because the
+#      copy is ad-hoc signed, a rebuild can invalidate the grant; re-toggle it if FDA reads fail.
 #   3. STOPS only the copy THIS script launched before — identified strictly by that exact
 #      ~/Applications/<App>-dev.app install path. A copy running from any OTHER path (e.g. an
 #      agent's test build out of its own DerivedData) is never matched and keeps running.
@@ -23,26 +30,33 @@
 # Build-correctness this encapsulates (so nobody re-learns it per project):
 #   * ISOLATED DerivedData — never the shared one a GUI Xcode or another agent build is using.
 #   * -workspace when one is set (some projects need it for SwiftPM trait resolution), else -project.
-#   * Optional pinned toolchain (XCODE_APP); optional `xcodegen` regen (XCODEGEN) from project.yml.
+#   * Toolchain: DEVELOPER_DIR if exported, else BUILD_DETACHED_XCODE_APP, else xcode-select's
+#     Xcode; optional `xcodegen` regen (XCODEGEN) from project.yml.
 #   * SPM checkout auto-repair after an interrupted build (one wipe-and-retry).
 #
 # Optional env overrides (not needed for normal use):
 #   BUILD_DETACHED_CONFIG   Release | Debug   (default: Release)
 #   BUILD_DETACHED_DERIVED  isolated DerivedData path
 #   BUILD_DETACHED_APP      decoupled install path
+#   BUILD_DETACHED_XCODE_APP  pin an Xcode.app (only used when DEVELOPER_DIR is not exported)
 set -euo pipefail
 
 # ============================ CONFIG (edit per project) ============================
 # WORKSPACE/PROJECT: set exactly one (workspace wins).  SCHEME: xcodebuild scheme.
 # APP_PRODUCT: built .app / process name.  DISPLAY_NAME: Dock name for the dev copy.
-# XCODE_APP: "" = system Xcode.  XCODEGEN: 1 = regen from project.yml first.  CHECK_ICLOUD: 1 = warn if iCloud entitlement missing.
+# BUNDLE_ID: the RELEASE bundle id (used only to gracefully quit a running release copy).
+# DEV_BUNDLE_ID_SUFFIX → DEV_BUNDLE_ID: the id the dogfood copy is built with.
+# XCODE_APP: "" = DEVELOPER_DIR / xcode-select's Xcode.  XCODEGEN: 1 = regen from project.yml first.
+# CHECK_ICLOUD: 1 = warn if iCloud entitlement missing.
 WORKSPACE=""
 PROJECT="Birdwatch.xcodeproj"
 SCHEME="Birdwatch"
 APP_PRODUCT="Birdwatch"
 DISPLAY_NAME="Birdwatch Dev"
 BUNDLE_ID="com.wizemann.birdwatch"
-XCODE_APP="/Applications/Xcode-beta.app"
+DEV_BUNDLE_ID_SUFFIX=".dev"
+DEV_BUNDLE_ID="${BUNDLE_ID}${DEV_BUNDLE_ID_SUFFIX}"
+XCODE_APP="${BUILD_DETACHED_XCODE_APP:-}"
 XCODEGEN=1
 CHECK_ICLOUD=0
 # ===================================================================================
@@ -61,10 +75,12 @@ say() { printf '%s\n' "$*" >&2; }
 # Pick a real Xcode.app — NEVER the Command Line Tools (which can't run xcodebuild). We resolve it
 # via DEVELOPER_DIR (no sudo), so a build keeps working even after an Xcode swap leaves
 # `xcode-select` pointing at /Library/Developer/CommandLineTools. Preference: a caller-exported
-# DEVELOPER_DIR → the configured XCODE_APP → xcode-select's choice if it's a full Xcode → the first
-# Xcode.app found in /Applications.
+# DEVELOPER_DIR → BUILD_DETACHED_XCODE_APP (XCODE_APP) → xcode-select's choice if it's a full
+# Xcode → the first Xcode.app found in /Applications. No Xcode is hardcoded: this builds with
+# whatever toolchain the rest of the machine uses unless told otherwise.
 if [ -z "${DEVELOPER_DIR:-}" ]; then
-  if [ -n "$XCODE_APP" ] && [ -d "$XCODE_APP" ]; then
+  if [ -n "$XCODE_APP" ]; then
+    [ -d "$XCODE_APP" ] || { say "!! BUILD_DETACHED_XCODE_APP=$XCODE_APP does not exist"; exit 1; }
     export DEVELOPER_DIR="$XCODE_APP"
   else
     case "$(xcode-select -p 2>/dev/null)" in
@@ -80,7 +96,7 @@ fi
 if ! xcodebuild -version >/dev/null 2>&1; then
   say "!! No usable Xcode found (xcode-select -p = $(xcode-select -p 2>/dev/null))."
   say "   Point the CLI at your Xcode once:  sudo xcode-select -s /Applications/Xcode.app"
-  say "   …or set XCODE_APP in this script's CONFIG, or export DEVELOPER_DIR before running."
+  say "   …or export DEVELOPER_DIR (or BUILD_DETACHED_XCODE_APP=/Applications/Xcode.app) before running."
   exit 1
 fi
 
@@ -89,7 +105,10 @@ xcb() {
   local action="$1"; shift
   local container=(-project "$PROJECT")
   [ -n "$WORKSPACE" ] && container=(-workspace "$WORKSPACE")
-  ( cd "$REPO_ROOT" && xcodebuild \
+  # env -u BW_STATS_WRITE_KEY: xcodebuild expands $(BW_STATS_WRITE_KEY) in Info.plist from the
+  # environment, so a key exported in this shell would bake the real write key into a dogfood
+  # build and send its analytics under the release appId. Dev builds always ship with it empty.
+  ( cd "$REPO_ROOT" && env -u BW_STATS_WRITE_KEY xcodebuild \
       "${container[@]}" \
       -scheme "$SCHEME" \
       -configuration "$CONFIG" \
@@ -180,8 +199,16 @@ quit_running_copies() {
   # defaults (this is why scan/auto-file settings appeared to "reset"). Target by bundle id (no
   # "locate app" prompt), but ONLY when no /tmp agent copy is running, since an id-quit hits every
   # instance. If a /tmp copy is up, skip straight to the PID-scoped kill that spares it.
+  # Both ids: the previous dev copy runs as DEV_BUNDLE_ID, an installed release as BUNDLE_ID.
+  # Only ids LaunchServices reports as RUNNING (lsappinfo) are ever handed to AppleScript: naming
+  # an app id that isn't running/registered can make AppleScript resolve it — and, for an id it
+  # can't find, raise a "Where is …?" chooser. lsappinfo prints nothing when no process matches.
   if [ "$has_tmp" = 0 ] && [ -n "${BUNDLE_ID:-}" ]; then
-    osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+    local _id
+    for _id in "$DEV_BUNDLE_ID" "$BUNDLE_ID"; do
+      [ -n "$(lsappinfo find "bundleid=$_id" 2>/dev/null)" ] || continue
+      osascript -e "tell application id \"$_id\" to quit" >/dev/null 2>&1 || true
+    done
     for _ in $(seq 1 12); do
       local alive=0; for pid in "${victims[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
       [ "$alive" = 0 ] && return 0; sleep 0.5
@@ -222,7 +249,9 @@ regen_xcodeproj() {
   local target="$REPO_ROOT/$PROJECT"
   if [ ! -d "$target" ] || [ "$spec" -nt "$target" ]; then
     say "==> xcodegen: regenerating $(basename "$PROJECT") from project.yml…"
-    ( cd "$gen_dir" && xcodegen generate ) >/dev/null 2>&1 || say "!! xcodegen generate failed — building the existing project"
+    # Without DEVELOPMENT_TEAM: project.yml carries ${DEVELOPMENT_TEAM}, and xcodegen would bake a
+    # literal team id into the committed .xcodeproj (same rule as release.sh).
+    ( cd "$gen_dir" && env -u DEVELOPMENT_TEAM xcodegen generate ) >/dev/null 2>&1 || say "!! xcodegen generate failed — building the existing project"
   fi
 }
 
@@ -237,7 +266,11 @@ say "==> building $SCHEME ($CONFIG) → isolated DerivedData $DERIVED"
 # ONLY_ACTIVE_ARCH=YES → build just this Mac's slice (not a universal binary); it's a local
 # dogfood copy, so half the compile for the same runtime behavior.
 _t0="$(date +%s)"
-if ! build -allowProvisioningUpdates ONLY_ACTIVE_ARCH=YES ENABLE_HARDENED_RUNTIME=NO "INFOPLIST_KEY_CFBundleDisplayName=$DISPLAY_NAME" ${EXTRA_XCODEBUILD_ARGS[@]+"${EXTRA_XCODEBUILD_ARGS[@]}"}; then
+# BW_BUNDLE_ID_SUFFIX=.dev → the distinct dev identity described in the header. The app target's
+# PRODUCT_BUNDLE_IDENTIFIER is com.wizemann.birdwatch$(BW_BUNDLE_ID_SUFFIX) (project.yml), so this
+# changes only the app — not SwiftPM resource bundles, which a plain PRODUCT_BUNDLE_IDENTIFIER=
+# override would restamp too. release.sh never sets it and asserts the built id.
+if ! build -allowProvisioningUpdates ONLY_ACTIVE_ARCH=YES ENABLE_HARDENED_RUNTIME=NO "BW_BUNDLE_ID_SUFFIX=$DEV_BUNDLE_ID_SUFFIX" "INFOPLIST_KEY_CFBundleDisplayName=$DISPLAY_NAME" ${EXTRA_XCODEBUILD_ARGS[@]+"${EXTRA_XCODEBUILD_ARGS[@]}"}; then
   KEEP_LOG=1
   say "!! BUILD FAILED — your currently-running copy (if any) was left untouched. Errors:"
   grep -E "error:|fatal error:" "$BUILD_LOG" | grep -v "GeneratedModuleMaps" | head -8 >&2 || true

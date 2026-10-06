@@ -36,9 +36,14 @@ packages:
   # Sparkle auto-update framework (app target only). The app is NOT sandboxed
   # (ENABLE_APP_SANDBOX: NO), so Sparkle's standard installer path applies and
   # SUEnableInstallerLauncherService is not needed.
+  # Floor 2.10.0 (still up-to-next-major): 2.9.6 carries installer security
+  # fixes (symlink handling, root privilege escalation) and 2.10.0 fixes
+  # delta-update file-system compression on macOS 27. 2.10 requires macOS 12+,
+  # well under our 15.0 floor; the SPUStandardUpdaterController / SUFeedURL /
+  # SUPublicEDKey wiring is unchanged by it.
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: "2.0.0"
+    from: "2.10.0"
   # swift-stats: privacy-first usage analytics (Stats core + the Cloudflare
   # sink that speaks to api.swiftstats.co). Zero transitive dependencies.
   swift-stats:
@@ -59,7 +64,13 @@ targets:
         product: StatsCloudflare
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.wizemann.birdwatch
+        # BW_BUNDLE_ID_SUFFIX is undefined (→ empty) everywhere except
+        # scripts/build-detached.sh, which passes BW_BUNDLE_ID_SUFFIX=.dev so the
+        # dogfood copy is com.wizemann.birdwatch.dev. A plain command-line
+        # PRODUCT_BUNDLE_IDENTIFIER override would also restamp SwiftPM resource
+        # bundles (swift-stats_Stats.bundle) with the app's id; this hook is
+        # scoped to the app target. release.sh asserts the built id is exact.
+        PRODUCT_BUNDLE_IDENTIFIER: com.wizemann.birdwatch$(BW_BUNDLE_ID_SUFFIX)
         GENERATE_INFOPLIST_FILE: "YES"
         # §13 merge base: Xcode generates Info.plist and merges it on top of
         # this partial file. Only keys the generator can't express live there
@@ -69,6 +80,10 @@ targets:
         INFOPLIST_FILE: Birdwatch/Resources/Info.plist
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Alan Wizemann"
         INFOPLIST_KEY_LSUIElement: "NO"
+        # Finder / Launchpad category. Utilities rather than Developer Tools:
+        # Birdwatch is for any Mac user who wants to see what iCloud sync is
+        # doing; developers are a secondary audience (charter identity).
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_NSPrincipalClass: NSApplication
         ENABLE_TESTABILITY: "YES"

@@ -26,6 +26,16 @@ fi
 #   uses it as the GitHub release body. Write the notes ahead of time, commit
 #   them, then run release.
 #
+# Versioning:
+#   <VERSION> must be X.Y.Z and greater than the highest vX.Y.Z tag.
+#   CURRENT_PROJECT_VERSION (CFBundleVersion, what Sparkle compares) is bumped
+#   to last-tag's + 1 ONLY if project.yml isn't already above the last tag's —
+#   so a version prepared ahead of time, or a --draft rehearsal's local commit,
+#   is not bumped twice. project.yml and the regenerated Birdwatch.xcodeproj go
+#   into the release commit together; on any failure before that commit both
+#   are restored to HEAD so the script can simply be re-run.
+#   The full test suite must pass before anything is archived.
+#
 # Prerequisites (one-time setup):
 #   1. Developer ID Application cert installed in login Keychain:
 #        security find-identity -v -p codesigning | grep "Developer ID Application"
@@ -61,7 +71,7 @@ DRAFT=0
 for arg in "$@"; do
   case "$arg" in
     --draft) DRAFT=1 ;;
-    -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
+    -h|--help) sed -n '/^# Birdwatch release pipeline/,/^$/p' "$0"; exit 0 ;;
     -*) printf '[ERR] unknown flag: %s\n' "$arg" >&2; exit 1 ;;
     *) [[ -z "$VERSION" ]] && VERSION="$arg" || { printf '[ERR] unexpected arg: %s\n' "$arg" >&2; exit 1; } ;;
   esac
@@ -82,8 +92,13 @@ export DEVELOPMENT_TEAM="$TEAM_ID"
 # xcodebuild expands $(BW_STATS_WRITE_KEY) from the environment, at the lowest
 # precedence — so nothing (project, target, xcconfig) may define it, not even
 # empty. The post-export check below proves it actually expanded.
+# It is scoped to the ARCHIVE command only (a per-command env prefix there):
+# unset from this shell's exported environment so gh, git, notarytool,
+# appcast.sh and the test run never inherit it, and STATS_WRITE_KEY is a
+# plain, non-exported shell variable.
 STATS_WRITE_KEY="${BW_STATS_WRITE_KEY:?set BW_STATS_WRITE_KEY to the swift-stats write key (Memophant → vendors → swift-stats)}"
-export BW_STATS_WRITE_KEY="$STATS_WRITE_KEY"
+unset BW_STATS_WRITE_KEY
+export -n STATS_WRITE_KEY
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
 BUNDLE_ID="com.wizemann.birdwatch"
 SCHEME="Birdwatch"
@@ -108,8 +123,48 @@ die()  { printf '\033[1;31m[ERR] %s\033[0m\n' "$*" >&2; exit 1; }
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
+# MARKETING_VERSION becomes CFBundleShortVersionString, which Apple defines as
+# three period-separated non-negative integers — so plain X.Y.Z, no pre-release
+# or build suffix, and no leading zeros (tags are compared numerically).
+is_semver() { [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
+
+# version_gt A B → true when X.Y.Z A is strictly greater than B (numeric, per field).
+version_gt() {
+  local a b i
+  IFS=. read -r -a a <<<"$1"
+  IFS=. read -r -a b <<<"$2"
+  for i in 0 1 2; do
+    (( 10#${a[i]} > 10#${b[i]} )) && return 0
+    (( 10#${a[i]} < 10#${b[i]} )) && return 1
+  done
+  return 1
+}
+
+# Highest well-formed vX.Y.Z tag name on stdin (one per line), or nothing.
+latest_version_tag() {
+  local tag best=""
+  while IFS= read -r tag; do
+    is_semver "${tag#v}" || continue
+    if [[ -z "$best" ]] || version_gt "${tag#v}" "${best#v}"; then best="$tag"; fi
+  done
+  printf '%s' "$best"
+}
+
+# CURRENT_PROJECT_VERSION (a positive integer, no leading zeros) from project.yml
+# text on stdin; empty if absent or malformed.
+build_number_of() {
+  sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*["'\'']?([1-9][0-9]*)["'\'']?[[:space:]]*(#.*)?$/\1/p' | head -n 1
+}
+
 # ---------- preflight ----------
 log "Preflight checks"
+# Before anything uses $VERSION in a path or a tag name.
+is_semver "$VERSION" || die "version '$VERSION' is not X.Y.Z (three integers, no leading zeros, no suffix)."
+# build-detached.sh's dev-identity hook (project.yml: com.wizemann.birdwatch$(BW_BUNDLE_ID_SUFFIX)).
+# Set in the environment it would rename the shipped app and Sparkle would
+# reject every update to it — refuse outright, even when empty.
+[[ -z "${BW_BUNDLE_ID_SUFFIX+set}" ]] \
+  || die "BW_BUNDLE_ID_SUFFIX is set ('${BW_BUNDLE_ID_SUFFIX}') — that is the dev-build bundle id hook. unset BW_BUNDLE_ID_SUFFIX and re-run."
 require_cmd xcodebuild
 require_cmd xcrun
 require_cmd ditto
@@ -138,6 +193,24 @@ NOTES_PATH="$RELEASE_DIR/RELEASE_NOTES.md"
 # Tag must not already exist.
 if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
   die "tag 'v${VERSION}' already exists. Bump the version or delete the tag."
+fi
+
+# Version must move forward from the last release tag (well-formedness was
+# checked first thing in preflight). Compare against the REMOTE's tags too: a
+# release tagged on another machine would otherwise be invisible here and the
+# build number could go backwards. Read-only fetch; a failure is fatal rather
+# than silently falling back to possibly-stale local tags.
+log "Fetching tags from origin"
+git fetch --quiet --tags origin \
+  || die "git fetch --tags origin failed (network? auth? a local tag that differs from origin's?). Version/build checks need the remote's tags — fix and re-run."
+LAST_TAG="$(git tag --list 'v*' | latest_version_tag)"
+if [[ -n "$LAST_TAG" ]]; then
+  version_gt "$VERSION" "${LAST_TAG#v}" \
+    || die "version $VERSION is not greater than the last release tag $LAST_TAG."
+  LAST_BUILD="$(git show "${LAST_TAG}:project.yml" 2>/dev/null | build_number_of || true)"
+  [[ -n "$LAST_BUILD" ]] || die "could not read a well-formed CURRENT_PROJECT_VERSION from project.yml at $LAST_TAG."
+else
+  LAST_BUILD=0
 fi
 
 # Sparkle trust anchor must be real. Shipping the placeholder would produce an
@@ -208,6 +281,26 @@ fi
 
 log "Preflight OK"
 
+# ---------- restore-on-failure guard ----------
+# From the version bump until the release commit exists, a failure (die, a
+# failing command under `set -e`, Ctrl-C) would leave project.yml and the
+# regenerated .xcodeproj modified/staged — and the clean-tree preflight would
+# then refuse every re-run. Roll both back to HEAD instead. Disarmed once the
+# release commit is made: after that, HEAD already holds the bump.
+RESTORE_ON_FAIL=0
+on_exit() {
+  local rc=$?
+  if [[ $rc -ne 0 && "$RESTORE_ON_FAIL" -eq 1 ]]; then
+    warn "release failed (exit $rc) — restoring project.yml and $PROJECT to HEAD"
+    git -C "$REPO_ROOT" restore --source=HEAD --staged --worktree -- project.yml "$PROJECT" \
+      || warn "restore failed — run: git restore --source=HEAD --staged --worktree -- project.yml $PROJECT"
+  fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+RESTORE_ON_FAIL=1
+
 # ---------- bump MARKETING_VERSION in project.yml ----------
 # Birdwatch's project.yml uses UNQUOTED scalars (`MARKETING_VERSION: 0.1.0`),
 # but accept quoted forms too so a future reformat doesn't silently no-op.
@@ -231,15 +324,25 @@ if new != text:
 PY
 
 # Sparkle compares CFBundleVersion (sparkle:version) to decide whether an update
-# is newer, so it MUST increase every release. Bump CURRENT_PROJECT_VERSION.
-log "Incrementing project.yml CURRENT_PROJECT_VERSION"
-python3 - "$REPO_ROOT/project.yml" <<'PY'
+# is newer, so it MUST exceed the last release's. Bump CURRENT_PROJECT_VERSION
+# only when it doesn't already: a version prepared ahead of time (or a --draft
+# rehearsal's local commit, as happened for v0.1.3: 6 then 7) is left alone.
+CUR_BUILD="$(build_number_of < "$REPO_ROOT/project.yml")"
+[[ -n "$CUR_BUILD" ]] || die "CURRENT_PROJECT_VERSION in project.yml is missing or malformed (must be a positive integer without leading zeros)."
+if (( CUR_BUILD > LAST_BUILD )); then
+  BUILD_NUMBER="$CUR_BUILD"
+  log "CURRENT_PROJECT_VERSION $CUR_BUILD already above ${LAST_TAG:-the first release}'s $LAST_BUILD — not bumping"
+else
+  BUILD_NUMBER=$(( LAST_BUILD + 1 ))
+  log "Setting project.yml CURRENT_PROJECT_VERSION $CUR_BUILD → $BUILD_NUMBER (${LAST_TAG:-none} had $LAST_BUILD)"
+  python3 - "$REPO_ROOT/project.yml" "$BUILD_NUMBER" <<'PY'
 import re, sys, pathlib
 path = pathlib.Path(sys.argv[1])
+build = sys.argv[2]
 text = path.read_text()
 new, n = re.subn(
     r'''(^[ \t]*CURRENT_PROJECT_VERSION:[ \t]*)(["']?)(\d+)\2''',
-    lambda m: f'{m.group(1)}{m.group(2)}{int(m.group(3)) + 1}{m.group(2)}',
+    lambda m: f'{m.group(1)}{m.group(2)}{build}{m.group(2)}',
     text,
     flags=re.M,
 )
@@ -247,6 +350,7 @@ if n == 0:
     raise SystemExit("CURRENT_PROJECT_VERSION line not found in project.yml")
 path.write_text(new)
 PY
+fi
 
 log "Regenerating $PROJECT"
 # Regenerate WITHOUT the team id in the environment: xcodegen would otherwise
@@ -255,16 +359,35 @@ log "Regenerating $PROJECT"
 # passed to xcodebuild explicitly at archive time instead.
 env -u DEVELOPMENT_TEAM xcodegen generate >/dev/null
 
-# Stage the version bump (committed alongside the release notes below).
-git add project.yml
+# Stage the version bump AND the regenerated project (committed alongside the
+# release notes below). Staging only project.yml once left the v0.1.3 tag with
+# project.yml=7 but project.pbxproj=6.
+git add project.yml "$PROJECT"
 
-# ---------- archive ----------
+# ---------- clean build dir ----------
 log "Cleaning build directory"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
+# ---------- test gate ----------
+# Nothing gets archived, signed or notarized unless the suite passes on the
+# exact regenerated project being released. Run without the team (unsigned
+# local test build, like dev runs) and without the analytics key (analytics is
+# gated off under XCTest regardless; the key never needs to reach tests).
+log "Running the test suite"
+env -u DEVELOPMENT_TEAM xcodebuild \
+  -project "$PROJECT" \
+  -scheme "$SCHEME" \
+  -destination 'platform=macOS' \
+  -derivedDataPath "$BUILD_DIR/DerivedData" \
+  test \
+  || die "tests failed — not archiving. project.yml / $PROJECT are restored to HEAD."
+
+# ---------- archive ----------
 log "Archiving (Release, universal)"
-xcodebuild \
+# BW_STATS_WRITE_KEY is set for THIS command only (env prefix, so it is not in
+# xcodebuild's argv / `ps` / the build log's argument echo).
+BW_STATS_WRITE_KEY="$STATS_WRITE_KEY" xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
   -configuration Release \
@@ -322,6 +445,14 @@ BUILT_STATS_KEY="$(/usr/libexec/PlistBuddy -c "Print :BWStatsWriteKey" "$PLIST")
 BUILT_SHORT="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")"
 [[ "$BUILT_SHORT" == "$VERSION" ]] \
   || die "built CFBundleShortVersionString is '$BUILT_SHORT', expected '$VERSION' — the project.yml bump didn't reach the build."
+# Exactly the release id — a stray BW_BUNDLE_ID_SUFFIX (build-detached.sh's dev
+# hook) must never reach a shipped build: Sparkle would reject every update.
+BUILT_ID="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST")"
+[[ "$BUILT_ID" == "$BUNDLE_ID" ]] \
+  || die "built CFBundleIdentifier is '$BUILT_ID', expected '$BUNDLE_ID'."
+BUILT_BUILD="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")"
+[[ "$BUILT_BUILD" == "$BUILD_NUMBER" ]] \
+  || die "built CFBundleVersion is '$BUILT_BUILD', expected '$BUILD_NUMBER' — the regenerated project is out of step with project.yml."
 
 # ---------- notarize ----------
 log "Zipping for notarization"
@@ -355,29 +486,48 @@ log "spctl --assess (should print 'accepted')"
 spctl --assess --type execute --verbose=2 "$APP_PATH" 2>&1 | sed 's/^/    /'
 
 # ---------- commit + tag ----------
-log "Staging version bump + release notes"
-git add "$NOTES_PATH"
+log "Staging version bump + regenerated project + release notes"
+git add project.yml "$PROJECT" "$NOTES_PATH"
 # Skip the release commit when there's nothing to stage — happens when the
-# release notes + version bump were committed ahead of running the script (the
-# prep flow). Tagging the existing tip is the right move.
+# release notes + version (+ regenerated project) were committed ahead of
+# running the script (the prep flow, or a --draft rehearsal's local commit).
+# Tagging the existing tip is the right move.
 if git diff --cached --quiet; then
   log "Nothing to commit (notes + version already on main) — tagging tip"
 else
   git commit -m "release: v${VERSION}
 
-$(head -1 "$NOTES_PATH" | sed 's/^# //')
-
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+$(head -1 "$NOTES_PATH" | sed 's/^# //')"
 fi
+# HEAD now holds the bump — a later failure (push, gh, appcast) must not roll it back.
+RESTORE_ON_FAIL=0
 
 if [[ "$DRAFT" -eq 1 ]]; then
   warn "draft mode — skipping tag + push of main"
 else
+  # Push main BEFORE creating the tag. If that push fails (non-fast-forward,
+  # network, auth) no tag exists anywhere, so nothing points at a commit origin
+  # doesn't have, and a plain re-run is valid: the tag check passes, the build
+  # number is already above the last tag's (no re-bump), and there is nothing
+  # to commit, so it tags the tip. Only a failed TAG push leaves a local-only
+  # tag; that case prints the exact remaining steps.
+  REMAINING_STEPS="  gh release create v${VERSION} '${ZIP_PATH}' --title 'Birdwatch v${VERSION}' --notes-file '${NOTES_PATH}' --target main
+  ./scripts/appcast.sh ${VERSION}"
+  log "Pushing main"
+  git push origin main \
+    || die "push of main failed — nothing was tagged. Fix the cause (e.g. git pull --rebase origin main if main moved), then either re-run ./scripts/release.sh ${VERSION}, or finish by hand with the already-notarized ${ZIP_NAME}:
+  git push origin main
+  git tag -a v${VERSION} -m 'Birdwatch v${VERSION}'
+  git push origin v${VERSION}
+${REMAINING_STEPS}"
   log "Tagging v${VERSION}"
   git tag -a "v${VERSION}" -m "Birdwatch v${VERSION}"
-  log "Pushing main + tag"
-  git push origin main
-  git push origin "v${VERSION}"
+  log "Pushing tag v${VERSION}"
+  git push origin "v${VERSION}" \
+    || die "push of tag v${VERSION} failed — main IS pushed and the tag exists only locally. Do NOT re-run release.sh (the local tag blocks it). Finish by hand:
+  git push origin v${VERSION}
+${REMAINING_STEPS}
+  (To start over instead: git tag -d v${VERSION}, then re-run ./scripts/release.sh ${VERSION}.)"
 fi
 
 # ---------- gh release ----------

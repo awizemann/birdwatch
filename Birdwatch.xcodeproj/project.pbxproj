@@ -681,6 +681,7 @@
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Birdwatch/Resources/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Alan Wizemann";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
@@ -688,7 +689,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.wizemann.birdwatch;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.wizemann.birdwatch$(BW_BUNDLE_ID_SUFFIX)";
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -839,6 +840,7 @@
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Birdwatch/Resources/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = NO;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Alan Wizemann";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
@@ -846,7 +848,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.wizemann.birdwatch;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.wizemann.birdwatch$(BW_BUNDLE_ID_SUFFIX)";
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -914,7 +916,7 @@
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.0.0;
+				minimumVersion = 2.10.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
