@@ -102,11 +102,16 @@ struct CopyFormattingTests {
 
     // Fails on the old English-only SystemSyncSource.ageText ("12 min ago"
     // in every locale, and worded unlike every other age in the app).
-    @Test("Last-known ages are localised and worded like every other relative age")
+    // Review fix: on a German Mac the English sentences read "brctl dump
+    // vor 12 m", and an age under half a second read "in 0s".
+    @Test("Last-known ages are worded like the app's relative ages, in English, never in the future")
     func ages() {
-        #expect(Format.age(720, locale: us) == "12m ago")
-        #expect(Format.age(720, locale: de) == "vor 12 m")
-        #expect(Format.age(720) == Format.relative.localizedString(fromTimeInterval: -720))
+        #expect(Format.age(720) == "12m ago", "English whatever the Mac's locale: the sentences are English")
+        #expect(Format.age(720, locale: de) == "vor 12 m", "a caller composing a localized sentence can ask")
+        #expect(Format.age(0) == "just now")
+        #expect(Format.age(0.4) == "just now")
+        #expect(Format.age(-3) == "just now", "a clock step back is not an age in the future")
+        #expect(Format.age(1) == "1s ago")
     }
 
     // Fails on the old fixed "HH:mm:ss" formatter, which ignored 12-hour locales.

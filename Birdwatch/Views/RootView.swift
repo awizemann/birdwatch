@@ -134,11 +134,9 @@ struct RootView: View {
         .onChange(of: visibility.isVisible) {
             store.syncTransferWatcher()
         }
-        // Activation-driven refresh; the store's 60s debounce is the throttle,
-        // so app-switcher peeks stay cheap (§6).
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await store.refresh() }
-        }
+        // No activation refresh here: SyncStore.applicationActivated runs it
+        // AFTER the permission re-probe, as one ordered operation (a separate
+        // Task here raced the re-probe and could serve a cached grant).
     }
 }
 

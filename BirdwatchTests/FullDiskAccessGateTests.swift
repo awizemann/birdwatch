@@ -213,21 +213,23 @@ struct FullDiskAccessGateTests {
         #expect(rig.source.transferWatcherForTesting?.includesDesktopDocuments == false)
     }
 
-    // Resolving a conflict opens the file's versions in iCloud Drive. A
-    // conflict cached before the denial must not be resolved after it. Only
-    // the gate answers .notFound AND leaves the cache alone: a resolve that
-    // reached the file answers .failed / .changed, or .notFound after
+    // Resolving a conflict opens the file's versions in iCloud Drive. The
+    // denial clears the conflict cache (AccessRevocationTests), so this
+    // models the one way an entry can still be there: a listing put in the
+    // cache after the gate denied (here directly, through the test seam).
+    // Only the gate answers .notFound AND leaves the cache alone: a resolve
+    // that reached the file answers .failed / .changed, or .notFound after
     // dropping the entry from the cache.
     @Test("A cached conflict is not resolved once access is denied")
     func resolveGated() async {
         let rig = Self.rig(fda: .denied)
+        _ = await rig.source.currentSnapshot()
         let claim = rig.source.claimConflictScan(now: Date())
         rig.source.completeConflictScan([ConflictSource.FoundConflict(
             issue: TestIssues.make(id: "conflict-x", action: .reviewVersions, severity: .conflict),
             detail: ConflictDetail(fileName: "x", location: "", versions: [],
                                    fileURL: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)/x.pages"))
         )], resolvedBeforeScan: claim ?? [])
-        _ = await rig.source.currentSnapshot()
         #expect(await rig.source.resolveConflict(issueID: "conflict-x", keepVersionID: "current", shownVersionIDs: [])
                 == .notFound)
         #expect(await rig.source.conflictDetail(issueID: "conflict-x") != nil, "the file was never reached")

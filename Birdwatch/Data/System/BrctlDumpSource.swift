@@ -73,9 +73,6 @@ actor BrctlDumpSource {
 
 // MARK: - Mapping (pure, testable)
 
-/// Turns a parsed dump into the DTOs the UI consumes. Every value here is
-/// something bird actually printed — nothing is inferred into a number that
-/// the engine did not report.
 /// Where one of bird's scheduled (not yet synced) items lives.
 nonisolated enum RetryLocation: Sendable, Hashable {
     /// Inside an app's own container — that container row's id.
@@ -90,38 +87,96 @@ nonisolated enum RetryLocation: Sendable, Hashable {
     case unplaced
 }
 
-/// Every scheduled item's location, computed once per dump refresh. All of
-/// them are bird's — so all of them keep the iCloud Drive row from reading
-/// "Up to date" — and the placed ones also mark their own app or folder.
+/// Scheduled items for one row, split by what the dump says about them.
+nonisolated struct RetryBacklog: Sendable, Hashable {
+    /// Retried at least once, or last attempted more than
+    /// `BrctlDumpMapper.stuckThreshold` ago: not syncing (see `isStuck`).
+    var stuck = 0
+    /// Scheduled and neither failing nor old: ordinary queued work.
+    var waiting = 0
+
+    var total: Int { stuck + waiting }
+
+    static func + (lhs: RetryBacklog, rhs: RetryBacklog) -> RetryBacklog {
+        RetryBacklog(stuck: lhs.stuck + rhs.stuck, waiting: lhs.waiting + rhs.waiting)
+    }
+}
+
+/// Every scheduled item's location and whether it is stuck, computed once
+/// per dump refresh. Each item belongs to exactly ONE row: an app container,
+/// an iCloud Drive folder, or iCloud Drive itself (its root, an unknown
+/// folder, or — labelled as such — an item that could not be placed).
 nonisolated struct RetryAttribution: Sendable, Hashable {
     var locations: [String: RetryLocation] = [:]
+    var stuckIDs: Set<String> = []
     /// Scheduled items beyond `BrctlDumpMapper.attributionCap`, not placed.
-    var overflow: Int = 0
+    var overflow = RetryBacklog()
 
     /// Every scheduled item.
-    var total: Int { locations.count + overflow }
+    var total: Int { locations.count + overflow.total }
 
-    func count(appID: String) -> Int { locations.values.count { $0 == .app(appID) } }
-    func count(folder: String) -> Int { locations.values.count { $0 == .driveFolder(folder) } }
+    func backlog(where include: (RetryLocation) -> Bool) -> RetryBacklog {
+        var out = RetryBacklog()
+        for (id, location) in locations where include(location) {
+            if stuckIDs.contains(id) { out.stuck += 1 } else { out.waiting += 1 }
+        }
+        return out
+    }
+
+    func backlog(appID: String) -> RetryBacklog { backlog { $0 == .app(appID) } }
+    func backlog(folder: String) -> RetryBacklog { backlog { $0 == .driveFolder(folder) } }
+
+    /// iCloud Drive's own items: anywhere in CloudDocs.
+    var drive: RetryBacklog {
+        backlog {
+            switch $0 {
+            case .driveFolder, .driveRootFile, .driveFolderUnknown: true
+            case .app, .unplaced: false
+            }
+        }
+    }
+
+    /// Items no row could be given (also shown on iCloud Drive, labelled).
+    var unplaced: RetryBacklog { backlog { $0 == .unplaced } + overflow }
 
     /// Items that may be in ANY Drive folder: no folder can be confirmed
     /// up to date while one of these exists.
     var unplacedForFolders: Int {
-        overflow + locations.values.count { $0 == .driveFolderUnknown || $0 == .unplaced }
+        overflow.total + locations.values.count { $0 == .driveFolderUnknown || $0 == .unplaced }
     }
 
     func removing(_ ids: Set<String>) -> RetryAttribution {
         var copy = self
-        for id in ids { copy.locations[id] = nil }
+        for id in ids {
+            copy.locations[id] = nil
+            copy.stuckIDs.remove(id)
+        }
         return copy
     }
 }
 
+/// Turns a parsed dump into the DTOs the UI consumes. Every value here is
+/// something bird actually printed — nothing is inferred into a number that
+/// the engine did not report.
 nonisolated enum BrctlDumpMapper {
 
-    /// bird gives up on an item after 62 attempts (documented in the retry
-    /// queue UI as "attempt N of 62").
-    static let maxAttempts = 62
+    /// How the retry card picks the rows it shows from a longer queue —
+    /// the same order `retryQueue` sorts by, stated so the card can say it.
+    static let retryRowOrder = "most failed attempts first, then the longest waiting"
+
+    /// The row an item is counted on, in the words the Applications list
+    /// uses: its app container's name, or "iCloud Drive" for Drive's own
+    /// items and for items no app row carries (counted there as not placed —
+    /// see `SystemSyncSource.buildApps`). nil only for an item that was never
+    /// attributed (past `attributionCap`).
+    static func rowName(for location: RetryLocation?, containerNames: [String: String]) -> String? {
+        switch location {
+        case .app(let id): containerNames[id] ?? "iCloud Drive"
+        case .driveFolder, .driveRootFile, .driveFolderUnknown, .unplaced: "iCloud Drive"
+        case nil: nil
+        }
+    }
+
     /// Rows shown in the Diagnostics retry card. A large account can have
     /// hundreds of scheduled operations; the stuck-items issue covers the tail.
     static let retryRowLimit = 10
@@ -159,7 +214,6 @@ nonisolated enum BrctlDumpMapper {
                 id: item.itemID,
                 name: displayName(for: item),
                 attempt: item.attempts,
-                maxAttempts: maxAttempts,
                 lastAttemptAgo: stalledAge(item),
                 path: match?.displayPath.isEmpty == false ? match?.displayPath : nil,
                 absolutePath: match?.absolutePath,
@@ -209,44 +263,84 @@ nonisolated enum BrctlDumpMapper {
     /// even when its own name has no unique fit. Inside CloudDocs, a resolved
     /// path pins it to a top-level folder. Anything else stays unplaced and
     /// is never guessed into a row.
+    ///
+    /// COST: an item whose header names exactly one app container is placed
+    /// by that alone — its own name is never matched (on Alan's Mac that is
+    /// all 110 items). Only CloudDocs items and header-less ones go through
+    /// `RedactedPathResolver.resolve`, which looks candidates up by shape.
+    ///
+    /// `candidatesArePartial`: the candidate walk stopped at its cap. An
+    /// item with no header that "exactly" matches such a list may have a
+    /// better match among the files never listed, so it stays unplaced
+    /// rather than changing a row's status on a guess.
+    ///
+    /// `containerDirectories`: the real `Mobile Documents` children (the
+    /// container scan — the same list the rows are built from). Header
+    /// placement matches against THESE, not only against the containers the
+    /// capped candidate walk happened to reach: on Alan's Mac the walk hit
+    /// its cap after a handful of containers, so 101 of 111 items, each with
+    /// a header naming exactly one real container, were placed nowhere.
     static func retryAttribution(
-        from dump: BrctlDump, candidates: [PathCandidate], homeDirectory: String = UserHome.path
+        from dump: BrctlDump, candidates: [PathCandidate], candidatesArePartial: Bool = false,
+        containerDirectories: [String] = [], homeDirectory: String = UserHome.path
     ) -> RetryAttribution {
         let items = pendingItems(dump)
         let placed = Array(items.prefix(attributionCap))
-        let resolved = RedactedPathResolver.resolve(items: placed, candidates: candidates)
-        let containerNames = Array(Set(candidates.compactMap(\.containerDirectoryName)))
+        let containerNames = Array(Set(containerDirectories + candidates.compactMap(\.containerDirectoryName)))
         var containerCache: [String: String?] = [:]
-        var locations: [String: RetryLocation] = [:]
-        locations.reserveCapacity(placed.count)
-        for item in placed {
-            var container: String?
-            if let pattern = item.containerPattern {
-                if let cached = containerCache[pattern] {
-                    container = cached
-                } else {
-                    let matched = containerNames.filter {
-                        RedactedPathResolver.matchesContainer(pattern: pattern, directoryName: $0)
-                    }
-                    container = matched.count == 1 ? matched[0] : nil
-                    containerCache[pattern] = container
-                }
+        func container(for item: BrctlPendingItem) -> String? {
+            guard let pattern = item.containerPattern else { return nil }
+            if let cached = containerCache[pattern] { return cached }
+            let matched = containerNames.filter {
+                RedactedPathResolver.matchesContainer(pattern: pattern, directoryName: $0)
             }
-            let match = resolved[item.itemID]
+            let unique = matched.count == 1 ? matched[0] : nil
+            containerCache[pattern] = unique
+            return unique
+        }
+        let headerContainers = placed.map(container(for:))
+        let needsPath = zip(placed, headerContainers).compactMap { item, header -> BrctlPendingItem? in
+            if let header, header != cloudDocsContainer { return nil }
+            return item
+        }
+        let resolved = RedactedPathResolver.resolve(items: needsPath, candidates: candidates)
+
+        var attribution = RetryAttribution()
+        attribution.locations.reserveCapacity(placed.count)
+        for (item, header) in zip(placed, headerContainers) {
+            var container = header
+            var match = resolved[item.itemID]
+            if header == nil, candidatesArePartial { match = nil }
             if container == nil, let path = match?.absolutePath {
                 container = AppContainerSource.containerDirectory(forPath: path, homeDirectory: homeDirectory)
             }
-            locations[item.itemID] = location(
+            attribution.locations[item.itemID] = location(
                 container: container, match: match, isDirectory: item.isDirectory, homeDirectory: homeDirectory)
+            if isStuck(item) { attribution.stuckIDs.insert(item.itemID) }
         }
-        return RetryAttribution(locations: locations, overflow: items.count - placed.count)
+        for item in items.dropFirst(placed.count) {
+            if isStuck(item) { attribution.overflow.stuck += 1 } else { attribution.overflow.waiting += 1 }
+        }
+        return attribution
+    }
+
+    static let cloudDocsContainer = "com~apple~CloudDocs"
+
+    /// "Not syncing", as opposed to queued: bird has already failed it
+    /// (`attempts` counts failures, not tries), or its last attempt is more
+    /// than `stuckThreshold` (24 h) old — the same age rule as the
+    /// stuck-items issue, so a row and that issue agree. Healthy uploads
+    /// leave the queue within minutes; the captured GA fixtures' stuck items
+    /// sit at `attempts:0 last:3054.25h ago`, which only the age catches.
+    static func isStuck(_ item: BrctlPendingItem) -> Bool {
+        item.isRetrying || (stalledAge(item) ?? 0) > stuckThreshold
     }
 
     private static func location(
         container: String?, match: ResolvedPath?, isDirectory: Bool, homeDirectory: String
     ) -> RetryLocation {
         guard let container else { return .unplaced }
-        guard container == "com~apple~CloudDocs" else {
+        guard container == cloudDocsContainer else {
             return .app(AppContainerSource.appID(forDirectory: container))
         }
         let root = homeDirectory + "/Library/Mobile Documents/com~apple~CloudDocs"

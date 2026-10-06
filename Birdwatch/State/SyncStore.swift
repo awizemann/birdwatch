@@ -64,6 +64,8 @@ final class SyncStore {
     private(set) var issues: [IssueItem] = []
     private(set) var activity: [ActivityEvent] = []
     private(set) var daemons: [DaemonStat] = []
+    /// Why the last `ps` sample produced nothing ("ps timed out"), if it failed.
+    private(set) var daemonSampleFailure: String?
     private(set) var retryQueue: [RetryQueueItem] = []
     private(set) var retryQueueTotal = 0
     private(set) var engine: SyncEngineInfo?
@@ -83,6 +85,8 @@ final class SyncStore {
     /// The transfer watcher has finished its first sweep, so an empty
     /// transfer list means "nothing transferring", not "not looked yet".
     private(set) var transferWatchReady = false
+    /// When the sync engine (brctl dump) was last read; nil: never.
+    private(set) var engineReadAt: Date?
     /// Issue producers that have delivered a successful result (see
     /// `SyncSnapshot.issueProducers`); nil for a fixture source, which
     /// delivers everything at once.
@@ -218,14 +222,41 @@ final class SyncStore {
     /// Coming back to the app is when a Full Disk Access grant made in System
     /// Settings lands, so the cached permission answers are dropped too: the
     /// next snapshot (the activation refresh or the next 15 s tick) re-probes.
+    ///
+    /// One ordered operation (it used to be two racing Tasks — this one and
+    /// RootView's own activation refresh — so the refresh could run first and
+    /// serve a cached grant for up to five minutes): the source drops its
+    /// cache and re-probes in one call, the answer is applied (a revocation
+    /// shows the Full Disk Access screen and stops the watcher NOW), and only
+    /// then does the main window's debounced refresh run.
     func applicationDidBecomeActive() async {
         await reprobePermissions()
+        if let fresh = await source.recheckAccess() { applyLocalPermissions(fresh) }
         await usage.applicationDidBecomeActive()
         hasActivated = true
         let held = heldEvents
         heldEvents.removeAll()
         held.forEach(record)
         recordLaunchEventsIfDue()
+    }
+
+    /// NSApplication didBecomeActive (via UsageLifecycle): the activation
+    /// above, then — only after the re-probe has landed — the main window's
+    /// activation refresh (60 s debounce, so app-switcher peeks stay cheap).
+    func applicationActivated() async {
+        await applicationDidBecomeActive()
+        if isMainWindowVisible() { await refresh() }
+    }
+
+    /// Bumped by every permission answer applied outside a snapshot
+    /// (activation re-check, the Full Disk Access screen's probe). A snapshot
+    /// whose fetch started before the latest such answer carries an OLDER
+    /// probe, so its permissions are not applied over it.
+    @ObservationIgnored private var permissionAnswerGeneration = 0
+
+    private func applyLocalPermissions(_ fresh: [PermissionStatus]) {
+        permissionAnswerGeneration &+= 1
+        if fresh != permissions { permissions = fresh }
     }
 
     /// For events a screen records on its own appearance (no click): sent now
@@ -402,7 +433,7 @@ final class SyncStore {
     /// re-probes instead of serving the old denial. A denial changes nothing.
     func fullDiskAccessProbed(_ state: PermissionState) async {
         guard TransferWatchPolicy.iCloudDriveAccess(fullDiskAccess: state).readsICloudDrive else { return }
-        permissions = Self.permissions(permissions, settingFullDiskAccess: state)
+        applyLocalPermissions(Self.permissions(permissions, settingFullDiskAccess: state))
         // No fetch while paused (refresh refuses); the cache drop still happens.
         await refresh(force: true, reprobePermissions: true)
     }
@@ -578,10 +609,12 @@ final class SyncStore {
     /// defeat the cache. Dropped even when paused or debounced, so the next
     /// snapshot that does run sees the new answer.
     func refresh(force: Bool = false, reprobePermissions reprobe: Bool = false) async {
-        if reprobe { await reprobePermissions() }
         // Monitoring paused → truly stop watching: no fetch, even forced.
         // hasLoaded (and all last-known data) is deliberately preserved.
-        if isGloballyPaused { return }
+        if isGloballyPaused {
+            if reprobe { await reprobePermissions() }
+            return
+        }
         // Coalesce overlapping calls: joining the in-flight task prevents a
         // stale snapshot finishing late from clobbering a newer one (TOCTOU
         // across the suspension).
@@ -594,11 +627,19 @@ final class SyncStore {
             // while we were suspended, the loop joins that one too.
             if inFlightRefresh == inFlight { inFlightRefresh = nil }
         }
+        // AFTER the join: a snapshot already in flight may be mid-probe, and
+        // the one this call runs (if any) must be the one that re-asks.
+        if reprobe { await reprobePermissions() }
         if !force, let last = lastRefresh, now().timeIntervalSince(last) < 60 { return }
         let task = Task { [source] in
             self.fetchGeneration += 1
             let generation = self.fetchGeneration
-            let snapshot = await source.currentSnapshot()
+            let answerAtStart = self.permissionAnswerGeneration
+            var snapshot = await source.currentSnapshot()
+            // A permission answer applied while this fetch ran is newer than
+            // the probe this snapshot carries (a re-grant seen by the Full
+            // Disk Access screen must not be undone by a "denied" in flight).
+            if self.permissionAnswerGeneration != answerAtStart { snapshot.permissions = self.permissions }
             // The source creates and STARTS the watcher on its first snapshot,
             // whatever the policy says — and monitoring or a surface may have
             // changed while this fetch was in flight. Re-apply the policy
@@ -666,6 +707,7 @@ final class SyncStore {
         issues = visibleIssues
         activity = s.activity
         daemons = s.daemons
+        if daemonSampleFailure != s.daemonSampleFailure { daemonSampleFailure = s.daemonSampleFailure }
         // Rows the user has already trashed must not come back on a snapshot
         // that was ALREADY IN FLIGHT when they did it. A snapshot can take
         // seconds (system scans are time-boxed at 5s each) and it serves the
@@ -693,6 +735,7 @@ final class SyncStore {
         containerScan = s.containerScan
         conflictScanCap = s.conflictScanCap
         transferWatchReady = s.transferWatchReady
+        engineReadAt = s.engineReadAt
         deliveredIssueProducers = s.issueProducers.map { Set($0.keys) }
         (indeterminateAppIDs, indeterminateFolderNames) = Self.indeterminateGroups(s.transfers)
     }
@@ -753,12 +796,15 @@ final class SyncStore {
             totalBytes: override,
             segments: info.segments,
             planName: StorageBreakdownSource.planName(forCap: override),
-            planPriceLine: "Set by you",
+            // The measured segments are kept, and so is what is known about
+            // them: a capped walk stays "partial" under a chosen plan too.
+            planPriceLine: info.localIsPartial ? "Set by you · partial scan" : "Set by you",
             capSource: .userChosen,
             remainingBytes: info.remainingBytes,
             accountUsedBytes: account?.bytes,
             planCapBelowRemaining: account == .capBelowRemaining,
-            planIsAmbiguous: false
+            planIsAmbiguous: false,
+            localIsPartial: info.localIsPartial
         )
     }
 

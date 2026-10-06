@@ -98,14 +98,17 @@ enum StorageBreakdownSource {
             ) else { continue }
 
             for case let item as URL in enumerator {
+                if Task.isCancelled { isPartial = true; break }
+                // Before counting: a big `.Trash` must not use up the cap
+                // that the real footprint needs (it is still walked — see
+                // above for why it can't be pruned).
+                guard !isUnderDotName(item, level: enumerator.level) else { continue }
                 visited += 1
                 if visited > cap {
                     logger.notice("storage breakdown hit the \(cap, privacy: .public)-entry cap; reporting a partial figure")
                     isPartial = true
                     break
                 }
-                if Task.isCancelled { isPartial = true; break }
-                guard !isUnderDotName(item, level: enumerator.level) else { continue }
                 guard let values = try? item.resourceValues(forKeys: keySet),
                       values.isSymbolicLink != true else { continue }
 
@@ -361,7 +364,8 @@ enum StorageBreakdownSource {
             remainingBytes: remainingBytes,
             accountUsedBytes: account?.bytes,
             planCapBelowRemaining: account == .capBelowRemaining,
-            planIsAmbiguous: ambiguous
+            planIsAmbiguous: ambiguous,
+            localIsPartial: isPartial
         )
     }
 }

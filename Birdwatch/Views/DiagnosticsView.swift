@@ -244,6 +244,15 @@ struct DiagnosticsView: View {
     private var daemonsCard: some View {
         Card {
             VStack(spacing: 0) {
+                if let empty = Self.daemonsEmptyText(
+                    count: store.daemons.count, failure: store.daemonSampleFailure, hasLoaded: store.hasLoaded) {
+                    // Never an empty card: say why there are no rows.
+                    Text(empty)
+                        .scaledFont(size: 12.5)
+                        .foregroundStyle(Surface.fg2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 10)
+                }
                 ForEach(Array(store.daemons.enumerated()), id: \.element.id) { index, daemon in
                     if index > 0 { Divider().overlay(Surface.cardLine) }
                     daemonRow(daemon)
@@ -251,6 +260,14 @@ struct DiagnosticsView: View {
                 }
             }
         }
+    }
+
+    /// What the daemons card says when it has no rows; nil when it has some.
+    static func daemonsEmptyText(count: Int, failure: String?, hasLoaded: Bool) -> String? {
+        guard count == 0 else { return nil }
+        if let failure { return "Couldn't sample daemons (\(failure))" }
+        guard hasLoaded else { return OverviewTiles.waiting }
+        return "None of bird, cloudd or fileproviderd is running"
     }
 
     private func daemonRow(_ daemon: DaemonStat) -> some View {
@@ -423,10 +440,23 @@ struct DiagnosticsView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// How bird's attempt count reads: it counts FAILURES (0 = not tried and
+    /// failed yet), and bird prints no ceiling, so none is invented.
+    static func attemptsText(_ attempts: Int) -> String {
+        attempts == 0 ? "no failed attempts yet" : "\(Plural.count(attempts, "failed attempt"))"
+    }
+
+    /// Which items the card shows, when it shows only some: the count, the
+    /// order it picked them by, and that each names the row counting it.
+    static func retryScope(shown: Int, total: Int) -> String {
+        guard total > shown else { return "" }
+        return "Showing \(shown) of \(total) scheduled items — \(BrctlDumpMapper.retryRowOrder). Each names the app row that counts it; the rest are counted on their rows too. "
+    }
+
     private var retryFootnote: String {
         let shown = store.retryQueue.count
         let total = store.retryQueueTotal
-        let scope = total > shown ? "Showing \(shown) of \(total) scheduled items. " : ""
+        let scope = Self.retryScope(shown: shown, total: total)
         let base = "macOS redacts file names in bird's diagnostic output — only the file type survives."
         let resolvedAny = store.retryQueue.contains { $0.matchConfidence != .none }
         let located = resolvedAny
@@ -436,13 +466,20 @@ struct DiagnosticsView: View {
     }
 
     private func retryRow(_ item: RetryQueueItem) -> some View {
-        let atMax = item.attempt >= item.maxAttempts
-        return VStack(alignment: .leading, spacing: 5) {
+        // No bar: bird prints a failure count with no ceiling, so there is
+        // nothing to fill a bar against (the old "of 62" scale was invented).
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
                 Text(item.name)
                     .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(Surface.fg)
                     .lineLimit(1)
+                if let row = item.rowName {
+                    Text("· \(row)")
+                        .scaledFont(size: 11.5)
+                        .foregroundStyle(Surface.fg2)
+                        .lineLimit(1)
+                }
                 if let ago = item.lastAttemptAgo {
                     Text("· last try \(Format.duration(ago)) ago")
                         .scaledFont(size: 11.5)
@@ -450,9 +487,9 @@ struct DiagnosticsView: View {
                         .monospacedDigit()
                 }
                 Spacer(minLength: 8)
-                Text("attempt \(item.attempt) of \(item.maxAttempts)")
+                Text(Self.attemptsText(item.attempt))
                     .scaledFont(size: 11.5)
-                    .foregroundStyle(atMax ? Palette.error : Surface.fg2)
+                    .foregroundStyle(item.attempt > 0 ? Palette.warning : Surface.fg2)
                     .monospacedDigit()
                     .fixedSize(horizontal: true, vertical: false)
             }
@@ -461,13 +498,6 @@ struct DiagnosticsView: View {
                 Spacer(minLength: 8)
                 rowActions(item)
             }
-            MiniProgressBar(
-                progress: Double(item.attempt) / Double(item.maxAttempts),
-                tint: atMax ? Palette.error : Palette.warning,
-                label: "Retry attempts",
-                // A count of tries, not work done: never "19 percent".
-                valueDescription: "attempt \(item.attempt) of \(item.maxAttempts)"
-            )
             if let status = retryStatus, status.rowID == item.id {
                 statusLine(status).transition(.opacity)
             }

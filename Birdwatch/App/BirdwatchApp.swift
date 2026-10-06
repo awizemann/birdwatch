@@ -244,7 +244,7 @@ final class UsageLifecycle {
         let center = NotificationCenter.default
         let usage = store.usage
         tokens.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-            Task { await store.applicationDidBecomeActive() }
+            Task { await store.applicationActivated() }
         })
         tokens.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
             Task { await usage.flush() }

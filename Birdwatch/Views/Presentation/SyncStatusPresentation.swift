@@ -90,6 +90,11 @@ struct SyncStatusDisplay: Equatable {
             bar = nil
             showsSpinner = false
             tone = .warning
+        case .waitingToSync(let items):
+            label = "\(Plural.count(items, "item")) waiting to sync"
+            bar = nil
+            showsSpinner = false
+            tone = .neutral
         }
     }
 
@@ -177,8 +182,13 @@ struct OverviewHeroDisplay: Equatable {
         pendingFileCount: Int,
         unknownAppCount: Int = 0,
         unwatchedAppCount: Int = 0,
-        unreportedAppCount: Int = 0
+        unreportedAppCount: Int = 0,
+        backlogLine: String? = nil
     ) {
+        // bird's backlog is not covered by a transfer or by activity: a hero
+        // that shows work in progress still says which rows bird holds items
+        // for (the same words as the popover), as the idle hero does.
+        let backlogSuffix = backlogLine.map { " \($0)." } ?? ""
         switch state {
         case .paused:
             title = "Monitoring paused"
@@ -190,24 +200,27 @@ struct OverviewHeroDisplay: Equatable {
             let more = alsoActive > 0 ? " · activity in \(alsoActive) more" : ""
             if progressIsIndeterminate || progress <= 0 {
                 title = "Syncing \(Plural.count(inFlightCount, "file"))" + more
-                subtitle = "macOS reports these as in progress without a percentage."
+                subtitle = "macOS reports these as in progress without a percentage." + backlogSuffix
                 ring = .indeterminate
             } else {
                 title = "Syncing \(Plural.count(appCount, "app"))" + more
-                subtitle = "\(Plural.count(pendingFileCount, "file")) remaining"
+                subtitle = "\(Plural.count(pendingFileCount, "file")) remaining" + (backlogLine.map { ". \($0)." } ?? "")
                 ring = .percent(progress)
             }
             tone = .working
             showsBar = true
         case .active(let appCount):
             title = "Activity in \(Plural.count(appCount, "app"))"
-            subtitle = "iCloud reports work in progress, but no percentage or file count."
+            subtitle = "iCloud reports work in progress, but no percentage or file count." + backlogSuffix
             ring = .indeterminate
             tone = .working
             showsBar = true
         case .idle:
             title = "No sync activity detected"
             var parts = ["Nothing is transferring right now."]
+            // Not transferring is not caught up: bird may still hold items.
+            // Same words as the popover's line (`BacklogSummary`).
+            if let backlogLine { parts.append("\(backlogLine).") }
             if unknownAppCount > 0 { parts.append("\(Plural.count(unknownAppCount, "app")) not read yet.") }
             if unreportedAppCount > 0 {
                 parts.append("\(Plural.count(unreportedAppCount, "app")) whose sync status macOS doesn't report.")
@@ -254,12 +267,7 @@ enum PopoverSummary {
                 : "\(Plural.count(unconfirmed, "app")) with no activity seen")
         }
         // Not idle: bird holds items for these rows that have not synced.
-        let backlogged = apps.filter { if case .notSyncing = $0.status { true } else { false } }.count
-        if backlogged > 0 {
-            parts.append(parts.isEmpty
-                ? "\(Plural.count(backlogged, "app")) with items not syncing"
-                : "\(backlogged) with items not syncing")
-        }
+        if let backlog = BacklogSummary.appsLine(apps, leading: parts.isEmpty) { parts.append(backlog) }
         // Not idle and not a problem: state not read yet (neutral).
         let unknown = apps.filter { UnknownRowKind(of: $0) == .notReadYet }.count
         if unknown > 0 {
@@ -402,11 +410,47 @@ enum TransferWatchNotes {
     }
 }
 
+/// How many rows bird holds a backlog for, in the words the rows use. The
+/// one wording the popover line and the Overview hero share.
+enum BacklogSummary {
+    static func counts(_ apps: [AppSyncState]) -> (stuck: Int, waiting: Int) {
+        apps.reduce(into: (0, 0)) { acc, app in
+            switch app.status {
+            case .notSyncing: acc.0 += 1
+            case .waitingToSync: acc.1 += 1
+            default: break
+            }
+        }
+    }
+
+    /// "2 apps with items not syncing · 1 with items waiting to sync";
+    /// `leading` decides whether the first phrase names its noun.
+    static func appsLine(_ apps: [AppSyncState], leading: Bool) -> String? {
+        let (stuck, waiting) = counts(apps)
+        var parts: [String] = []
+        var first = leading
+        for (n, words) in [(stuck, "with items not syncing"), (waiting, "with items waiting to sync")] where n > 0 {
+            parts.append(first ? "\(Plural.count(n, "app")) \(words)" : "\(n) \(words)")
+            first = false
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }}
+
 /// The Overview's count tiles. Each says "—" with a reason rather than a
 /// number nobody measured: before the first snapshot, and while paused
 /// (the snapshot shown is the last one taken before the pause).
 enum OverviewTiles {
     static let waiting = "Waiting for first read"
+
+    /// Narrowest a tile may be and still fit its value and two caption lines.
+    static let minimumTileWidth: CGFloat = 140
+    static let spacing: CGFloat = 14
+
+    /// 4 (one row) when four minimum-width tiles fit, else 2 (two rows of
+    /// two). A fixed threshold, so the layout never depends on caption text.
+    static func columns(forWidth width: CGFloat) -> Int {
+        width >= 4 * minimumTileWidth + 3 * spacing ? 4 : 2
+    }
 
     static func activeApps(count: Int, loaded: Bool, paused: Bool) -> (value: String, caption: String?) {
         if paused { return ("—", "Not watched while paused") }
@@ -460,6 +504,16 @@ enum DriveFolderDisplay {
         }
         let base = SyncStatusDisplay(status: folder.status, backend: .cloudDocs,
                                      progressIsIndeterminate: progressIsIndeterminate)
+        // A backlog (or a transfer) is the last snapshot's word, not a
+        // current reading: while paused it keeps its last-known label (as an
+        // app row keeps its status) but says it is not being watched, stops
+        // warning, and drops its moving bar.
+        switch folder.status {
+        case .notSyncing, .waitingToSync, .syncing, .active:
+            return paused ? SyncStatusDisplay(label: "\(base.label) · monitoring paused", tone: .neutral) : base
+        default:
+            break
+        }
         guard base.tone == .confirmed else { return base }
         if paused { return SyncStatusDisplay(label: "Monitoring paused", tone: .neutral) }
         if engineStateUnknown { return SyncStatusDisplay(label: "State unknown", tone: .neutral) }

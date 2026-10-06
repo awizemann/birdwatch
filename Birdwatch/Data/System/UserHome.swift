@@ -23,8 +23,16 @@ nonisolated enum UserHome {
     }
 
     /// Pure, so the rule is testable without being a test host.
+    ///
+    /// Debug builds only (tests run Debug): in a Release build the
+    /// environment is never consulted, so a user-set XCTest variable cannot
+    /// point the shipping app at a temp folder.
     static func resolve(environment: [String: String], realHome: String, temporaryDirectory: String) -> String {
+        #if DEBUG
         guard isRunningTests(environment) else { return realHome }
         return (temporaryDirectory as NSString).appendingPathComponent("birdwatch-test-home")
+        #else
+        return realHome
+        #endif
     }
 }

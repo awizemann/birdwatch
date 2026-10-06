@@ -106,20 +106,47 @@ nonisolated enum RedactedPathResolver {
     ///
     /// Returns only the items that matched something; a missing key means "no
     /// honest path", which callers must render as the redacted-only wording.
+    ///
+    /// COST: candidates are indexed once by shape — container, file vs
+    /// folder, and name length (which bird's redaction preserves exactly) —
+    /// so each item is pattern-matched only against same-shaped names, not
+    /// the whole (up to 50k) list.
     static func resolve(
         items: [BrctlPendingItem],
         candidates: [PathCandidate]
     ) -> [String: ResolvedPath] {
         guard !items.isEmpty, !candidates.isEmpty else { return [:] }
 
+        // Built lazily: only containers some item names get indexed, and the
+        // all-container index only when a header-less item needs it.
         let byContainer = Dictionary(grouping: candidates) { $0.containerDirectoryName ?? "" }
-        let containerNames = Array(Set(candidates.compactMap(\.containerDirectoryName)))
+        var shapeIndex: [String: [Shape: [PathCandidate]]] = [:]
+        func shaped(_ container: String) -> [Shape: [PathCandidate]] {
+            if let cached = shapeIndex[container] { return cached }
+            let pool = container.isEmpty ? candidates : (byContainer[container] ?? [])
+            let built = Dictionary(grouping: pool) { Shape(isDirectory: $0.isDirectory, length: $0.name.count) }
+            shapeIndex[container] = built
+            return built
+        }
+        let containerNames = Array(byContainer.keys.filter { !$0.isEmpty })
         // The same container pattern repeats across every item of a block.
         var containerCache: [String: [String]] = [:]
 
         var out: [String: ResolvedPath] = [:]
+        var memo: [Memo: ResolvedPath?] = [:]
         for item in items {
-            guard let namePattern = item.redactedName, !namePattern.isEmpty else { continue }
+            guard let namePattern = item.redactedName, !namePattern.isEmpty,
+                  let length = nameLength(pattern: namePattern) else { continue }
+
+            // Items with the same container, name pattern, kind and size get
+            // the same answer: compute it once (a big queue repeats shapes —
+            // every container's `D{7}s` Documents folder, for one).
+            let memoKey = Memo(container: item.containerPattern, name: namePattern,
+                               isDirectory: item.isDirectory, size: item.isDirectory ? nil : item.byteSize)
+            if let known = memo[memoKey] {
+                if let known { out[item.itemID] = known }
+                continue
+            }
 
             var pool: [PathCandidate]
             if let containerPattern = item.containerPattern {
@@ -130,10 +157,12 @@ nonisolated enum RedactedPathResolver {
                 }()
                 // A named container that matches nothing on disk is a real
                 // answer: the folder bird is stuck on is not materialised here.
-                guard !matched.isEmpty else { continue }
-                pool = matched.flatMap { byContainer[$0] ?? [] }
+                guard !matched.isEmpty else { memo[memoKey] = .some(nil); continue }
+                let shape = Shape(isDirectory: item.isDirectory, length: length)
+                pool = matched.flatMap { shaped($0)[shape] ?? [] }
             } else {
-                pool = candidates
+                // "" stands for every candidate, across all containers.
+                pool = shaped("")[Shape(isDirectory: item.isDirectory, length: length)] ?? []
             }
 
             let hits = pool.filter { candidate in
@@ -147,11 +176,12 @@ nonisolated enum RedactedPathResolver {
                 return true
             }
 
+            let answer: ResolvedPath?
             switch hits.count {
             case 0:
-                continue
+                answer = nil
             case 1:
-                out[item.itemID] = ResolvedPath(
+                answer = ResolvedPath(
                     displayPath: abbreviate(hits[0].path),
                     absolutePath: hits[0].path,
                     confidence: .exact
@@ -161,14 +191,48 @@ nonisolated enum RedactedPathResolver {
                 // to look; spread across folders, we only report the count.
                 let parents = Set(hits.map { ($0.path as NSString).deletingLastPathComponent })
                 let sharedParent = parents.count == 1 ? parents.first : nil
-                out[item.itemID] = ResolvedPath(
+                answer = ResolvedPath(
                     displayPath: sharedParent.map(abbreviate) ?? "",
                     absolutePath: sharedParent,
                     confidence: .ambiguous(count: hits.count)
                 )
             }
+            memo[memoKey] = .some(answer)
+            if let answer { out[item.itemID] = answer }
         }
         return out
+    }
+
+    private struct Memo: Hashable {
+        let container: String?
+        let name: String
+        let isDirectory: Bool
+        let size: Int64?
+    }
+
+    private struct Shape: Hashable {
+        let isDirectory: Bool
+        let length: Int
+    }
+
+    /// How many characters a name fitting `pattern` has: literals count one
+    /// each, `{n}` counts n. nil for a malformed brace group (`matches` would
+    /// treat it literally, so its literal length is used instead).
+    static func nameLength(pattern: String) -> Int? {
+        var length = 0
+        var index = pattern.startIndex
+        while index < pattern.endIndex {
+            if pattern[index] == "{",
+               let close = pattern[index...].firstIndex(of: "}"),
+               let hidden = Int(pattern[pattern.index(after: index)..<close]) {
+                length += hidden
+                index = pattern.index(after: close)
+            } else {
+                length += 1
+                index = pattern.index(after: index)
+            }
+        }
+        return length
     }
 
     /// `/Users/x/Library/…` → `~/Library/…`. Never shows the account's short name.
@@ -288,60 +352,98 @@ nonisolated enum RedactedPathResolver {
     ///    this account and would swallow the entire budget before the
     ///    alphabetically later containers were ever reached.
     static func candidates(root: URL? = nil, cap: Int = entryCap) -> [PathCandidate] {
-        var out = shallowPass(root: root ?? ubiquityRoot, cap: cap)
+        walk(root: root, cap: cap).candidates
+    }
+
+    /// `candidates`, plus whether the walk stopped at its cap — the one
+    /// place that knows (a count compared against the cap afterwards cannot:
+    /// entries that were skipped never became candidates).
+    ///
+    /// The cap counts only entries that COULD become candidates: dot-named
+    /// entries (`.Trash`, `.DS_Store`, …) are skipped before counting and
+    /// their contents are never walked (an item in a container's trash has
+    /// no row to land on), and the deep pass does not count again what the
+    /// shallow pass already listed.
+    static func walk(root: URL? = nil, cap: Int = entryCap) -> PathCandidateWalk {
+        let root = root ?? ubiquityRoot
+        let shallow = shallowPass(root: root, cap: cap)
+        var out = shallow.candidates
         var seen = Set(out.map(\.path))
         let remaining = cap - out.count
-        guard remaining > 0 else { return out }
-        for candidate in deepPass(root: root ?? ubiquityRoot, cap: remaining) where !seen.contains(candidate.path) {
+        guard remaining > 0, !shallow.isPartial else { return PathCandidateWalk(candidates: out, isPartial: true) }
+        let deep = deepPass(root: root, cap: remaining, alreadyListed: seen)
+        for candidate in deep.candidates where !seen.contains(candidate.path) {
             seen.insert(candidate.path)
             out.append(candidate)
         }
-        return out
+        return PathCandidateWalk(candidates: out, isPartial: deep.isPartial)
     }
 
     /// Containers and their immediate children — two levels, no enumerator.
-    private static func shallowPass(root: URL, cap: Int) -> [PathCandidate] {
+    private static func shallowPass(root: URL, cap: Int) -> PathCandidateWalk {
         var out: [PathCandidate] = []
         for container in listing(of: root) {
-            guard out.count < cap else { break }
             let name = container.lastPathComponent
-            if let entry = candidate(for: container, container: name) { out.append(entry) }
-            for child in listing(of: container) {
-                guard out.count < cap else { break }
-                if let entry = candidate(for: child, container: name) { out.append(entry) }
+            for item in [container] + listing(of: container) {
+                guard let entry = candidate(for: item, container: name) else { continue }
+                guard out.count < cap else { return PathCandidateWalk(candidates: out, isPartial: true) }
+                out.append(entry)
             }
         }
-        return out
+        return PathCandidateWalk(candidates: out, isPartial: false)
     }
 
-    private static func deepPass(root: URL, cap: Int) -> [PathCandidate] {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: resourceKeys,
-            options: [.skipsPackageDescendants],
-            errorHandler: { failed, error in
-                logger.debug("path resolver skipped \(failed.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .private)")
-                return true      // per-item fault tolerance: keep walking
-            }
-        ) else { return [] }
-
+    /// One enumerator per container child rather than one over the root: a
+    /// dot-named container or child (`.Trash`) is then never entered at all.
+    /// (`skipDescendants()` is no substitute — on this fileprovider-backed
+    /// volume it ends the whole enumeration early; see `candidates`.) Deeper
+    /// dot-named folders are rare; their contents are walked but never
+    /// counted or listed.
+    private static func deepPass(root: URL, cap: Int, alreadyListed: Set<String>) -> PathCandidateWalk {
         var out: [PathCandidate] = []
-        var visited = 0
-        // The enumerator's own depth, not a path prefix: it hands back
-        // fully-resolved paths (/private/var/… for a /var/… root), so a prefix
-        // test breaks on symlinked roots. Depth 1 IS the container.
-        var container: String?
-        for case let item as URL in enumerator {
-            visited += 1
-            if enumerator.level <= 1 { container = item.lastPathComponent }
-            if visited > cap {
-                logger.notice("path resolver hit the \(cap, privacy: .public)-entry cap; resolving against a partial listing")
-                break
+        var counted = 0
+        for container in listing(of: root) {
+            let name = container.lastPathComponent
+            for child in listing(of: container) {
+                guard let enumerator = FileManager.default.enumerator(
+                    at: child, includingPropertiesForKeys: resourceKeys,
+                    options: [.skipsPackageDescendants],
+                    errorHandler: { failed, error in
+                        logger.debug("path resolver skipped \(failed.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .private)")
+                        return true      // per-item fault tolerance: keep walking
+                    }
+                ) else { continue }
+                // Depth of the dot-named folder we are inside, if any. The
+                // enumerator is depth-first pre-order, so everything deeper
+                // than it that follows is its contents. By `level`, not path
+                // prefixes (the enumerator may hand back /private/var/… for a
+                // /var/… root).
+                var insideDotFolderAt: Int?
+                for case let item as URL in enumerator {
+                    if Task.isCancelled { return PathCandidateWalk(candidates: out, isPartial: true) }
+                    let level = enumerator.level
+                    if let dot = insideDotFolderAt {
+                        if level > dot { continue }
+                        insideDotFolderAt = nil
+                    }
+                    // A dot-named entry (or folder, with all of its contents):
+                    // not a candidate, and not counted against the cap.
+                    if item.lastPathComponent.hasPrefix(".") {
+                        insideDotFolderAt = level
+                        continue
+                    }
+                    guard !alreadyListed.contains(item.path) else { continue }
+                    guard let entry = candidate(for: item, container: name) else { continue }
+                    counted += 1
+                    if counted > cap {
+                        logger.notice("path resolver hit the \(cap, privacy: .public)-entry cap; resolving against a partial listing")
+                        return PathCandidateWalk(candidates: out, isPartial: true)
+                    }
+                    out.append(entry)
+                }
             }
-            if Task.isCancelled { break }
-            guard !item.lastPathComponent.hasPrefix(".") else { continue }
-            if let entry = candidate(for: item, container: container) { out.append(entry) }
         }
-        return out
+        return PathCandidateWalk(candidates: out, isPartial: false)
     }
 
     private static func listing(of directory: URL) -> [URL] {
@@ -366,4 +468,19 @@ nonisolated enum RedactedPathResolver {
             containerDirectoryName: container
         )
     }
+}
+
+/// The redacted-path candidate walk's result: the candidates, and whether
+/// the walk stopped at its cap (so a header-less "exact" match may have a
+/// better one among the entries never listed). An array literal is a
+/// complete walk.
+nonisolated struct PathCandidateWalk: Sendable, ExpressibleByArrayLiteral {
+    var candidates: [PathCandidate]
+    var isPartial: Bool
+
+    init(candidates: [PathCandidate], isPartial: Bool) {
+        self.candidates = candidates
+        self.isPartial = isPartial
+    }
+    init(arrayLiteral elements: PathCandidate...) { self.init(candidates: elements, isPartial: false) }
 }

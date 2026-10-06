@@ -360,3 +360,45 @@ struct AppContainerRowTests {
         #expect(ids.firstIndex(of: "icloud-drive")! < ids.firstIndex(of: "container-icloud-md-obsidian")!)
     }
 }
+
+@Suite("iCloud Drive folder listing")
+struct DriveFolderScanTests {
+
+    // On Alan's Mac, CloudDocs holds `Desktop` and `Documents` as
+    // hidden-flagged symlinks to ~/Desktop and ~/Documents. Following them
+    // reads those folders (a TCC prompt) regardless of the Full Disk Access
+    // gate. Fails if someone "harmonizes" .skipsHiddenFiles away here, as
+    // the Mobile Documents scans legitimately did.
+    @Test("Hidden-flagged symlinks in CloudDocs are never listed or followed")
+    func hiddenSymlinksNotFollowed() throws {
+        let fm = FileManager.default
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bw-drive-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? fm.removeItem(at: base) }
+        let root = base.appending(path: "CloudDocs", directoryHint: .isDirectory)
+        let outside = base.appending(path: "HomeDesktop", directoryHint: .isDirectory)
+        try fm.createDirectory(at: root.appending(path: "Projects"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("a".utf8).write(to: root.appending(path: "Projects/plan.txt"))
+        try Data("b".utf8).write(to: outside.appending(path: "private.txt"))
+
+        let link = root.appending(path: "Desktop")
+        try fm.createSymbolicLink(at: link, withDestinationURL: outside)
+        // UF_HIDDEN on the LINK itself (lchflags), as macOS sets it.
+        #expect(lchflags(link.path, UInt32(UF_HIDDEN)) == 0)
+        var linkStat = stat()
+        #expect(lstat(link.path, &linkStat) == 0)
+        #expect(linkStat.st_flags & UInt32(UF_HIDDEN) != 0, "the flag must be on the link for this to prove anything")
+
+        // Two guards keep the link out: .skipsHiddenFiles, and the
+        // isDirectory check (a symlink is not a directory to resourceValues).
+        // A hidden-flagged REAL folder is excluded only by the first, so it
+        // is what makes this test fail if .skipsHiddenFiles is removed.
+        let hiddenFolder = root.appending(path: "Hidden", directoryHint: .isDirectory)
+        try fm.createDirectory(at: hiddenFolder, withIntermediateDirectories: true)
+        #expect(lchflags(hiddenFolder.path, UInt32(UF_HIDDEN)) == 0)
+
+        let folders = try #require(DriveFolderSource.scanFolders(root: root))
+        #expect(folders.map(\.name) == ["Projects"])
+    }
+}

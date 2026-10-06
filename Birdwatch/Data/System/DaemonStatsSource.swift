@@ -32,10 +32,28 @@ actor DaemonStatsSource {
     /// the pure parsers already treat as "no daemons".
     func sampleRaw() async -> String {
         do {
-            return try await runner.run(toolPath: "/bin/ps", arguments: Self.psArguments, timeout: .seconds(10))
+            let output = try await runner.run(toolPath: "/bin/ps", arguments: Self.psArguments, timeout: .seconds(10))
+            lastSampleFailure = nil
+            return output
         } catch {
             logger.error("ps sample failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
+            lastSampleFailure = Self.failureReason(error)
             return ""
+        }
+    }
+
+    /// Why the latest `ps` sample produced nothing, in the card's words
+    /// ("ps timed out"); nil after a sample that ran. An empty daemon list
+    /// with no failure means ps ran and none of the daemons was running.
+    private(set) var lastSampleFailure: String?
+
+    nonisolated static func failureReason(_ error: any Error) -> String {
+        switch error as? RunnerError {
+        case .timeout?: "ps timed out"
+        case .launchFailed?: "ps could not be started"
+        case .nonZeroExit?: "ps failed"
+        case .outputTruncated?: "ps output was cut off"
+        case nil: "ps failed"
         }
     }
 

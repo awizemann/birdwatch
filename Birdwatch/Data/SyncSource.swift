@@ -14,6 +14,9 @@ struct SyncSnapshot: Sendable {
     var issues: [IssueItem]
     var activity: [ActivityEvent]
     var daemons: [DaemonStat]
+    /// Why `daemons` is empty when the `ps` sample itself failed ("ps timed
+    /// out"); nil when ps ran (an empty list then means none was running).
+    var daemonSampleFailure: String? = nil
     var retryQueue: [RetryQueueItem]
     /// Every item bird has scheduled work for — `retryQueue` is capped to the
     /// rows the card can show, so the card must say what it is a subset of.
@@ -44,6 +47,9 @@ struct SyncSnapshot: Sendable {
     /// Set when the conflict scan stopped at its item cap (the cap's value),
     /// so "no conflicts" covers only the part of iCloud Drive it reached.
     var conflictScanCap: Int? = nil
+    /// When the last good `brctl dump` was taken (nil: never). Lets "not
+    /// read yet" be told apart from "last read 2h ago, refreshes failing".
+    var engineReadAt: Date? = nil
     /// The transfer watcher has completed its first sweep of the iCloud
     /// roots. Until then an empty transfer list is "not read yet", not
     /// "nothing transferring" (C1). Fixture sources default to ready.
@@ -150,6 +156,13 @@ nonisolated protocol SyncSource: Sendable {
     /// answering). Cheap: the probe itself runs on the next snapshot.
     /// Optional: sources without a permissions cache keep the default no-op.
     func invalidatePermissions() async
+    /// Probes the permissions NOW (cheap: a file open and the notification
+    /// setting, no iCloud Drive read) and applies the Full Disk Access gate
+    /// to them — stopping the transfer watcher if access is gone — without
+    /// assembling a snapshot. Used on activation, which must not wait for a
+    /// debounced refresh to notice a revocation. nil: the source has no
+    /// probe (fixtures).
+    func recheckAccess() async -> [PermissionStatus]?
 }
 
 extension SyncSource {
@@ -159,4 +172,5 @@ extension SyncSource {
     func resolveConflict(issueID: String, keepVersionID: String, shownVersionIDs: Set<String>) async -> ConflictResolveResult { .resolved }
     func forgetRetryQueueItem(id: String) async {}
     func invalidatePermissions() async {}
+    func recheckAccess() async -> [PermissionStatus]? { nil }
 }

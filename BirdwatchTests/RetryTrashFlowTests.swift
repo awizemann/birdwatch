@@ -45,7 +45,7 @@ struct RetryTrashFlowTests {
 
     private func row(id: String, path: String? = "/x/\(UUID().uuidString)") -> RetryQueueItem {
         RetryQueueItem(
-            id: id, name: "Folder", attempt: 0, maxAttempts: 62,
+            id: id, name: "Folder", attempt: 0,
             path: path, absolutePath: path,
             matchConfidence: path == nil ? .none : .exact, isDirectory: true
         )
@@ -320,6 +320,16 @@ final class RecordingSource: SyncSource, @unchecked Sendable {
 
     func invalidatePermissions() async {
         log.append("reprobe")
+    }
+
+    /// When set, `recheckAccess` logs "recheck" and answers this (nil: the
+    /// protocol's no-probe default, logging nothing).
+    var recheckAnswer: [PermissionStatus]?
+    func recheckAccess() async -> [PermissionStatus]? {
+        guard let recheckAnswer else { return nil }
+        log.append("recheck")
+        await MainActor.run { snapshot.permissions = recheckAnswer }   // the source's cache now holds the fresh answer
+        return recheckAnswer
     }
 
     func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> { AsyncThrowingStream { $0.finish() } }

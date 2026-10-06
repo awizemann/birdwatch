@@ -102,6 +102,14 @@ actor SingleFlightScan<Value: Sendable> {
         _ = await inFlight?.value
     }
 
+    /// Drops the last result (Full Disk Access lost: it may no longer be
+    /// served). A scan in flight still lands; callers that must not cache
+    /// it gate on access themselves.
+    func forget() {
+        latest = nil
+        latestAt = nil
+    }
+
     /// Test hook: a scan has been started and has not landed yet.
     var isScanInFlightForTesting: Bool { inFlight != nil }
 

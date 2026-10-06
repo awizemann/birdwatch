@@ -73,6 +73,10 @@ private let everyPropValue: [UsageEvent] = {
     e += UsageEvent.SearchResultKind.allCases.map { .searchUsed(resultKind: $0, resultCount: 0) }
     e += IssueSeverity.allCases.map { .issueDismissed(severity: $0) }
     e += UsageEvent.IssueActionKind.allCases.map { .issueAction($0, severity: .warning) }
+    // Per event, not just per enum: the privacy-page test checks each
+    // event's own values, so every event carrying a shared enum lists it.
+    e += IssueSeverity.allCases.map { .issueAction(.review_versions, severity: $0) }
+    e += SyncBackend.allCases.map { .appMuted($0, muted: true) }
     e += UsageEvent.Outcome.allCases.map { .retryItemTrashed(outcome: $0) }
     e += UsageEvent.MaintenanceAction.allCases.map { .maintenanceRun($0, daemon: nil, outcome: .ok, errorKind: nil) }
     e += UsageEvent.Daemon.allCases.map { .maintenanceRun(.restart_daemon, daemon: $0, outcome: .ok, errorKind: nil) }
@@ -149,10 +153,44 @@ struct UsageEventWireTests {
         #expect(sent == vocabulary, "unreachable: \(vocabulary.subtracting(sent)), unlisted: \(sent.subtracting(vocabulary))")
     }
 
-    // The public privacy page promises it is the complete list. Fails if an
-    // event, detail or value is added to (or renamed in) UsageEvent without
-    // the page, or if the page still names one that no longer exists.
-    @Test("The privacy page lists exactly the events, details and values UsageEvent sends")
+    // A new UsageEvent case must be added to `allEvents` (isCovered forces
+    // that) AND to this literal list — so a new event name is a deliberate,
+    // reviewed change, and a rename of a wire name fails here.
+    @Test("The event names are exactly this list")
+    func eventNames() {
+        let names: Set<String> = [
+            "onboarding_step_shown", "onboarding_completed", "view_shown", "app_detail_shown",
+            "menubar_opened", "search_used", "refresh_forced", "monitoring_paused", "monitoring_resumed",
+            "app_muted", "issue_dismissed", "issue_action", "conflict_resolved", "retry_item_revealed",
+            "retry_item_trashed", "maintenance_run", "notifications_marked_read", "plan_cap_set",
+            "account_settings_opened", "snapshot_health",
+        ]
+        #expect(Set(allEvents.map(\.name)) == names)
+        #expect(Set((allEvents + everyPropValue).map(\.name)) == names)
+    }
+
+    /// Every detail name and string value each event can send, from every
+    /// case of every prop enum.
+    private static func sentByEvent() -> [String: Set<String>] {
+        var out: [String: Set<String>] = [:]
+        for e in allEvents + everyPropValue {
+            for (key, value) in e.props {
+                out[e.name, default: []].insert(key)
+                if case .string(let s) = value { out[e.name, default: []].insert(s) }
+            }
+            out[e.name, default: []].formUnion([])
+        }
+        return out
+    }
+
+    // The public privacy page promises it is the complete list. Checked PER
+    // EVENT: each event's bullet must name exactly that event's details and
+    // values (a value listed only under another event does not count), and
+    // the bucket ranges, shared by every *_bucket detail, are listed once
+    // after the bullets. Fails if an event, detail or value is added to (or
+    // renamed in) UsageEvent without the page, or the page names one that
+    // is not sent.
+    @Test("The privacy page lists each event with exactly its details and values")
     func privacyPageMatchesContract() throws {
         let page = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -161,20 +199,39 @@ struct UsageEventWireTests {
         let start = try #require(html.range(of: "<!-- usage-events"))
         let end = try #require(html.range(of: "<!-- /usage-events -->"))
         let section = String(html[start.upperBound..<end.lowerBound])
-        let code = try NSRegularExpression(pattern: "<code>([^<]+)</code>")
-        let listed = Set(code.matches(in: section, range: NSRange(section.startIndex..., in: section)).map {
-            String(section[Range($0.range(at: 1), in: section)!])
-        })
-
-        var sent: Set<String> = []
-        for e in allEvents + everyPropValue {
-            sent.insert(e.name)
-            for (key, value) in e.props {
-                sent.insert(key)
-                if case .string(let s) = value { sent.insert(s) }
-            }
+        func codes(_ text: String) -> Set<String> {
+            let regex = try! NSRegularExpression(pattern: "<code>([^<]+)</code>")
+            return Set(regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).map {
+                String(text[Range($0.range(at: 1), in: text)!])
+            })
         }
-        #expect(listed == sent, "not on the page: \(sent.subtracting(listed)), on the page but never sent: \(listed.subtracting(sent))")
+        let buckets: Set<String> = ["0", "1", "2-5", "6-20", "20+"]
+        let sent = Self.sentByEvent()
+        let eventNames = Set(sent.keys)
+
+        // One <li> per bullet; a bullet may cover several detail-less events.
+        let item = try NSRegularExpression(pattern: "<li>([\\s\\S]*?)</li>")
+        let bullets = item.matches(in: section, range: NSRange(section.startIndex..., in: section)).map {
+            String(section[Range($0.range(at: 1), in: section)!])
+        }
+        var seenEvents: Set<String> = []
+        for bullet in bullets {
+            let listed = codes(bullet)
+            let events = listed.intersection(eventNames)
+            #expect(!events.isEmpty, "a bullet names no event: \(bullet)")
+            seenEvents.formUnion(events)
+            let expected = events.reduce(into: Set<String>()) { $0.formUnion(sent[$1] ?? []) }.subtracting(buckets)
+            let details = listed.subtracting(events)
+            #expect(details == expected,
+                    "\(events.sorted()): missing \(expected.subtracting(details).sorted()), not sent \(details.subtracting(expected).sorted())")
+        }
+        #expect(seenEvents == eventNames, "events with no bullet: \(eventNames.subtracting(seenEvents).sorted())")
+
+        // The ranges sentence after the bullets: exactly the bucket values.
+        let afterList = String(section[try #require(section.range(of: "</ul>", options: .backwards)).upperBound...])
+        #expect(codes(afterList) == buckets)
+        let bucketsSent = sent.values.reduce(into: Set<String>()) { $0.formUnion($1) }.intersection(buckets)
+        #expect(bucketsSent == buckets, "every range is reachable")
     }
 
     @Test("Maintenance error kinds are case names, never the payload")
@@ -486,7 +543,8 @@ struct UsageStoreHookTests {
         #expect(tracker.events == [.menubarOpened(issueCount: 0, paused: false)])
     }
 
-    @Test("Opt-out flows through to the tracker's master switch")
+    // Awaits the write task the store returns: bounded, so a regression fails instead of hanging the run.
+    @Test("Opt-out flows through to the tracker's master switch", .timeLimit(.minutes(1)))
     func optOut() async {
         let (store, tracker) = makeStore()
         #expect(store.usageSharingEnabled == nil, "unknown until loaded, never a guessed true")

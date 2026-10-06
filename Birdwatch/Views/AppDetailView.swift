@@ -384,15 +384,21 @@ enum LogConsoleLines {
     /// Adds one arrival to the pending buffer, keeping it bounded.
     static func buffer(_ line: LogLine, into buffer: inout [LogLine]) {
         buffer.append(line)
-        // Amortised: trim only once it has doubled.
-        if buffer.count > limit * 2 { buffer.removeFirst(buffer.count - limit) }
+        // Amortised: trim only once it has doubled. By TIMESTAMP, not
+        // arrival: the seed burst arrives newest-first, so dropping the
+        // earliest arrivals would drop the newest lines.
+        if buffer.count > limit * 2 { buffer = newest(buffer) }
     }
 
     /// The lines to show after a flush: newest first, at most `limit`.
     /// Sorted by date because seeds arrive newest-first and live lines
     /// newest-last.
     static func merged(_ lines: [LogLine], with buffer: [LogLine]) -> [LogLine] {
-        Array((buffer.suffix(limit) + lines).sorted { $0.date > $1.date }.prefix(limit))
+        newest(buffer + lines)
+    }
+
+    private static func newest(_ lines: [LogLine]) -> [LogLine] {
+        Array(lines.sorted { $0.date > $1.date }.prefix(limit))
     }
 }
 

@@ -11,23 +11,31 @@ import Foundation
 /// built on it carries "≈" and the word "estimated"; a cap the user chose, or
 /// no cap at all, reads plainly.
 enum StorageCapLabel {
-    /// Sidebar footer text.
-    static func footerText(_ figure: StorageFooterFigure, capIsEstimated: Bool) -> String {
+    /// The local footprint as a figure: "83.2 GB", or "at least 83.2 GB"
+    /// when the size walk stopped at its cap (the Storage screen's
+    /// "partial scan").
+    static func localFigure(_ used: Int64, isPartial: Bool) -> String {
+        isPartial ? "at least \(Format.gigabytes(used))" : Format.gigabytes(used)
+    }
+
+    /// Sidebar footer text. `localIsPartial` qualifies the LOCAL figure; the
+    /// account figure (cap − remaining) does not come from the walk.
+    static func footerText(_ figure: StorageFooterFigure, capIsEstimated: Bool, localIsPartial: Bool = false) -> String {
         switch figure {
         case let .account(used, cap):
             // Account usage is cap − remaining: derived cap, derived usage.
             let text = "\(Format.capacity(used)) / \(Format.capacity(cap))"
             return capIsEstimated ? "≈ \(text)" : text
         case let .local(used, cap):
-            return "\(Format.gigabytes(used)) / \(capIsEstimated ? "≈ " : "")\(Format.gigabytes(cap)) on this Mac"
+            return "\(localFigure(used, isPartial: localIsPartial)) / \(capIsEstimated ? "≈ " : "")\(Format.gigabytes(cap)) on this Mac"
         case let .localOnly(used):
-            return "\(Format.gigabytes(used)) on this Mac"
+            return "\(localFigure(used, isPartial: localIsPartial)) on this Mac"
         }
     }
 
     /// What VoiceOver says for the footer ("≈" is read as a symbol name).
-    static func footerAccessibilityValue(_ figure: StorageFooterFigure, capIsEstimated: Bool) -> String {
-        let plain = footerText(figure, capIsEstimated: false)
+    static func footerAccessibilityValue(_ figure: StorageFooterFigure, capIsEstimated: Bool, localIsPartial: Bool = false) -> String {
+        let plain = footerText(figure, capIsEstimated: false, localIsPartial: localIsPartial)
         switch figure {
         case .account, .local:
             return capIsEstimated ? "\(plain), estimated from your remaining quota" : plain
@@ -46,14 +54,18 @@ enum StorageCapLabel {
     /// Storage → local usage headline when no account tier is shown.
     /// `planIsAmbiguous`: the quota is known but fits more than one plan, so
     /// account usage is unknown and only its floor is stated.
-    static func usageHeadline(used: Int64, cap: Int64?, capIsEstimated: Bool, planIsAmbiguous: Bool = false) -> String {
+    static func usageHeadline(
+        used: Int64, cap: Int64?, capIsEstimated: Bool, planIsAmbiguous: Bool = false, localIsPartial: Bool = false
+    ) -> String {
         if cap == nil, planIsAmbiguous {
             return "Account usage unknown — at least \(Format.capacity(used)) on this Mac"
         }
-        guard let cap else { return "\(Format.gigabytes(used)) of iCloud files on this Mac" }
+        let figure = localFigure(used, isPartial: localIsPartial)
+        let lead = figure.prefix(1).uppercased() + figure.dropFirst()
+        guard let cap else { return "\(lead) of iCloud files on this Mac" }
         return capIsEstimated
-            ? "\(Format.gigabytes(used)) of ≈ \(Format.gigabytes(cap)) used · estimated plan"
-            : "\(Format.gigabytes(used)) of \(Format.gigabytes(cap)) used"
+            ? "\(lead) of ≈ \(Format.gigabytes(cap)) used · estimated plan"
+            : "\(lead) of \(Format.gigabytes(cap)) used"
     }
 
     /// "X available" next to the local headline: cap − local is as derived

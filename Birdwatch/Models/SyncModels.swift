@@ -51,18 +51,21 @@ enum AppSyncStatus: Sendable, Hashable {
     /// first `brctl dump -i` has not landed). Neutral: neither a problem nor
     /// "up to date" — it is not counted as idle, active or an issue (C1).
     case unknown
-    /// bird has this many items scheduled and not yet synced (its retry
-    /// queue, from `brctl dump`) and nothing is transferring. Never "Up to
-    /// date", never green — and not a red error either: a backlog bird is
-    /// still holding is a warning (C1).
+    /// bird has this many items it has already failed, or has not attempted
+    /// for over a day (`BrctlDumpMapper.isStuck`), and nothing is
+    /// transferring. Never "Up to date", never green — and not a red error
+    /// either: a backlog bird is still holding is a warning (C1).
     case notSyncing(items: Int)
+    /// bird has this many items queued that are neither failing nor old:
+    /// ordinary scheduled work. Neutral — not "Up to date", not a problem.
+    case waitingToSync(items: Int)
 
     var isSyncing: Bool { if case .syncing = self { true } else { false } }
     /// Syncing with or without progress — anything that is doing work.
     var isActive: Bool {
         switch self {
         case .syncing, .active: true
-        case .upToDate, .paused, .issue, .unknown, .notSyncing: false
+        case .upToDate, .paused, .issue, .unknown, .notSyncing, .waitingToSync: false
         }
     }
 }
@@ -107,7 +110,7 @@ struct AppSyncState: Sendable, Hashable, Identifiable {
     var queueLabels: [String] = []
     var queueCounts: [Int] = []
     var infoCallout: String?         // backend-limits explainer shown in detail
-    var retryWarning: String?        // e.g. "3 items stuck — attempt 12 of 62"
+    var retryWarning: String?        // e.g. "3 items stuck"
     /// The recency tile's label when "Last synced" would be wrong — e.g. a
     /// container row's date is the directory's modification time.
     var lastActivityLabel: String? = nil
@@ -332,8 +335,14 @@ struct DaemonStat: Sendable, Hashable, Identifiable {
 struct RetryQueueItem: Sendable, Hashable, Identifiable {
     let id: String
     let name: String
+    /// bird's `attempts`: how many times it has FAILED this item (0 for an
+    /// item it simply has not got to). bird prints no ceiling, so none is
+    /// shown — the old "of 62" was a design-mock number, not bird's.
     var attempt: Int
-    let maxAttempts: Int             // 62 — items that hit this stop retrying
+    /// The row this item is counted on (an app's name, "iCloud Drive"), or
+    /// nil when no row could be found for it — so the list and the rows tell
+    /// the same story.
+    var rowName: String? = nil
     /// Seconds since bird last tried this item. Often the ONLY moving part:
     /// a `sync-up-scheduled` item sits at attempts:0 for months.
     var lastAttemptAgo: TimeInterval? = nil
@@ -543,6 +552,10 @@ struct StorageInfo: Sendable, Hashable {
     /// quota (and the user hasn't chosen one): account usage is unknown and
     /// the plan question is asked.
     var planIsAmbiguous: Bool = false
+
+    /// The local size walk stopped at its entry cap, so `usedBytes` is a
+    /// floor: every surface that states it says "at least".
+    var localIsPartial: Bool = false
 
     /// The cap, unless the live quota contradicts it.
     var trustedCapBytes: Int64? { planCapBelowRemaining ? nil : totalBytes }

@@ -76,7 +76,18 @@ struct ConsistentWordingTests {
         #expect(DaemonLoadDisplay(bird, paused: false).healthWord == "Healthy")
     }
 
-    @Test("A source's snapshot is not ready until the transfer watcher has swept once")
+    // Review fix: ViewThatFits sized captions on one line, so a 900 pt window
+    // (636 pt of tiles) got 2×2 although four fit, and the layout flipped as
+    // captions changed. The choice is now a width threshold only.
+    @Test("Overview tiles: one row of four from 602 pt, two rows of two below")
+    func tileColumns() {
+        #expect(OverviewTiles.columns(forWidth: 636) == 4, "the 900 pt window")
+        #expect(OverviewTiles.columns(forWidth: 602) == 4)
+        #expect(OverviewTiles.columns(forWidth: 601) == 2)
+        #expect(OverviewTiles.columns(forWidth: 0) == 2, "before the first measurement")
+    }
+
+    @Test("The watcher is ready only after its swept candidates were probed once")
     func watcherReadiness() async {
         let gate = AsyncStream<Void>.makeStream()
         let watcher = UbiquityTransferSource(roots: ["/nonexistent-bw-root"], sweep: { _ in
@@ -85,10 +96,35 @@ struct ConsistentWordingTests {
         })
         watcher.start()
         defer { watcher.stop() }
-        #expect(!watcher.hasSwept)
+        #expect(!watcher.hasFirstReading)
         gate.continuation.yield()
         await watcher.finishSweepForTesting()
-        #expect(watcher.hasSwept)
+        await watcher.probeOnceForTesting()
+        #expect(watcher.hasFirstReading)
+
+        // Pausing clears the list, so it is no longer a reading.
+        watcher.pause()
+        #expect(!watcher.hasFirstReading)
+        watcher.stop()
+        #expect(!watcher.hasFirstReading)
+    }
+
+    // Review fix: a sweep whose result was dropped while paused counted as
+    // the first reading.
+    @Test("A sweep dropped while paused does not make the watcher ready")
+    func droppedSweepIsNotAReading() async {
+        let gate = AsyncStream<Void>.makeStream()
+        let watcher = UbiquityTransferSource(roots: ["/nonexistent-bw-root"], sweep: { _ in
+            for await _ in gate.stream { break }
+            return ["/nonexistent-bw-root/a"]
+        })
+        watcher.start()
+        defer { watcher.stop() }
+        watcher.pause()                      // the sweep lands while paused
+        gate.continuation.yield()
+        await watcher.finishSweepForTesting()
+        await watcher.probeOnceForTesting()
+        #expect(!watcher.hasFirstReading)
     }
 
     @Test("Drive folders: gated Desktop/Documents, and never green while the engine is unknown or paused")
@@ -103,6 +139,23 @@ struct ConsistentWordingTests {
         #expect(show(other, gated: true).tone == .confirmed)
         #expect(show(other, unknown: true) == SyncStatusDisplay(label: "State unknown", tone: .neutral))
         #expect(show(other, paused: true) == SyncStatusDisplay(label: "Monitoring paused", tone: .neutral))
+
+        // Review fix: a backlog folder kept warning while paused. Like an app
+        // row it keeps its last-known count, says it is paused, and is neutral.
+        let stuck = DriveFolder(id: "s", name: "Projects", itemCount: 3, status: .notSyncing(items: 2))
+        let queued = DriveFolder(id: "q", name: "Notes", itemCount: 3, status: .waitingToSync(items: 1))
+        #expect(show(stuck).tone == .warning)
+        #expect(show(stuck, paused: true) == SyncStatusDisplay(label: "\(show(stuck).label) · monitoring paused", tone: .neutral))
+        #expect(show(queued, paused: true).label.hasSuffix("· monitoring paused"))
+        #expect(show(queued, paused: true).tone == .neutral)
+        // Seen in the live check: a folder from the last snapshot kept an
+        // animated "Syncing…" while paused.
+        let moving = DriveFolder(id: "m", name: "Design", itemCount: 3, status: .syncing(progress: 0))
+        #expect(show(moving).bar != nil)
+        let pausedMoving = show(moving, paused: true)
+        #expect(pausedMoving.label.hasSuffix("· monitoring paused"))
+        #expect(pausedMoving.bar == nil)
+        #expect(pausedMoving.tone == .neutral)
     }
 
     @Test("Recency tile: containers say 'Last modified'; a last-known state carries its note")

@@ -80,6 +80,28 @@ struct RedactedPathResolverTests {
         #expect(!RedactedPathResolver.matches(pattern: "Notes", name: "Note"))
     }
 
+    // The shape index looks candidates up by name length: it must be the
+    // length every name `matches` accepts, or a real fit is never compared.
+    @Test func nameLengthIsTheLengthMatchesAccepts() {
+        #expect(RedactedPathResolver.nameLength(pattern: "D{7}s") == 9)
+        #expect(RedactedPathResolver.nameLength(pattern: "r{21}g.pdf") == 27)
+        #expect(RedactedPathResolver.nameLength(pattern: "Notes") == 5)
+        #expect(RedactedPathResolver.nameLength(pattern: "a{x}b") == 5, "a malformed group is literal, as in matches")
+        #expect(RedactedPathResolver.matches(pattern: "a{x}b", name: "a{x}b"))
+    }
+
+    // Repeated shapes are resolved once and every item gets the answer.
+    @Test func repeatedShapesShareOneAnswer() {
+        let candidates = [PathCandidate(path: "/r/iCloud~md~obsidian/Documents", name: "Documents",
+                                        isDirectory: true, sizeBytes: nil, containerDirectoryName: "iCloud~md~obsidian")]
+        let items = ["a", "b"].map { item(id: $0, name: "D{7}s", container: "i{4}d.m{0}d.o{6}n", isDirectory: true) }
+        let resolved = RedactedPathResolver.resolve(items: items, candidates: candidates)
+        #expect(resolved["a"]?.absolutePath == "/r/iCloud~md~obsidian/Documents")
+        #expect(resolved["b"] == resolved["a"])
+        let missing = [item(id: "c", name: "D{7}s", container: "x{3}y", isDirectory: true)]
+        #expect(RedactedPathResolver.resolve(items: missing + items, candidates: candidates).count == 2)
+    }
+
     // MARK: - Resolution against a real temp tree
 
     @Test func uniqueMatchResolvesToAnExactPath() {
@@ -199,6 +221,37 @@ struct RedactedPathResolverTests {
         let scratch = Scratch()
         for index in 0..<20 { scratch.file("iCloud~com~acme~Notes/f\(index).bin", bytes: 1) }
         #expect(RedactedPathResolver.candidates(root: scratch.url, cap: 5).count <= 5)
+    }
+
+    // Review fix: the walk counted dot items, .Trash contents and entries the
+    // shallow pass had already listed toward the cap, and the caller guessed
+    // "partial" from candidates.count >= cap — which skipped entries made
+    // impossible to reach, so candidatesArePartial never fired.
+    @Test func walkReportsPartialOnlyWhenItStopsAtTheCap() {
+        let scratch = Scratch()
+        scratch.directory("iCloud~com~acme~Notes/Documents/deep")
+        for index in 0..<4 { scratch.file("iCloud~com~acme~Notes/Documents/deep/f\(index).bin", bytes: 1) }
+        // Never candidates, never counted: dot files, a container trash and
+        // a top-level trash, however much is in them.
+        for index in 0..<30 {
+            scratch.file("iCloud~com~acme~Notes/.Trash/old\(index).bin", bytes: 1)
+            scratch.file(".Trash/gone\(index).bin", bytes: 1)
+            scratch.file("iCloud~com~acme~Notes/Documents/deep/.hidden\(index)", bytes: 1)
+        }
+        scratch.file("iCloud~com~acme~Notes/Documents/.cache/inner/x.bin", bytes: 1)
+
+        // container + Documents (shallow) + deep + 4 files (deep pass) = 7.
+        let complete = RedactedPathResolver.walk(root: scratch.url, cap: 7)
+        #expect(!complete.isPartial, "exactly fits: \(complete.candidates.map(\.name))")
+        #expect(complete.candidates.count == 7)
+        #expect(!complete.candidates.contains { $0.path.contains("/.") }, "nothing from a dot folder")
+
+        let capped = RedactedPathResolver.walk(root: scratch.url, cap: 6)
+        #expect(capped.isPartial)
+        #expect(capped.candidates.count == 6)
+
+        let shallowCapped = RedactedPathResolver.walk(root: scratch.url, cap: 1)
+        #expect(shallowCapped.isPartial, "the shallow pass stopping counts too")
     }
 
     @Test func abbreviationHidesTheAccountShortName() {

@@ -46,6 +46,10 @@ final class SystemSyncSource: SyncSource {
     // up without a relaunch — and dropped early by `invalidatePermissions()`
     // whenever a grant may just have changed (⌘R, app activation, onboarding).
     @MainActor private var cachedPermissions: (values: [PermissionStatus], at: Date)?
+    // Bumped by every invalidation. A probe that STARTED before one may only
+    // write its answer back if no invalidation happened meanwhile — otherwise
+    // a snapshot mid-probe at ⌘R stored the pre-grant answer as fresh.
+    @MainActor private var permissionsGeneration = 0
     @MainActor private var conflictScanInFlight = false
     @MainActor private var lastConflictScanAttempt: Date?
     // Per-app local footprint (allocated bytes). A deep walk over every
@@ -77,7 +81,7 @@ final class SystemSyncSource: SyncSource {
     private let dumpSource: BrctlDumpSource
     /// Redacted-path candidates for the retry queue (a capped filesystem
     /// walk). Injected so a test can drive the dump refresh without one.
-    private let pathCandidates: @Sendable () -> [PathCandidate]
+    private let pathCandidates: @Sendable () -> PathCandidateWalk
     /// The retry-queue path walk and size measurement are blocking
     /// filesystem work: they run here, never on the cooperative pool.
     private static let dumpMappingQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.dump-mapping", qos: .utility)
@@ -133,8 +137,10 @@ final class SystemSyncSource: SyncSource {
 
         init(
             _ dump: BrctlDump, cloudDocsState: BrctlStatus? = nil,
-            candidates: [PathCandidate] = [], measureSizes: Bool = false
+            candidates walk: PathCandidateWalk = [], containerDirectories: [String] = [],
+            measureSizes: Bool = false
         ) {
+            let candidates = walk.candidates
             self.cloudDocsState = cloudDocsState
             let rows = BrctlDumpMapper.retryQueue(from: dump, candidates: candidates)
             // Sizing walks the filesystem, so it happens HERE — on the same
@@ -144,7 +150,20 @@ final class SystemSyncSource: SyncSource {
             retryQueueTotal = BrctlDumpMapper.retryQueueTotal(from: dump)
             issues = BrctlDumpMapper.issues(from: dump)
             deviceSummary = BrctlDumpMapper.deviceSummary(from: dump)
-            retryAttribution = BrctlDumpMapper.retryAttribution(from: dump, candidates: candidates)
+            retryAttribution = BrctlDumpMapper.retryAttribution(
+                from: dump, candidates: candidates,
+                candidatesArePartial: walk.isPartial, containerDirectories: containerDirectories)
+            // Each shown retry row names the app row that counts it (an app
+            // without a row of its own counts on iCloud Drive, not placed).
+            let names = Dictionary(
+                containerDirectories.compactMap(AppContainerSource.makeContainer(directoryName:)).map { ($0.id, $0.name) },
+                uniquingKeysWith: { first, _ in first })
+            let attribution = retryAttribution
+            retryQueue = retryQueue.map { row in
+                var row = row
+                row.rowName = BrctlDumpMapper.rowName(for: attribution.locations[row.id], containerNames: names)
+                return row
+            }
             self.dump = dump
         }
     }
@@ -155,7 +174,7 @@ final class SystemSyncSource: SyncSource {
     nonisolated init(
         brctlRunner: any ProcessRunning = ProcessRunner(),
         systemRunner: any ProcessRunning = ProcessRunner(),
-        pathCandidates: @escaping @Sendable () -> [PathCandidate] = { RedactedPathResolver.candidates() },
+        pathCandidates: @escaping @Sendable () -> PathCandidateWalk = { RedactedPathResolver.walk() },
         readers: Readers = .live
     ) {
         cloudDocs = CloudDocsSource(runner: brctlRunner)
@@ -229,6 +248,7 @@ final class SystemSyncSource: SyncSource {
         let (transfers, activity, watchReady) = await MainActor.run { () -> ([TransferItem], [ActivityEvent], Bool) in
             if transferWatcher == nil {
                 let m = makeTransferWatcher()
+                m.onAccessDenied = { [weak self] in self?.transferWatcherLostAccess() }
                 m.start()
                 transferWatcher = m
             }
@@ -243,7 +263,7 @@ final class SystemSyncSource: SyncSource {
             } else {
                 activity = activityLog?.record(transfers) ?? []
             }
-            return (transfers, activity, transferWatcher?.hasSwept ?? false)
+            return (transfers, activity, transferWatcher?.hasFirstReading ?? false)
         }
 
         // No `brctl status` here: it blocks bird for 15–28 s (a charter
@@ -266,9 +286,12 @@ final class SystemSyncSource: SyncSource {
         let (mapped, dumpAt, statusRead, dumpFailure) = await MainActor.run {
             (cachedDump?.mapped, cachedDump?.at, statusCache, lastDumpFailure)
         }
+        // The backlog rows stand and fall with the dump's issues (`dumpStands`),
+        // and a cached one (its refresh failing) says how old it is.
+        let backlog = Self.retryBacklogReading(mapped: mapped, dumpAt: dumpAt, dumpFailure: dumpFailure, now: Date())
         // value: nil = no scan finished yet; .some(nil) = the root was unreadable.
         let folders = DriveFolderSource.applying(
-            transfers: transfers, to: (folderReading.value ?? nil) ?? [], retry: mapped?.retryAttribution)
+            transfers: transfers, to: (folderReading.value ?? nil) ?? [], retry: backlog?.attribution)
         let cloudDocsRead = Self.cloudDocsReading(
             mapped: mapped, dumpAt: dumpAt, dumpFailure: dumpFailure, statusRead: statusRead, now: Date())
         let status = cloudDocsRead.state
@@ -308,10 +331,16 @@ final class SystemSyncSource: SyncSource {
             if let resolvedBeforeScan = await MainActor.run(body: { claimConflictScan(now: Date()) }) {
                 let scanConflicts = readers.conflicts
                 Task { [weak self] in
-                    let scanned = await scanConflicts()
                     guard let self else { return }
+                    guard await self.stillReadsICloudDrive() else {
+                        await MainActor.run { self.completeConflictScan(nil, resolvedBeforeScan: resolvedBeforeScan) }
+                        return
+                    }
+                    let scanned = await scanConflicts()
                     await MainActor.run {
-                        self.completeConflictScan(scanned?.found, resolvedBeforeScan: resolvedBeforeScan,
+                        // Landed after access was lost: not cached (see forgetICloudDerivedState).
+                        let found = self.lastAccess.readsICloudDrive ? scanned?.found : nil
+                        self.completeConflictScan(found, resolvedBeforeScan: resolvedBeforeScan,
                                                   isCapped: scanned?.isCapped ?? false)
                     }
                 }
@@ -339,7 +368,8 @@ final class SystemSyncSource: SyncSource {
             stateNote: cloudDocsRead.staleNote,
             desktopDocuments: statusRead.desktopDocuments(now: Date()),
             desktopDocumentsReadable: readsDesktopDocuments,
-            retry: mapped?.retryAttribution
+            retry: backlog?.attribution,
+            retryNote: backlog?.note
         )
 
         // Per-producer delivery (see SyncSnapshot.issueProducers). Only a
@@ -351,9 +381,9 @@ final class SystemSyncSource: SyncSource {
         var producers: [IssueProducer: Set<String>] = [:]
         if quota != nil { producers[.quota] = Set(quotaIssues.map(\.id)) }
         if cachedC != nil { producers[.conflicts] = Set(conflicts.map(\.issue.id)) }
-        // A dump older than `dumpIssueMaxStaleness` no longer delivers: its
-        // "haven't synced in N days" counts froze when it was taken.
-        let dumpIssues = Self.deliverableDumpIssues(mapped, dumpAt: dumpAt, now: Date())
+        // A dump whose refreshes keep failing stops delivering once it is
+        // older than `dumpIssueMaxStaleness`: its counts froze when taken.
+        let dumpIssues = Self.deliverableDumpIssues(mapped, dumpAt: dumpAt, dumpFailure: dumpFailure, now: Date())
         if let dumpIssues { producers[.dump] = Set(dumpIssues.map(\.id)) }
         // Only meaningful while a scan result is being served.
         let conflictsCapped = cachedC != nil ? await MainActor.run(body: { conflictScanCapped }) : false
@@ -370,6 +400,7 @@ final class SystemSyncSource: SyncSource {
                 + (dumpIssues ?? []),
             activity: activity,
             daemons: daemons,
+            daemonSampleFailure: await daemonStats.lastSampleFailure,
             retryQueue: mapped?.retryQueue ?? [],
             retryQueueTotal: mapped?.retryQueueTotal ?? 0,
             engine: Self.engine(
@@ -398,6 +429,7 @@ final class SystemSyncSource: SyncSource {
                                       isUnreadable: folderRootUnreadable),
             containerScan: ScanFreshness(completedAt: containerReading.completedAt, isOverdue: containerReading.isOverdue),
             conflictScanCap: conflictsCapped ? ConflictSource.maxItemsVisited : nil,
+            engineReadAt: dumpAt,
             transferWatchReady: watchReady
         )
     }
@@ -462,7 +494,8 @@ final class SystemSyncSource: SyncSource {
         engine.metadataIndex = "Not read — iCloud Drive is read only with Full Disk Access"
         return SyncSnapshot(
             apps: apps, transfers: [], driveFolders: [], devices: [], issues: [],
-            activity: activity, daemons: processStats.0, retryQueue: [], engine: engine,
+            activity: activity, daemons: processStats.0,
+            daemonSampleFailure: await daemonStats.lastSampleFailure, retryQueue: [], engine: engine,
             permissions: fda.permissions, bandwidth: processStats.1, storage: nil,
             quotaRemainingBytes: nil, notifications: [], issueProducers: [:],
             cloudKitScan: ckCache.map { CloudKitScanState($0.scan) } ?? .scanning,
@@ -535,7 +568,19 @@ final class SystemSyncSource: SyncSource {
     /// the next snapshot, off the main actor, in `fullDiskAccessGate` —
     /// before anything reads iCloud Drive.
     func invalidatePermissions() async {
-        await MainActor.run { cachedPermissions = nil }
+        await MainActor.run {
+            cachedPermissions = nil
+            permissionsGeneration &+= 1
+        }
+    }
+
+    /// Drops the cache and runs the gate on a fresh probe — the activation
+    /// path (see `SyncSource.recheckAccess`). Ordered by construction: the
+    /// drop and the probe are one call, so no snapshot can slip in between
+    /// and serve the cached answer.
+    func recheckAccess() async -> [PermissionStatus]? {
+        await invalidatePermissions()
+        return await fullDiskAccessGate(now: Date()).permissions
     }
 
     // MARK: - brctl dump + status refresh (background; split out for tests)
@@ -546,6 +591,7 @@ final class SystemSyncSource: SyncSource {
     /// Disk Access, bird wedged) must not be re-spawned every 15 s, and
     /// repeated failures back off further.
     @MainActor var statusCacheForTesting: CloudDocsStatusCache { statusCache }
+    @MainActor var retryAttributionForTesting: RetryAttribution? { cachedDump?.mapped.retryAttribution }
 
     @MainActor func claimDumpRefresh(now: Date) -> Bool {
         guard !dumpScanInFlight else { return false }
@@ -562,17 +608,35 @@ final class SystemSyncSource: SyncSource {
     /// time, so the two must never overlap: `dumpScanInFlight` stays raised
     /// until both are done, and no other code path spawns either.
     func performDumpRefresh() async {
+        // Access is re-checked before EVERY step that touches iCloud Drive
+        // (the dump, the path/size walks, the status read): the claim was
+        // made under access, but a revocation (the gate, or the watcher
+        // hitting EPERM) can land while this runs, and the next brctl call or
+        // walk would then raise the iCloud Drive prompt.
+        guard await stillReadsICloudDrive() else {
+            await MainActor.run { dumpScanInFlight = false }
+            return
+        }
         let read = await dumpSource.currentDump()
         let fresh = try? read.get()
         // The redacted-path walk (what turns bird's `D{7}s` into a real
         // path) and the exact-match size measurement are blocking filesystem
         // work: on their own queue, never a pool thread.
         let pathCandidates = pathCandidates
+        guard await stillReadsICloudDrive() else {
+            await MainActor.run { dumpScanInFlight = false }
+            return
+        }
         let mapped: MappedDump?
         if let fresh {
+            // The container list the rows come from (single-flight scan; the
+            // last result if it is slow): header placement needs it, and the
+            // capped candidate walk alone does not cover every container.
+            let containerDirectories = (await containerScan.value(within: 5) ?? []).map(\.directoryName)
             mapped = await BlockingWork.run(on: Self.dumpMappingQueue) {
                 MappedDump(fresh.dump, cloudDocsState: fresh.cloudDocsState,
-                           candidates: pathCandidates(), measureSizes: true)
+                           candidates: pathCandidates(), containerDirectories: containerDirectories,
+                           measureSizes: true)
             }
         } else {
             mapped = nil
@@ -586,7 +650,7 @@ final class SystemSyncSource: SyncSource {
                 lastDumpFailure = failure
                 dumpConsecutiveFailures += 1
             }
-            if let fresh, let mapped {
+            if let fresh, let mapped, lastAccess.readsICloudDrive {
                 // An item we moved to the Trash must not come back — neither
                 // from a dump collected before the move, nor from a fresh one
                 // bird has not re-scanned yet.
@@ -599,6 +663,7 @@ final class SystemSyncSource: SyncSource {
             // status now would queue behind it and time out too. Not marked
             // as an attempt, so it is due again on the next refresh.
             if case .failure(.timedOut) = read { return false }
+            guard lastAccess.readsICloudDrive else { return false }
             guard statusCache.isDue(now: Date()) else { return false }
             statusCache.markAttempt(at: Date())
             return true
@@ -616,6 +681,57 @@ final class SystemSyncSource: SyncSource {
         }
         await MainActor.run { dumpScanInFlight = false }
     }
+
+    /// The last gate decision still allows iCloud Drive. Background work
+    /// claimed under access asks this before each step that reads it.
+    private func stillReadsICloudDrive() async -> Bool {
+        await MainActor.run { lastAccess.readsICloudDrive }
+    }
+
+    /// Test seam: the gate's last decision, without a probe.
+    @MainActor func setAccessForTesting(_ access: ICloudDriveAccess) { lastAccess = access }
+    @MainActor var accessForTesting: ICloudDriveAccess { lastAccess }
+
+    /// The transfer watcher hit EPERM/EACCES reading iCloud Drive: Full Disk
+    /// Access was revoked mid-session, and the permissions cache (up to five
+    /// minutes old) still says granted. Act on the evidence now: release the
+    /// watcher (it has already stopped itself), drop the cached answer so the
+    /// next snapshot re-probes, and treat access as not known until it does —
+    /// so no background step claimed under the old answer reads on.
+    @MainActor func transferWatcherLostAccess() {
+        logger.warning("iCloud Drive read refused; stopping iCloud Drive reads until access is re-checked")
+        transferWatcher?.stop()
+        transferWatcher = nil
+        cachedPermissions = nil
+        permissionsGeneration &+= 1
+        lastAccess = .notProbed
+        forgetICloudDerivedState()
+    }
+
+    /// Without access, nothing read from iCloud Drive before may be served
+    /// later as if current: after a re-grant an hours-old dump would read as
+    /// fresh (no failure was recorded while nothing ran), and each issue
+    /// producer would take its launch baseline from it. So every
+    /// iCloud-derived cache goes — dump and its mapping, brctl status,
+    /// conflicts, local sizes, breakdown — and the pacing clocks reset, so a
+    /// re-grant reads everything afresh on its first cycle. Kept: forgotten
+    /// retry-row ids (they only ever hide rows) and `dumpHoldUntil` (bird may
+    /// still be serving a killed status read; that is about bird, not data).
+    @MainActor private func forgetICloudDerivedState() {
+        cachedDump = nil
+        lastDumpFailure = nil
+        dumpConsecutiveFailures = 0
+        lastDumpAttempt = nil
+        statusCache = CloudDocsStatusCache()
+        cachedConflicts = nil
+        conflictScanCapped = false
+        lastConflictScanAttempt = nil
+        cachedLocalSizes = nil
+        cachedBreakdown = nil
+    }
+
+    /// Test seam: whether a dump result is cached.
+    @MainActor var hasCachedDumpForTesting: Bool { cachedDump != nil }
 
     // MARK: - Full Disk Access gate (the only path that may read iCloud Drive)
 
@@ -636,12 +752,15 @@ final class SystemSyncSource: SyncSource {
     /// creates a fresh one.
     func fullDiskAccessGate(now: Date) async -> FullDiskAccessGate {
         let permissions: [PermissionStatus]
-        let cached = await MainActor.run(body: { cachedPermissions })
+        let (cached, generation) = await MainActor.run(body: { (cachedPermissions, permissionsGeneration) })
         if let cached, now.timeIntervalSince(cached.at) < 300 {
             permissions = cached.values
         } else {
             permissions = await readers.permissions()
-            await MainActor.run { cachedPermissions = (permissions, now) }
+            await MainActor.run {
+                // Used for THIS snapshot either way; cached only if still current.
+                if permissionsGeneration == generation { cachedPermissions = (permissions, now) }
+            }
         }
         let probed = permissions.state(of: .fullDiskAccess)
         let access = TransferWatchPolicy.iCloudDriveAccess(fullDiskAccess: probed)
@@ -650,10 +769,18 @@ final class SystemSyncSource: SyncSource {
                 logger.info("iCloud Drive access: \(String(describing: access), privacy: .public)")
             }
             lastAccess = access
-            if !access.readsICloudDrive, let watcher = transferWatcher {
-                watcher.stop()          // ownership contract: stop before release
-                transferWatcher = nil
+            if !access.readsICloudDrive {
+                if let watcher = transferWatcher {
+                    watcher.stop()          // ownership contract: stop before release
+                    transferWatcher = nil
+                }
+                forgetICloudDerivedState()
             }
+        }
+        if !access.readsICloudDrive {
+            // The directory scans keep their last result in their own actors.
+            await folderScan.forget()
+            await containerScan.forget()
         }
         return FullDiskAccessGate(permissions: permissions, fullDiskAccess: probed ?? .unknown, access: access)
     }
@@ -695,10 +822,14 @@ final class SystemSyncSource: SyncSource {
             }
             if claimed {
                 Task { [weak self] in
-                    let measured = await readers.localSizes(containers, reads)
                     guard let self else { return }
+                    guard await self.stillReadsICloudDrive() else {
+                        await MainActor.run { self.sizeScanInFlight = false }
+                        return
+                    }
+                    let measured = await readers.localSizes(containers, reads)
                     await MainActor.run {
-                        self.cachedLocalSizes = (measured, Date(), reads)
+                        if self.lastAccess.readsICloudDrive { self.cachedLocalSizes = (measured, Date(), reads) }
                         self.sizeScanInFlight = false
                     }
                 }
@@ -716,10 +847,16 @@ final class SystemSyncSource: SyncSource {
             }
             if claimed {
                 Task { [weak self] in
-                    let measured = await readers.breakdown(reads)
                     guard let self else { return }
+                    guard await self.stillReadsICloudDrive() else {
+                        await MainActor.run { self.breakdownScanInFlight = false }
+                        return
+                    }
+                    let measured = await readers.breakdown(reads)
                     await MainActor.run {
-                        self.cachedBreakdown = (measured.totals, measured.isPartial, Date(), reads)
+                        if self.lastAccess.readsICloudDrive {
+                            self.cachedBreakdown = (measured.totals, measured.isPartial, Date(), reads)
+                        }
                         self.breakdownScanInFlight = false
                     }
                 }
@@ -834,6 +971,11 @@ final class SystemSyncSource: SyncSource {
             if let count = cachedDump?.mapped.retryQueueTotal, count > 0 {
                 cachedDump?.mapped.retryQueueTotal = count - 1
             }
+            // …and from the row backlog, or its app / folder kept reading
+            // "not syncing" for a file that is already in the Trash.
+            if let attribution = cachedDump?.mapped.retryAttribution {
+                cachedDump?.mapped.retryAttribution = attribution.removing([id])
+            }
             // Refresh soon so bird's own view catches up — by shortening the
             // pacing clock only. `dumpHoldUntil` (a status read that timed
             // out is still running inside bird) is left alone.
@@ -908,7 +1050,8 @@ final class SystemSyncSource: SyncSource {
         stateNote: String? = nil,
         desktopDocuments: DesktopDocumentsFlag? = nil,
         desktopDocumentsReadable: Bool = true,
-        retry: RetryAttribution? = nil
+        retry: RetryAttribution? = nil,
+        retryNote: String? = nil
     ) -> [AppSyncState] {
         var apps: [AppSyncState] = []
         let home = UserHome.path
@@ -938,9 +1081,8 @@ final class SystemSyncSource: SyncSource {
             id: "icloud-drive", name: "iCloud Drive", tile: "30b0c7",
             location: "~/Library/Mobile Documents/com~apple~CloudDocs"
         )
-        // Every scheduled item is bird's, wherever it lives: the engine row
-        // is not up to date while any of them waits.
-        Self.applyRetryBacklog(retry?.total ?? 0, to: &drive, stateNote: stateNote)
+        // The backlog is applied to this row last, once every row exists
+        // (see the end of this function).
         // Desktop & Documents is unknown until brctl status answers, and has
         // no row of its own until it is known to be on — so the iCloud Drive
         // row says what is (not) known, instead of the feature silently
@@ -1008,10 +1150,29 @@ final class SystemSyncSource: SyncSource {
             .filter { !existing.contains($0.id) }
             .map { row in
                 var row = row
-                Self.applyRetryBacklog(retry?.count(appID: row.id) ?? 0, to: &row, stateNote: nil)
+                if let retry { Self.applyRetryBacklog(retry.backlog(appID: row.id), to: &row, stateNote: retryNote) }
                 return row
             })
+        // iCloud Drive: its own items (anywhere in CloudDocs) plus those no
+        // row carries — never another row's items. "No row" includes items
+        // attributed to a container that got none (excluded containers,
+        // past the container cap): counted nowhere else, they would vanish.
+        if let retry, let index = apps.firstIndex(where: { $0.id == "icloud-drive" }) {
+            let unplaced = retry.unplaced + Self.backlogWithoutRow(retry, rowIDs: Set(apps.map(\.id)))
+            // The engine-state note and the backlog's own age, once each.
+            let notes = [stateNote, retryNote].compactMap { $0 }
+            Self.applyRetryBacklog(retry.drive + unplaced, unplaced: unplaced.total,
+                                   to: &apps[index], stateNote: notes.isEmpty ? nil : Array(Set(notes)).sorted().joined(separator: " · "))
+        }
         return apps
+    }
+
+    /// Items attributed to an app container that has no row in `rowIDs`.
+    nonisolated static func backlogWithoutRow(_ retry: RetryAttribution, rowIDs: Set<String>) -> RetryBacklog {
+        retry.backlog { location in
+            if case .app(let id) = location { return !rowIDs.contains(id) }
+            return false
+        }
     }
 
     /// The Desktop & Documents row while Birdwatch is not reading those
@@ -1033,21 +1194,36 @@ final class SystemSyncSource: SyncSource {
     ///   though no file-level transfer is visible);
     /// - idle → up to date, worded as what bird said, not "all files synced".
     /// A not-current state carries its `stateNote` ("last-known, … ago").
-    /// bird holds `items` scheduled items for this row (its retry queue).
-    /// A row that is transferring keeps saying so; otherwise it is "N items
-    /// not syncing" — never "Up to date" — and its pending figure is the
-    /// backlog, not "None".
-    nonisolated static func applyRetryBacklog(_ items: Int, to row: inout AppSyncState, stateNote: String?) {
-        guard items > 0 else { return }
+    /// bird holds `backlog` scheduled items for this row. Items bird has
+    /// failed or left for over a day make it "N items not syncing"
+    /// (warning); otherwise it is "N items waiting to sync" (neutral) — never
+    /// "Up to date", and its pending figure is the backlog, not "None".
+    /// A row that is transferring (`.syncing`), busy (`.active`) or unread
+    /// (`.unknown`) keeps its own, more current, status.
+    /// `unplaced`: how many of the items are counted here only because no
+    /// row could be found for them (iCloud Drive), said so in the line.
+    nonisolated static func applyRetryBacklog(
+        _ backlog: RetryBacklog, unplaced: Int = 0, to row: inout AppSyncState, stateNote: String?
+    ) {
+        guard backlog.total > 0 else { return }
         switch row.status {
-        case .syncing, .unknown: return      // transferring says so; unread stays unread
+        case .syncing, .active, .unknown: return
         default: break
         }
-        row.status = .notSyncing(items: items)
-        // The status label already says "N items not syncing"; the line says why.
-        row.statusLine = "Scheduled in bird's retry queue"
-            + (stateNote.map { " · \($0)" } ?? "")
-        row.pendingItems = items
+        var line: [String]
+        if backlog.stuck > 0 {
+            row.status = .notSyncing(items: backlog.stuck)
+            // The label says "N items not syncing"; the line says why.
+            line = ["In bird's retry queue"]
+            if backlog.waiting > 0 { line.append("\(backlog.waiting) more waiting") }
+        } else {
+            row.status = .waitingToSync(items: backlog.waiting)
+            line = ["Queued by bird"]
+        }
+        if unplaced > 0 { line.append("\(unplaced) not placed on this Mac") }
+        if let stateNote { line.append(stateNote) }
+        row.statusLine = line.joined(separator: " · ")
+        row.pendingItems = backlog.total
     }
 
     nonisolated static func cloudDocsRowStatus(
@@ -1138,25 +1314,49 @@ final class SystemSyncSource: SyncSource {
         return now.timeIntervalSince(cache.at) >= 300 || cache.includedDesktopDocuments != desktopDocuments
     }
 
-    /// Dump refresh pacing: `dumpTTL` while dumps succeed, doubling per
-    /// consecutive failure up to 10 minutes — a brctl that keeps timing out
-    /// is not hammered every minute.
-    /// How long the last good dump's issues may keep being raised while
-    /// refreshes fail. Same bound as `conflictMaxStaleness`: past it the
-    /// issues are withdrawn rather than shown as if current (C1) — their
-    /// "haven't synced in N days" counts stopped advancing when the dump was
-    /// taken. Withdrawn, the dump producer stops delivering and so loses its
-    /// baseline; the retry queue and engine card keep their own last-known
-    /// labels.
+    /// How long the last good dump may keep standing while refreshes FAIL.
+    /// Same bound as `conflictMaxStaleness`: past it its issues are withdrawn
+    /// rather than shown as if current (C1) — their "haven't synced in N
+    /// days" counts stopped advancing when the dump was taken. Withdrawn,
+    /// the dump producer stops delivering and so loses its baseline; the
+    /// retry queue and engine card keep their own last-known labels.
     static let dumpIssueMaxStaleness: TimeInterval = 900
 
-    /// The cached dump's issues while it is young enough to stand behind,
-    /// else nil (= the dump producer did not deliver this cycle).
-    nonisolated static func deliverableDumpIssues(_ mapped: MappedDump?, dumpAt: Date?, now: Date) -> [IssueItem]? {
-        guard let mapped, let dumpAt, now.timeIntervalSince(dumpAt) < dumpIssueMaxStaleness else { return nil }
+    /// Whether the cached dump still stands. Only a FAILING refresh retires
+    /// it: an old dump with no failure is one whose refresh simply has not
+    /// run yet (the Mac slept, monitoring was paused) and is due now.
+    /// Retiring it on age alone dropped the producer's baseline across every
+    /// sleep, so an issue that appeared during the gap was absorbed into
+    /// the new baseline and never bannered.
+    nonisolated static func dumpStands(dumpAt: Date?, dumpFailure: BrctlReadFailure?, now: Date) -> Bool {
+        guard let dumpAt else { return false }
+        return dumpFailure == nil || now.timeIntervalSince(dumpAt) < dumpIssueMaxStaleness
+    }
+
+    /// The backlog the rows may show, and — when the dump is a cached one
+    /// because its refresh failed — "last-known, brctl dump 12m ago". nil
+    /// once the dump no longer stands: rows then drop the backlog together
+    /// with the stuck-items issue, never outliving it.
+    nonisolated static func retryBacklogReading(
+        mapped: MappedDump?, dumpAt: Date?, dumpFailure: BrctlReadFailure?, now: Date
+    ) -> (attribution: RetryAttribution, note: String?)? {
+        guard let mapped, let dumpAt, dumpStands(dumpAt: dumpAt, dumpFailure: dumpFailure, now: now) else { return nil }
+        let note = dumpFailure == nil ? nil : "last-known, brctl dump \(Format.age(now.timeIntervalSince(dumpAt)))"
+        return (mapped.retryAttribution, note)
+    }
+
+    /// The cached dump's issues while it stands (`dumpStands`), else nil
+    /// (= the dump producer did not deliver this cycle).
+    nonisolated static func deliverableDumpIssues(
+        _ mapped: MappedDump?, dumpAt: Date?, dumpFailure: BrctlReadFailure?, now: Date
+    ) -> [IssueItem]? {
+        guard let mapped, dumpStands(dumpAt: dumpAt, dumpFailure: dumpFailure, now: now) else { return nil }
         return mapped.issues
     }
 
+    /// Dump refresh pacing: `dumpTTL` while dumps succeed, doubling per
+    /// consecutive failure up to 10 minutes — a brctl that keeps timing out
+    /// is not hammered every minute.
     nonisolated static func dumpRetryInterval(consecutiveFailures: Int) -> TimeInterval {
         guard consecutiveFailures > 1 else { return dumpTTL }
         return min(600, dumpTTL * pow(2, Double(min(consecutiveFailures - 1, 4))))

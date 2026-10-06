@@ -2,6 +2,8 @@ import SwiftUI
 
 struct OverviewView: View {
     @Environment(SyncStore.self) private var store
+    /// Width the stat tiles get; drives one row of four vs two rows of two.
+    @State private var statGridWidth: CGFloat = 0
 
     var body: some View {
         // Every app doing work, with or without progress — the hero's
@@ -40,7 +42,8 @@ struct OverviewView: View {
             pendingFileCount: store.pendingFileCount,
             unknownAppCount: store.unknownStateAppCount,
             unwatchedAppCount: store.unwatchedApps.count,
-            unreportedAppCount: store.unreportedAppCount
+            unreportedAppCount: store.unreportedAppCount,
+            backlogLine: BacklogSummary.appsLine(store.effectiveApps, leading: true)
         )
         let tint: Color = switch hero.tone {
         case .paused: Palette.warning
@@ -90,7 +93,8 @@ struct OverviewView: View {
                                             paused: store.isGloballyPaused)
         let issues = IssuesTile.display(count: store.issueCount, qualifiers: IssuesEmptyState.qualifiers(
             isPaused: store.isGloballyPaused,
-            deliveredProducers: store.deliveredIssueProducers, conflictScanCap: store.conflictScanCap))
+            deliveredProducers: store.deliveredIssueProducers, conflictScanCap: store.conflictScanCap,
+            engineReadAt: store.engineReadAt))
         let upTile = StatTile(label: "Uploading", value: up.value, tint: Palette.accent, caption: up.caption)
         let downTile = StatTile(label: "Downloading", value: down.value, tint: Palette.success, caption: down.caption)
         let appsTile = StatTile(label: "Active apps", value: apps.value, tint: Surface.fg, caption: apps.caption)
@@ -98,17 +102,24 @@ struct OverviewView: View {
                                   tint: store.issueCount > 0 ? Palette.warning : Surface.fg, caption: issues.caption)
         // One row of four where it fits, else two rows of two — never three
         // plus one stranded tile (the adaptive grid's answer at mid widths).
+        // Decided by WIDTH, not ViewThatFits: that measures captions on one
+        // line, so it chose 2×2 where four fit and flipped as captions changed.
         // Tiles in a row share its height, captioned or not.
-        return ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 14) {
-                upTile; downTile; appsTile; issuesTile
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            Grid(horizontalSpacing: 14, verticalSpacing: 14) {
-                GridRow { upTile; downTile }
-                GridRow { appsTile; issuesTile }
+        return Group {
+            if OverviewTiles.columns(forWidth: statGridWidth) == 4 {
+                HStack(alignment: .top, spacing: 14) {
+                    upTile; downTile; appsTile; issuesTile
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Grid(horizontalSpacing: 14, verticalSpacing: 14) {
+                    GridRow { upTile; downTile }
+                    GridRow { appsTile; issuesTile }
+                }
             }
         }
+        .frame(maxWidth: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { statGridWidth = $0 }
     }
 
     private func remainingBytes(direction: TransferDirection) -> Int64 {
@@ -297,7 +308,7 @@ private struct ProgressRing: View {
                 // repeatForever: that re-rendered the window every frame
                 // (~12% CPU on the Overview with nothing else changing).
                 SpinningArc(trim: trim, lineWidth: 10,
-                            colors: [tint.opacity(0.55), tint].map { NSColor($0).cgColor })
+                            colors: [tint.opacity(0.55), tint].map { NSColor($0) })
             } else {
                 Circle()
                     .trim(from: 0, to: trim)
@@ -395,7 +406,7 @@ private struct StatTile: View {
             // as its captioned neighbours.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(minWidth: 140)
+        .frame(minWidth: OverviewTiles.minimumTileWidth)
         .accessibilityElement(children: .combine)
     }
 }
@@ -405,7 +416,8 @@ private struct StatTile: View {
 private struct SpinningArc: NSViewRepresentable {
     let trim: Double
     let lineWidth: CGFloat
-    let colors: [CGColor]
+    /// Dynamic colours, resolved by the view in its own appearance.
+    let colors: [NSColor]
 
     func makeNSView(context: Context) -> ArcView { ArcView() }
 
@@ -419,6 +431,7 @@ private struct SpinningArc: NSViewRepresentable {
         private let arc = CAShapeLayer()
         private var trim: Double = 0.22
         private var lineWidth: CGFloat = 10
+        private var colors: [NSColor] = []
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -443,14 +456,25 @@ private struct SpinningArc: NSViewRepresentable {
 
         required init?(coder: NSCoder) { nil }
 
-        func configure(trim: Double, lineWidth: CGFloat, colors: [CGColor]) {
+        func configure(trim: Double, lineWidth: CGFloat, colors: [NSColor]) {
             self.trim = trim
             self.lineWidth = lineWidth
+            self.colors = colors
+            applyColors()
+            needsLayout = true
+        }
+
+        /// Re-resolved on every appearance change (see ShimmerView).
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            applyColors()
+        }
+
+        private func applyColors() {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            gradient.colors = colors
+            gradient.colors = resolvedCGColors(colors)
             CATransaction.commit()
-            needsLayout = true
         }
 
         override func layout() {

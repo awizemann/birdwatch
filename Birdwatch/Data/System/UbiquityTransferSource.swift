@@ -28,6 +28,25 @@ nonisolated struct UbiquityProbeResult: Sendable, Hashable {
     nonisolated var isInFlight: Bool { isUbiquitous && (isUploading || isDownloading) }
 }
 
+/// One probe tick's answers, plus whether any read was refused for lack of
+/// permission (EPERM / EACCES) — the sign that Full Disk Access is gone.
+nonisolated struct UbiquityProbeBatch: Sendable, Equatable {
+    var results: [UbiquityProbeResult]
+    var accessDenied = false
+}
+
+/// One shallow sweep's paths, plus whether a listing was refused for lack of
+/// permission. An array literal is a sweep that was not refused.
+nonisolated struct UbiquitySweep: Sendable, Equatable, ExpressibleByArrayLiteral {
+    var paths: [String]
+    var accessDenied = false
+    init(paths: [String], accessDenied: Bool = false) {
+        self.paths = paths
+        self.accessDenied = accessDenied
+    }
+    init(arrayLiteral elements: String...) { self.init(paths: elements) }
+}
+
 /// Live in-flight iCloud transfers, from FSEvents + per-URL ubiquity resource
 /// values.
 ///
@@ -127,9 +146,13 @@ final class UbiquityTransferSource {
     /// engine confirms they are iCloud data; flipping it re-arms the watcher
     /// on the wider root set.
     private(set) var includesDesktopDocuments = false
-    /// The first seed sweep has come back (or there was nothing to sweep):
-    /// from here on an empty `transfers` is a reading, not a wait.
-    private(set) var hasSwept = false
+    /// The first seed sweep's candidates have been probed once (or there was
+    /// nothing to sweep): from here on an empty `transfers` is a reading, not
+    /// a wait. Reset by `stop()` and `pause()`, which clear the list.
+    private(set) var hasFirstReading = false
+    /// The first seed sweep's paths are in the candidate table (a sweep
+    /// whose result was dropped while paused does not count).
+    private var hasIngestedSweep = false
 
     func setIncludesDesktopDocuments(_ include: Bool) {
         guard include != includesDesktopDocuments else { return }
@@ -171,7 +194,21 @@ final class UbiquityTransferSource {
 
     /// The shallow directory sweep (seed and rescan). Injected only so a test
     /// can hold a sweep open; production always lists the directories.
-    private let sweep: @Sendable ([String]) async -> [String]
+    private let sweep: @Sendable ([String]) async -> UbiquitySweep
+
+    /// The per-tick resource-value probe. Injected so a test can answer with
+    /// a permission error; production reads the files.
+    private let probe: @Sendable ([String]) async -> UbiquityProbeBatch
+
+    /// Set once a read was refused for lack of permission (Full Disk Access
+    /// revoked mid-session). From then on this watcher reads nothing — not
+    /// even on resume — until it is stopped and replaced.
+    private(set) var lostAccess = false
+
+    /// Told once, when `lostAccess` is first set: the owner drops its cached
+    /// permission answer so the next snapshot re-probes, and releases this
+    /// watcher.
+    var onAccessDenied: (@MainActor () -> Void)?
 
     /// Fixed roots instead of `defaultRoots` — a test seam, so pause/resume
     /// can be asserted on a real watcher over a temporary directory.
@@ -183,11 +220,13 @@ final class UbiquityTransferSource {
     init(
         roots: [String]? = nil,
         homeDirectory: String = UserHome.path,
-        sweep: @escaping @Sendable ([String]) async -> [String] = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) }
+        sweep: @escaping @Sendable ([String]) async -> UbiquitySweep = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) },
+        probe: @escaping @Sendable ([String]) async -> UbiquityProbeBatch = { await UbiquityTransferSource.probe(paths: $0) }
     ) {
         rootsOverride = roots
         self.homeDirectory = homeDirectory
         self.sweep = sweep
+        self.probe = probe
         // Self-wiring: the instance listens for the app-wide pause/resume
         // signals itself, so no owner has to forward them.
         for (name, isPauseSignal) in [(Self.pauseRequest, true), (Self.resumeRequest, false)] {
@@ -203,7 +242,7 @@ final class UbiquityTransferSource {
     }
 
     func start() {
-        guard !isStarted else { return }
+        guard !isStarted, !lostAccess else { return }
         isStarted = true
         isPaused = false
         beginWatching()
@@ -221,6 +260,8 @@ final class UbiquityTransferSource {
         transfers.removeAll()
         recentlyCompleted.removeAll()
         probeCursor = 0
+        hasFirstReading = false
+        hasIngestedSweep = false
         isStarted = false
         isPaused = false
     }
@@ -239,6 +280,10 @@ final class UbiquityTransferSource {
         guard isStarted, !isPaused else { return }
         endWatching()
         isPaused = true
+        // The list is cleared: until the resumed watcher has swept and
+        // probed again, an empty list is not a reading.
+        hasFirstReading = false
+        hasIngestedSweep = false
         transfers.removeAll()
         recentlyCompleted.removeAll()
         candidates = candidates.mapValues { var c = $0; c.wasInFlight = false; return c }
@@ -246,7 +291,7 @@ final class UbiquityTransferSource {
     }
 
     func resume() {
-        guard isStarted, isPaused else { return }
+        guard isStarted, isPaused, !lostAccess else { return }
         isPaused = false
         beginWatching()
         logger.info("transfer watcher resumed")
@@ -263,7 +308,7 @@ final class UbiquityTransferSource {
         let roots = currentRoots
         guard !roots.isEmpty else {
             logger.warning("no ubiquity roots present; transfer watching disabled")
-            hasSwept = true      // nothing to read: an empty list is the answer
+            hasFirstReading = true      // nothing to read: an empty list is the answer
             return
         }
 
@@ -323,6 +368,8 @@ final class UbiquityTransferSource {
     var isSweepingForTesting: Bool { sweepTask != nil }
     /// Test hook: waits for the sweep in flight (if any) to land.
     func finishSweepForTesting() async { await sweepTask?.value }
+    /// Test hook: one probe tick, as the 1 Hz ticker runs it.
+    func probeOnceForTesting() async { await probeOnce() }
 
     /// FSEvents (or our own accumulator) lost individual events: re-sweep the
     /// affected directories with the same shallow seed sweep used at start.
@@ -357,12 +404,16 @@ final class UbiquityTransferSource {
             let swept = await sweep(targets)
             guard let self else { return }
             self.sweepTask = nil
-            self.hasSwept = true
+            if swept.accessDenied {
+                self.accessDenied()
+                return
+            }
             guard self.isStarted, !self.isPaused else { return }
             // The roots may have narrowed while the sweep ran (Desktop &
             // Documents turned off): never ingest what may no longer be read.
             let roots = self.currentRoots
-            self.ingest(paths: swept.filter { Self.isUnder($0, roots: roots) }, at: sweptAt)
+            self.ingest(paths: swept.paths.filter { Self.isUnder($0, roots: roots) }, at: sweptAt)
+            self.hasIngestedSweep = true
             self.startQueuedSweep()
         }
     }
@@ -413,11 +464,19 @@ final class UbiquityTransferSource {
             recentlyCompleted.removeAll { now.timeIntervalSince($0.at) > Self.completionGrace }
             let lingering = recentlyCompleted.map(\.item)
             if lingering != transfers { transfers = lingering }
+            if hasIngestedSweep { hasFirstReading = true }
             return
         }
-        let probed = await Self.probe(paths: paths)
-        guard isStarted, !isPaused else { return }
-        apply(probed, now: Date())
+        let probed = await probe(paths)
+        guard isStarted, !isPaused, !lostAccess else { return }
+        if probed.accessDenied {
+            accessDenied()
+            return
+        }
+        apply(probed.results, now: Date())
+        // The swept candidates have now been probed once: from here on an
+        // empty `transfers` is a reading.
+        if hasIngestedSweep { hasFirstReading = true }
     }
 
     private func apply(_ probed: [UbiquityProbeResult], now: Date) {
@@ -441,6 +500,25 @@ final class UbiquityTransferSource {
         // Identity-stable and cheap: skip the publish when nothing moved so the
         // store does not redraw at 1 Hz for no reason.
         if items != transfers { transfers = items }
+    }
+
+    /// A read was refused for lack of permission: Full Disk Access was
+    /// revoked while watching. Without it the very next read raises macOS
+    /// 27's iCloud Drive prompt, so stop everything now — FSEvents stream,
+    /// probe ticker, queued sweeps — forget what was seen (nothing here is
+    /// current any more), and tell the owner, who re-probes and releases this
+    /// watcher. Not "paused": resume() cannot restart it.
+    private func accessDenied() {
+        guard !lostAccess else { return }
+        lostAccess = true
+        endWatching()
+        candidates.removeAll()
+        transfers.removeAll()
+        recentlyCompleted.removeAll()
+        hasFirstReading = false
+        hasIngestedSweep = false
+        logger.warning("transfer watcher: a read in iCloud Drive was refused (no permission); stopped until access is re-checked")
+        onAccessDenied?()
     }
 
     // MARK: - Test seams (the probe budget is stateful, so it cannot be pure)
@@ -616,13 +694,26 @@ final class UbiquityTransferSource {
     /// Reads ubiquity resource values for the given paths. Per-item fault
     /// tolerance: an unreadable or vanished path yields nothing and never
     /// aborts the batch.
-    @concurrent nonisolated static func probe(paths: [String]) async -> [UbiquityProbeResult] {
+    @concurrent nonisolated static func probe(paths: [String]) async -> UbiquityProbeBatch {
         var out: [UbiquityProbeResult] = []
+        var denied = false
         out.reserveCapacity(paths.count)
         autoreleasepool {
             for path in paths {
                 let url = URL(fileURLWithPath: path)
-                guard let values = try? url.resourceValues(forKeys: probeKeys) else { continue }
+                let values: URLResourceValues
+                do {
+                    values = try url.resourceValues(forKeys: probeKeys)
+                } catch {
+                    // A vanished file is ordinary churn; a refused read is
+                    // lost access — stop at once, every further read would
+                    // be refused (or prompt) too.
+                    if isAccessDenied(error) {
+                        denied = true
+                        break
+                    }
+                    continue
+                }
                 guard values.isDirectory != true else { continue }
                 out.append(UbiquityProbeResult(
                     path: path,
@@ -634,7 +725,18 @@ final class UbiquityTransferSource {
                 ))
             }
         }
-        return out
+        return UbiquityProbeBatch(results: out, accessDenied: denied)
+    }
+
+    /// EPERM / EACCES, directly or as the underlying POSIX error of a Cocoa
+    /// read error (NSFileReadNoPermissionError) — what a read without the
+    /// needed privacy grant fails with.
+    nonisolated static func isAccessDenied(_ error: any Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSCocoaErrorDomain, ns.code == NSFileReadNoPermissionError { return true }
+        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(EPERM) || ns.code == Int(EACCES) { return true }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError { return isAccessDenied(underlying) }
+        return false
     }
 
     /// Top-level-only sweep of each root, so a transfer already running at
@@ -642,7 +744,7 @@ final class UbiquityTransferSource {
     /// by construction (no recursion) — the recursive walk measured >20 s.
     /// Also the rescan after FSEvents drops events, so it runs on its own
     /// serial queue via `BlockingWork` (a cold-placeholder listing blocks).
-    nonisolated static func shallowSeedPaths(roots: [String]) async -> [String] {
+    nonisolated static func shallowSeedPaths(roots: [String]) async -> UbiquitySweep {
         await BlockingWork.run(on: seedQueue) { listChildren(of: roots) }
     }
 
@@ -655,7 +757,7 @@ final class UbiquityTransferSource {
     /// dropped most of the seed roots — a transfer already running in such a
     /// container at launch stayed invisible until its next event. Dot-files
     /// are filtered by name instead, as AppContainerSource does.
-    nonisolated static func listChildren(of roots: [String]) -> [String] {
+    nonisolated static func listChildren(of roots: [String]) -> UbiquitySweep {
         var out: [String] = []
         for root in roots {
             let url = URL(fileURLWithPath: root)
@@ -665,11 +767,13 @@ final class UbiquityTransferSource {
             } catch {
                 let ns = error as NSError
                 logger.debug("seed sweep skipped a root: \(ns.domain, privacy: .public) \(ns.code, privacy: .public) at \(root, privacy: .private)")
+                // Refused for lack of permission: stop listing, report it.
+                if isAccessDenied(error) { return UbiquitySweep(paths: out, accessDenied: true) }
                 continue
             }
             out.append(contentsOf: children.filter { !$0.lastPathComponent.hasPrefix(".") }.map(\.path))
         }
-        return out
+        return UbiquitySweep(paths: out)
     }
 
     // MARK: - FSEvents

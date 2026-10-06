@@ -141,7 +141,8 @@ struct IssuesView: View {
                 ForEach(IssuesEmptyState.qualifiers(
                     isPaused: store.isGloballyPaused,
                     deliveredProducers: store.deliveredIssueProducers,
-                    conflictScanCap: store.conflictScanCap
+                    conflictScanCap: store.conflictScanCap,
+                    engineReadAt: store.engineReadAt
                 ) + [IssuesEmptyState.conflictScope], id: \.self) { SourceFootnote(text: $0) }
                 ForEach(store.issues) { issue in
                     IssueCard(issue: issue)
@@ -155,7 +156,8 @@ struct IssuesView: View {
         let state = IssuesEmptyState(
             isPaused: store.isGloballyPaused,
             deliveredProducers: store.deliveredIssueProducers,
-            conflictScanCap: store.conflictScanCap
+            conflictScanCap: store.conflictScanCap,
+            engineReadAt: store.engineReadAt
         )
         return Card {
             VStack(spacing: 10) {

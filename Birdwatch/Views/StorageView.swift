@@ -288,13 +288,13 @@ struct StorageView: View {
     private func usageHeadline(_ storage: StorageInfo) -> String {
         // With the account tier above, this card is explicitly the local slice.
         if storage.hasAccountTier {
-            return "iCloud Drive on this Mac — \(Format.gigabytes(storage.usedBytes))"
+            return "iCloud Drive on this Mac — \(StorageCapLabel.localFigure(storage.usedBytes, isPartial: storage.localIsPartial))"
         }
         // `trustedCapBytes`: a plan setting the live quota contradicts is
         // never shown as the denominator.
         return StorageCapLabel.usageHeadline(
             used: storage.usedBytes, cap: storage.trustedCapBytes, capIsEstimated: storage.capSource == .derived,
-            planIsAmbiguous: storage.planIsAmbiguous)
+            planIsAmbiguous: storage.planIsAmbiguous, localIsPartial: storage.localIsPartial)
     }
 
     private func segmentedBar(_ storage: StorageInfo) -> some View {

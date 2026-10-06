@@ -194,12 +194,19 @@ enum Format {
         return f
     }
 
-    /// `relative`'s wording for an age in seconds, callable off the main
-    /// actor (data sources label last-known values with it). Builds its own
+    /// `relative`'s style for an age in seconds, callable off the main actor
+    /// (data sources label last-known values with it). Builds its own
     /// formatter — the shared one is not Sendable — which is fine for the
     /// handful of labels a refresh cycle writes.
-    nonisolated static func age(_ seconds: TimeInterval, locale: Locale = .current) -> String {
-        makeRelativeFormatter(locale: locale).localizedString(fromTimeInterval: -max(0, seconds))
+    ///
+    /// ENGLISH by default: every caller drops it into a sentence composed in
+    /// English ("last-known, brctl dump 12m ago"), and the app ships no
+    /// localizations, so the current locale produced mixed sentences
+    /// ("brctl dump vor 12 m"). Under a second reads "just now" — the
+    /// formatter would say "in 0s".
+    nonisolated static func age(_ seconds: TimeInterval, locale: Locale = Locale(identifier: "en_US")) -> String {
+        guard seconds >= 1 else { return "just now" }
+        return makeRelativeFormatter(locale: locale).localizedString(fromTimeInterval: -seconds)
     }
 
     static func size(_ bytes: Int64) -> String { Self.bytes.string(fromByteCount: bytes) }

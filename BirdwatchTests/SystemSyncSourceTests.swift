@@ -313,12 +313,65 @@ struct SystemSyncSourceAssemblyTests {
         let taken = Date(timeIntervalSinceReferenceDate: 50_000)
         let bound = SystemSyncSource.dumpIssueMaxStaleness
 
-        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, now: taken + bound - 1)?.map(\.id)
+        let failing = BrctlReadFailure.timedOut(seconds: 45)
+
+        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, dumpFailure: failing,
+                                                       now: taken + bound - 1)?.map(\.id)
                 == ["stuck-items"], "inside the bound the issues are still raised")
-        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, now: taken + bound) == nil,
-                "past it the producer does not deliver — no frozen counts shown as current")
-        #expect(SystemSyncSource.deliverableDumpIssues(nil, dumpAt: nil, now: taken) == nil)
+        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, dumpFailure: failing,
+                                                       now: taken + bound) == nil,
+                "failing past the bound: the producer does not deliver — no frozen counts shown as current")
+        #expect(SystemSyncSource.deliverableDumpIssues(nil, dumpAt: nil, dumpFailure: nil, now: taken) == nil)
         #expect(bound == SystemSyncSource.conflictMaxStaleness)
+    }
+
+    // Review fix: withdrawing on age alone retired the dump after every
+    // sleep or long pause (no refresh had failed — none had run), which
+    // dropped the producer's baseline; the stuck-items issue that appeared
+    // during the gap was then absorbed silently into the new baseline.
+    // Review fix: app rows got no age for a cached backlog and the backlog
+    // never aged out — Applications still said "110 items not syncing" after
+    // the stuck-items issue was withdrawn.
+    @Test("The backlog rows carry the cached dump's age and leave with its issues")
+    func backlogFollowsTheDump() throws {
+        var mapped = SystemSyncSource.MappedDump(BrctlDump())
+        mapped.retryAttribution = RetryAttribution(locations: ["a": .app("container-x")], stuckIDs: ["a"])
+        let taken = Date(timeIntervalSinceReferenceDate: 50_000)
+        let failing = BrctlReadFailure.timedOut(seconds: 45)
+
+        let fresh = try #require(SystemSyncSource.retryBacklogReading(
+            mapped: mapped, dumpAt: taken, dumpFailure: nil, now: taken + 30))
+        #expect(fresh.note == nil, "a current dump needs no age")
+        let cached = try #require(SystemSyncSource.retryBacklogReading(
+            mapped: mapped, dumpAt: taken, dumpFailure: failing, now: taken + 600))
+        #expect(cached.note == "last-known, brctl dump \(Format.age(600))")
+        #expect(SystemSyncSource.retryBacklogReading(
+            mapped: mapped, dumpAt: taken, dumpFailure: failing, now: taken + SystemSyncSource.dumpIssueMaxStaleness) == nil,
+            "withdrawn together with the dump's issues")
+
+        let container = try #require(AppContainerSource.makeContainer(directoryName: "x"))
+        var row = AppContainerSource.makeApps(containers: [container], transfers: [])[0]
+        SystemSyncSource.applyRetryBacklog(RetryBacklog(stuck: 1), to: &row, stateNote: cached.note)
+        #expect(row.statusLine == "In bird's retry queue · \(cached.note ?? "")")
+
+        // The Issues qualifier no longer claims a dump that WAS read never was.
+        #expect(IssuesEmptyState.qualifiers(isPaused: false, deliveredProducers: [.quota, .conflicts],
+                                            conflictScanCap: nil).contains("Sync engine state hasn't been read yet."))
+        let withdrawn = IssuesEmptyState.qualifiers(isPaused: false, deliveredProducers: [.quota, .conflicts],
+                                                    conflictScanCap: nil, engineReadAt: taken, now: taken + 7_200)
+        #expect(withdrawn.contains("Sync engine state was last read \(Format.age(7_200)) — refreshes are failing."))
+    }
+
+    @Test("An old dump whose refresh simply has not run yet keeps delivering")
+    func oldDumpWithoutFailureStands() {
+        var mapped = SystemSyncSource.MappedDump(BrctlDump())
+        mapped.issues = [TestIssues.make(id: "stuck-items", action: .openDiagnostics, severity: .warning)]
+        let taken = Date(timeIntervalSinceReferenceDate: 50_000)
+        let afterSleep = taken + 8 * 3_600
+        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, dumpFailure: nil, now: afterSleep)?
+                .map(\.id) == ["stuck-items"], "no refresh has failed: the producer keeps its baseline")
+        #expect(SystemSyncSource.dumpStands(dumpAt: taken, dumpFailure: nil, now: afterSleep))
+        #expect(!SystemSyncSource.dumpStands(dumpAt: taken, dumpFailure: .failed("exited with status 1"), now: afterSleep))
     }
 
     // MARK: - Engine card
@@ -547,7 +600,7 @@ struct SystemSyncSourceAssemblyTests {
 
 /// Records every brctl spawn and how many overlap. The dump writes a small
 /// real-shaped dump to its `-o` path; status answers or times out.
-private nonisolated final class RecordingBrctlRunner: ProcessRunning {
+nonisolated final class RecordingBrctlRunner: ProcessRunning {
     struct State {
         var events: [String] = []
         var inFlight = 0
@@ -556,10 +609,12 @@ private nonisolated final class RecordingBrctlRunner: ProcessRunning {
     let state = OSAllocatedUnfairLock(initialState: State())
     let statusTimesOut: Bool
     let dumpTimesOut: Bool
+    let dumpText: String
 
-    init(statusTimesOut: Bool = false, dumpTimesOut: Bool = false) {
+    init(statusTimesOut: Bool = false, dumpTimesOut: Bool = false, dumpText: String = RecordingBrctlRunner.dump) {
         self.statusTimesOut = statusTimesOut
         self.dumpTimesOut = dumpTimesOut
+        self.dumpText = dumpText
     }
 
     static let dump = """
@@ -582,8 +637,9 @@ private nonisolated final class RecordingBrctlRunner: ProcessRunning {
         case "dump":
             if dumpTimesOut { throw RunnerError.timeout }
             if let flag = arguments.firstIndex(of: "-o"), flag + 1 < arguments.count {
-                try Self.dump.write(toFile: arguments[flag + 1], atomically: true, encoding: .utf8)
+                try dumpText.write(toFile: arguments[flag + 1], atomically: true, encoding: .utf8)
             }
+            if let hook = afterDump.withLock({ $0 }) { await hook() }
             return ""
         case "status":
             if statusTimesOut { throw RunnerError.timeout }
@@ -595,6 +651,9 @@ private nonisolated final class RecordingBrctlRunner: ProcessRunning {
 
     var events: [String] { state.withLock { $0.events } }
     var maxInFlight: Int { state.withLock { $0.maxInFlight } }
+    /// Runs inside the dump spawn, after the dump is written — lets a test
+    /// change the world (revoke access) while the dump is "running".
+    let afterDump = OSAllocatedUnfairLock<(@Sendable () async -> Void)?>(initialState: nil)
 }
 
 @Suite("brctl background refresh")
@@ -607,6 +666,7 @@ struct BrctlRefreshOrderingTests {
     func statusRunsAfterDump() async {
         let runner = RecordingBrctlRunner()
         let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        source.setAccessForTesting(.granted)          // the gate allowed reads when this was claimed
         let now = Date()
         #expect(source.claimDumpRefresh(now: now))
         #expect(!source.claimDumpRefresh(now: now + 3600), "single flight while the refresh runs")
@@ -624,6 +684,7 @@ struct BrctlRefreshOrderingTests {
     func dumpTimeoutSkipsStatus() async {
         let runner = RecordingBrctlRunner(dumpTimesOut: true)
         let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        source.setAccessForTesting(.granted)          // the gate allowed reads when this was claimed
         #expect(source.claimDumpRefresh(now: Date()))
         await source.performDumpRefresh()
         #expect(runner.events == ["start dump", "end dump"], "no status after a dump timeout")
@@ -636,11 +697,32 @@ struct BrctlRefreshOrderingTests {
     func forgetKeepsStatusTimeoutHold() async {
         let runner = RecordingBrctlRunner(statusTimesOut: true)
         let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        source.setAccessForTesting(.granted)          // the gate allowed reads when this was claimed
         #expect(source.claimDumpRefresh(now: Date() - 600))
         await source.performDumpRefresh()
         await source.forgetRetryQueueItem(id: "x")
         #expect(!source.claimDumpRefresh(now: Date() + 1))
         #expect(source.claimDumpRefresh(now: Date() + 61))
+    }
+
+    // Review fix: a trashed item left the retry card but stayed in the row
+    // backlog, so its app kept reading "1 item not syncing".
+    @Test("Forgetting a retry item removes it from the row backlog too")
+    func forgetUpdatesBacklog() async throws {
+        let runner = RecordingBrctlRunner(dumpText: """
+            1 containers matching '*'
+            -----------------------------------------------------
+                r:1 i:<ITEM1> al:1 up:needs-upload uv:0 st{p:<root[1]> n:"a{3}b.pdf" doc}
+                > upload{[ active attempts:2 last:3.0m ago next:ready cleanup:59.87m]}
+            """)
+        let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        source.setAccessForTesting(.granted)          // the gate allowed reads when this was claimed
+        #expect(source.claimDumpRefresh(now: Date()))
+        await source.performDumpRefresh()
+        #expect(source.retryAttributionForTesting?.total == 1)
+        await source.forgetRetryQueueItem(id: "ITEM1")
+        #expect(source.retryAttributionForTesting?.total == 0)
+        #expect(source.retryAttributionForTesting?.stuckIDs.isEmpty == true)
     }
 
     // A timed-out status keeps bird busy for its remaining 15–28 s; the next
@@ -649,6 +731,7 @@ struct BrctlRefreshOrderingTests {
     func statusFailureDefersNextDump() async {
         let runner = RecordingBrctlRunner(statusTimesOut: true)
         let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        source.setAccessForTesting(.granted)          // the gate allowed reads when this was claimed
         // Claimed "long ago": without the re-stamp, a claim right after the
         // refresh would pass the 60 s gate.
         #expect(source.claimDumpRefresh(now: Date() - 600))

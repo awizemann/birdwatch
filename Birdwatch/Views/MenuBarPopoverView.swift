@@ -79,7 +79,8 @@ struct MenuBarPopoverView: View {
             pendingFileCount: store.pendingFileCount,
             unknownAppCount: store.unknownStateAppCount,
             unwatchedAppCount: store.unwatchedApps.count,
-            unreportedAppCount: store.unreportedAppCount
+            unreportedAppCount: store.unreportedAppCount,
+            backlogLine: BacklogSummary.appsLine(store.effectiveApps, leading: true)
         )
         return VStack(alignment: .leading, spacing: 0) {
             header(state: state, overall: overall)

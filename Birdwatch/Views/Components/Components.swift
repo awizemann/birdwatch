@@ -105,7 +105,7 @@ struct MiniProgressBar: View {
     /// instead of a fill, and never announces a fabricated percent.
     var indeterminate: Bool = false
     /// What the bar measures when it is not a percentage of work done (e.g.
-    /// "attempt 12 of 62"). nil: the percent, or "In progress".
+    /// "3 failed attempts"). nil: the percent, or "In progress".
     var valueDescription: String? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -163,7 +163,7 @@ private struct ShimmerFill: View {
     let tint: Color
 
     var body: some View {
-        ShimmerLayer(colors: [tint.opacity(0.15), tint, tint.opacity(0.15)].map { NSColor($0).cgColor })
+        ShimmerLayer(colors: [tint.opacity(0.15), tint, tint.opacity(0.15)].map { NSColor($0) })
             .frame(width: width, height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -172,7 +172,8 @@ private struct ShimmerFill: View {
 /// A capsule 45% of the track wide, travelling left edge → right edge and
 /// wrapping, every 1.2 s; it stays inside the track, so nothing is clipped.
 private struct ShimmerLayer: NSViewRepresentable {
-    let colors: [CGColor]
+    /// Dynamic colours, resolved by the view in its own appearance.
+    let colors: [NSColor]
 
     func makeNSView(context: Context) -> ShimmerView { ShimmerView() }
 
@@ -181,6 +182,7 @@ private struct ShimmerLayer: NSViewRepresentable {
     final class ShimmerView: NSView {
         private let capsule = CAGradientLayer()
         private var animatedWidth: CGFloat = -1
+        private var colors: [NSColor] = []
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -192,10 +194,23 @@ private struct ShimmerLayer: NSViewRepresentable {
 
         required init?(coder: NSCoder) { nil }
 
-        func setColors(_ colors: [CGColor]) {
+        func setColors(_ colors: [NSColor]) {
+            self.colors = colors
+            applyColors()
+        }
+
+        /// A CGColor is a snapshot of one appearance: re-resolved whenever
+        /// the view's appearance changes (Light ↔ Dark, Increase Contrast),
+        /// not only when SwiftUI happens to call updateNSView.
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            applyColors()
+        }
+
+        private func applyColors() {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            capsule.colors = colors
+            capsule.colors = resolvedCGColors(colors)
             CATransaction.commit()
         }
 
@@ -261,11 +276,12 @@ private struct PulsingDot: NSViewRepresentable {
     func makeNSView(context: Context) -> PulseView { PulseView() }
 
     func updateNSView(_ view: PulseView, context: Context) {
-        view.setColor(NSColor(color).cgColor)
+        view.setColor(NSColor(color))
     }
 
     final class PulseView: NSView {
         private let dot = CALayer()
+        private var color: NSColor = .clear
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -285,10 +301,21 @@ private struct PulsingDot: NSViewRepresentable {
 
         required init?(coder: NSCoder) { nil }
 
-        func setColor(_ color: CGColor) {
+        func setColor(_ color: NSColor) {
+            self.color = color
+            applyColor()
+        }
+
+        /// Re-resolved on every appearance change (see ShimmerView).
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            applyColor()
+        }
+
+        private func applyColor() {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            dot.backgroundColor = color
+            dot.backgroundColor = resolvedCGColors([color]).first
             CATransaction.commit()
         }
 
@@ -300,6 +327,20 @@ private struct PulsingDot: NSViewRepresentable {
             dot.cornerRadius = min(bounds.width, bounds.height) / 2
             CATransaction.commit()
         }
+    }
+}
+
+extension NSView {
+    /// `colors` as CGColors resolved in THIS view's effective appearance.
+    /// Dynamic system and asset colours have no single CGColor; resolving
+    /// outside the view's appearance (or once) freezes whichever appearance
+    /// happened to be current.
+    func resolvedCGColors(_ colors: [NSColor]) -> [CGColor] {
+        var resolved: [CGColor] = []
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolved = colors.map(\.cgColor)
+        }
+        return resolved
     }
 }
 

@@ -92,9 +92,10 @@ struct IssuesEmptyState: Equatable {
     /// - Parameter deliveredProducers: issue producers that have delivered a
     ///   successful result; nil for a fixture source (everything delivered).
     /// - Parameter conflictScanCap: the cap, when the conflict scan stopped at it.
-    init(isPaused: Bool, deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?) {
+    init(isPaused: Bool, deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?,
+         engineReadAt: Date? = nil, now: Date = Date()) {
         let lines = Self.qualifiers(isPaused: isPaused, deliveredProducers: deliveredProducers,
-                                    conflictScanCap: conflictScanCap)
+                                    conflictScanCap: conflictScanCap, engineReadAt: engineReadAt, now: now)
         title = "No issues detected"
         isClean = lines.isEmpty
         self.lines = (isClean ? ["Birdwatch hasn't found anything that needs your attention."] : lines)
@@ -105,7 +106,8 @@ struct IssuesEmptyState: Equatable {
     /// empty state, the lines above a non-empty list, and the Overview tile.
     static func qualifiers(
         isPaused: Bool,
-        deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?
+        deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?,
+        engineReadAt: Date? = nil, now: Date = Date()
     ) -> [String] {
         var lines: [String] = []
         if isPaused {
@@ -122,7 +124,14 @@ struct IssuesEmptyState: Equatable {
                 lines.append("The conflict scan hasn't completed yet.")
             }
             if !delivered.contains(.dump) {
-                lines.append("Sync engine state hasn't been read yet.")
+                // Read once, then withdrawn: only a failing refresh retires a
+                // dump (`SystemSyncSource.dumpStands`), so say that — "hasn't
+                // been read yet" would be false.
+                if let engineReadAt {
+                    lines.append("Sync engine state was last read \(Format.age(now.timeIntervalSince(engineReadAt))) — refreshes are failing.")
+                } else {
+                    lines.append("Sync engine state hasn't been read yet.")
+                }
             }
         }
         if let cap = conflictScanCap {

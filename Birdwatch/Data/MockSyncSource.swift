@@ -285,9 +285,9 @@ struct MockSyncSource: SyncSource {
     ]
 
     nonisolated private static let retryQueue: [RetryQueueItem] = [
-        RetryQueueItem(id: "r1", name: "Archive-2019.zip", attempt: 62, maxAttempts: 62),
-        RetryQueueItem(id: "r2", name: "Render_final_v8.mp4", attempt: 12, maxAttempts: 62),
-        RetryQueueItem(id: "r3", name: "node_modules.nosync", attempt: 4, maxAttempts: 62),
+        RetryQueueItem(id: "r1", name: "Archive-2019.zip", attempt: 62),
+        RetryQueueItem(id: "r2", name: "Render_final_v8.mp4", attempt: 12),
+        RetryQueueItem(id: "r3", name: "node_modules.nosync", attempt: 4),
     ]
 
     /// Full Disk Access not confirmed (the probe had no answer): Desktop &

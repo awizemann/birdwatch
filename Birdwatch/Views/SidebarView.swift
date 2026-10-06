@@ -108,14 +108,16 @@ struct StorageFooter: View {
                     // Account figure when the quota makes it knowable (matches
                     // System Settings); no cap known → the measured footprint
                     // alone rather than a fraction of an invented total.
-                    Text(StorageCapLabel.footerText(storage.footerFigure, capIsEstimated: estimated))
+                    Text(StorageCapLabel.footerText(storage.footerFigure, capIsEstimated: estimated,
+                                                    localIsPartial: storage.localIsPartial))
                         .scaledFont(size: 11)
                         .foregroundStyle(Surface.fg3)
                         .monospacedDigit()
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("iCloud Storage")
-                .accessibilityValue(StorageCapLabel.footerAccessibilityValue(storage.footerFigure, capIsEstimated: estimated))
+                .accessibilityValue(StorageCapLabel.footerAccessibilityValue(
+                    storage.footerFigure, capIsEstimated: estimated, localIsPartial: storage.localIsPartial))
                 if let progress = storage.footerFigure.progress {
                     MiniProgressBar(progress: progress, height: 3,
                                     label: estimated ? "iCloud storage used, estimated" : "iCloud storage used")

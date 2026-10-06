@@ -23,9 +23,14 @@ enum DriveFolderSource {
     /// come back `.upToDate`; `applying(transfers:to:)` adds per-cycle status.
     /// nil when the iCloud Drive root itself can't be read — not an empty
     /// drive, and the UI must say so rather than show an empty table (C1).
-    nonisolated static func scanFolders() -> [DriveFolder]? {
+    ///
+    /// KEEP `.skipsHiddenFiles` HERE (unlike the Mobile Documents scans):
+    /// with Desktop & Documents sync on, CloudDocs holds hidden-flagged
+    /// `Desktop` and `Documents` SYMLINKS to ~/Desktop and ~/Documents.
+    /// Listing or counting through them reads those folders — a TCC prompt —
+    /// even when the Full Disk Access gate says not to. Pinned by a test.
+    nonisolated static func scanFolders(root: URL = cloudDocsURL) -> [DriveFolder]? {
         let fm = FileManager.default
-        let root = cloudDocsURL
         let contents: [URL]
         do {
             contents = try fm.contentsOfDirectory(
@@ -77,9 +82,11 @@ enum DriveFolderSource {
             var folder = makeFolder(name: $0.name, itemCount: $0.itemCount, transferLocations: locations,
                                     itemCountIsCapped: $0.itemCountIsCapped)
             if case .syncing = folder.status { return folder }
-            let own = retry?.count(folder: folder.name) ?? 0
-            if own > 0 {
-                folder.status = .notSyncing(items: own)
+            let own = retry?.backlog(folder: folder.name) ?? RetryBacklog()
+            if own.stuck > 0 {
+                folder.status = .notSyncing(items: own.stuck)
+            } else if own.waiting > 0 {
+                folder.status = .waitingToSync(items: own.waiting)
             } else if unplaced > 0 {
                 folder.status = .unknown
             }

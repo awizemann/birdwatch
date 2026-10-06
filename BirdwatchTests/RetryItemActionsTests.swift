@@ -106,11 +106,11 @@ struct RetryItemActionsTests {
     func measuredFoldSkipsUnresolvedRows() {
         var asked: [String] = []
         let rows = [
-            RetryQueueItem(id: "exact", name: ".bin file", attempt: 1, maxAttempts: 62,
+            RetryQueueItem(id: "exact", name: ".bin file", attempt: 1,
                            absolutePath: "/x/exact", matchConfidence: .exact, isDirectory: true),
-            RetryQueueItem(id: "ambiguous", name: ".bin file", attempt: 1, maxAttempts: 62,
+            RetryQueueItem(id: "ambiguous", name: ".bin file", attempt: 1,
                            absolutePath: "/x/parent", matchConfidence: .ambiguous(count: 3)),
-            RetryQueueItem(id: "unresolved", name: ".bin file", attempt: 1, maxAttempts: 62),
+            RetryQueueItem(id: "unresolved", name: ".bin file", attempt: 1),
         ]
         let out = BrctlDumpMapper.measured(rows) { path in
             asked.append(path)
@@ -216,7 +216,7 @@ struct RetryItemActionsTests {
     @Test("The row's size line says empty, counts items, or says nothing")
     func sizeLineWording() {
         func item(size: Int64?, count: Int?, partial: Bool = false) -> RetryQueueItem {
-            RetryQueueItem(id: "x", name: ".bin file", attempt: 0, maxAttempts: 62,
+            RetryQueueItem(id: "x", name: ".bin file", attempt: 0,
                            sizeBytes: size, itemCount: count, sizeIsPartial: partial)
         }
         #expect(DiagnosticsView.sizeLine(item(size: nil, count: nil)) == nil)

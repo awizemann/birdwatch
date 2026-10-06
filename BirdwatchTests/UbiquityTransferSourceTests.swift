@@ -342,7 +342,7 @@ struct FSEventLossTests {
     @Test("Sweeps are single-flight: a request while one runs never starts a second")
     @MainActor func sweepIsSingleFlight() async {
         let gate = SweepGate()
-        let source = UbiquityTransferSource(sweep: { await gate.sweep($0) })
+        let source = UbiquityTransferSource(sweep: { UbiquitySweep(paths: await gate.sweep($0)) })
         source.requestSweepForTesting(["/a"])
         await gate.waitUntilCalled(times: 1)
         source.requestSweepForTesting(["/b"])
@@ -412,12 +412,12 @@ struct SeedSweepListingTests {
         try flagged.setResourceValues(values)
         #expect(try flagged.resourceValues(forKeys: [.isHiddenKey]).isHidden == true, "fixture: the flag is set")
 
-        let listed = Set(UbiquityTransferSource.listChildren(of: [root.path]).map { ($0 as NSString).lastPathComponent })
+        let listed = Set(UbiquityTransferSource.listChildren(of: [root.path]).paths.map { ($0 as NSString).lastPathComponent })
         #expect(listed == ["iCloud~com~example~notes", "com~apple~CloudDocs"])
     }
 
     @Test("An unreadable root is skipped, not fatal")
     func missingRootSkipped() {
-        #expect(UbiquityTransferSource.listChildren(of: ["/nonexistent-\(UUID().uuidString)"]).isEmpty)
+        #expect(UbiquityTransferSource.listChildren(of: ["/nonexistent-\(UUID().uuidString)"]).paths.isEmpty)
     }
 }

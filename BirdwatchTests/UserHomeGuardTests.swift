@@ -37,7 +37,13 @@ struct UserHomeGuardTests {
             .compactMap { $0 as? URL }
             .filter { $0.pathExtension == "swift" && $0.lastPathComponent != "UserHome.swift" }
         #expect(files.count > 20, "found the app sources")
-        let banned = ["NSHomeDirectory()", "expandingTildeInPath", "homeDirectoryForCurrentUser", "FileManager.default.homeDirectory"]
+        let banned = [
+            "NSHomeDirectory()", "expandingTildeInPath", "homeDirectoryForCurrentUser",
+            "FileManager.default.homeDirectory", "URL.homeDirectory", "getpwuid",
+            "\"HOME\"",                                     // environment lookups of the home
+            "urls(for: .libraryDirectory", "urls(for: .userDirectory",
+            "url(for: .libraryDirectory", "url(for: .userDirectory",
+        ]
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
             for token in banned {

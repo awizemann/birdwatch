@@ -35,7 +35,6 @@ struct BrctlDumpMappingTests {
         // live. The two idle `{[1 old]}` bookkeeping items never appear.
         #expect(queue.map(\.id).sorted()
             == ["15478C83", "E0A2E171", "documents[148]", "documents[171]"])
-        #expect(queue.allSatisfy { $0.maxAttempts == 62 })
         // Highest attempt count first — that is the row worth reading.
         #expect(queue.first?.id == "documents[148]")
         #expect(queue.first?.attempt == 3)
@@ -251,6 +250,11 @@ struct RetryBacklogAttributionTests {
         #expect(attribution.locations["documents[171]"] == .app("container-icloud-com-microsoft-office-excel"))
         #expect(attribution.locations["documents[148]"] == .app("container-icloud-com-feedbacks-chatapp"))
         #expect(attribution.unplacedForFolders == 0)
+        // What the fixture's operation lines say: E0A2E171 is an active upload
+        // tried 7.56 s ago (queued work); documents[171] was last tried
+        // 1805.75 h ago (old); documents[148] and 15478C83 have failed
+        // (attempts:3 / attempts:1).
+        #expect(attribution.stuckIDs == ["documents[171]", "documents[148]", "15478C83"])
 
         let bare = BrctlDumpMapper.retryAttribution(from: try dumpFixture(), candidates: [], homeDirectory: Self.home)
         #expect(bare.total == 4)
@@ -258,8 +262,10 @@ struct RetryBacklogAttributionTests {
     }
 
     // The soak-test bug: "Up to date · Sync engine idle", "Pending: None"
-    // and "1 app up to date" beside "110 items haven't synced".
-    @Test("A row bird holds items for is never up to date, in the list or the popover")
+    // and "1 app up to date" beside "110 items haven't synced". Review fix:
+    // iCloud Drive carried EVERY app's items (the popover counted them
+    // twice) and called ordinary queued uploads "not syncing".
+    @Test("Each row carries only its own items, split into not syncing and waiting")
     func rowsCarryTheBacklog() throws {
         let attribution = try Self.attribution()
         let idle = BrctlStatus(clientState: "idle", serverState: "idle", lastSync: nil, isIdle: true, tokenInfo: "t", apps: [])
@@ -268,12 +274,16 @@ struct RetryBacklogAttributionTests {
         let apps = SystemSyncSource.buildApps(
             status: idle, transfers: [], fileProviderDomains: [], containers: [excel], retry: attribution)
 
+        // Drive: its own two (the failed Projects item, the queued root file),
+        // plus the failed chat-app item, whose container has no row here — so
+        // no other row carries it, and it is labelled as not placed.
         let drive = try #require(apps.first { $0.id == "icloud-drive" })
-        #expect(drive.status == .notSyncing(items: 4))
-        #expect(drive.pendingItems == 4)
-        #expect(AppDetailFacts.pendingValue(drive) == "4 items")
+        #expect(drive.status == .notSyncing(items: 2))
+        #expect(drive.pendingItems == 3)
+        #expect(drive.statusLine == "In bird's retry queue · 1 more waiting · 1 not placed on this Mac")
+        #expect(AppDetailFacts.pendingValue(drive) == "3 items")
         let display = SyncStatusDisplay(app: drive, progressIsIndeterminate: true)
-        #expect(display.label == "4 items not syncing")
+        #expect(display.label == "2 items not syncing")
         #expect(display.tone == .warning)
 
         let excelRow = try #require(apps.first { $0.id == excel.id })
@@ -282,6 +292,42 @@ struct RetryBacklogAttributionTests {
         let line = PopoverSummary.idleAppsLine(apps) ?? ""
         #expect(!line.contains("up to date"), "got \(line)")
         #expect(line.contains("2 apps with items not syncing"), "got \(line)")
+
+        // Only queued work: neutral "waiting", never a warning.
+        let queued = RetryAttribution(locations: ["q": .driveRootFile])
+        let waiting = try #require(SystemSyncSource.buildApps(
+            status: idle, transfers: [], fileProviderDomains: [], retry: queued).first { $0.id == "icloud-drive" })
+        #expect(waiting.status == .waitingToSync(items: 1))
+        #expect(SyncStatusDisplay(app: waiting, progressIsIndeterminate: true).tone == .neutral)
+        #expect(PopoverSummary.idleAppsLine([waiting]) == "1 app with items waiting to sync")
+
+        // Items no row could be found for land on iCloud Drive, labelled.
+        let lost = RetryAttribution(locations: ["x": .unplaced], stuckIDs: ["x"])
+        let lostRow = try #require(SystemSyncSource.buildApps(
+            status: idle, transfers: [], fileProviderDomains: [], retry: lost).first { $0.id == "icloud-drive" })
+        #expect(lostRow.status == .notSyncing(items: 1))
+        #expect(lostRow.statusLine == "In bird's retry queue · 1 not placed on this Mac")
+
+        // Review fix: an item attributed to a container that has NO row
+        // (excluded, past the container cap) counted on no row at all. It
+        // lands on iCloud Drive, labelled like any unplaced item; an item
+        // whose container does have a row stays on that row only.
+        let obsidian = try #require(AppContainerSource.makeContainer(directoryName: "iCloud~md~obsidian"))
+        let orphaned = RetryAttribution(
+            locations: ["o": .app("container-no-row"), "k": .app(obsidian.id)], stuckIDs: ["o", "k"])
+        let rows = SystemSyncSource.buildApps(
+            status: idle, transfers: [], fileProviderDomains: [], containers: [obsidian], retry: orphaned)
+        let orphanDrive = try #require(rows.first { $0.id == "icloud-drive" })
+        #expect(orphanDrive.status == .notSyncing(items: 1))
+        #expect(orphanDrive.statusLine == "In bird's retry queue · 1 not placed on this Mac")
+        #expect(rows.first { $0.id == obsidian.id }?.status == .notSyncing(items: 1))
+        #expect(SystemSyncSource.backlogWithoutRow(orphaned, rowIDs: Set(rows.map(\.id))).total == 1)
+
+        // A busy engine (.active) or a transfer (.syncing) keeps its own status.
+        let busy = BrctlStatus(clientState: "busy", serverState: "idle", lastSync: nil, isIdle: false, tokenInfo: "t", apps: [])
+        let busyDrive = SystemSyncSource.buildApps(
+            status: busy, transfers: [], fileProviderDomains: [], retry: attribution).first { $0.id == "icloud-drive" }
+        #expect(busyDrive?.status == .active)
 
         // No backlog: the engine's own idle still reads up to date.
         let clean = SystemSyncSource.buildApps(status: idle, transfers: [], fileProviderDomains: [], retry: RetryAttribution())
@@ -295,9 +341,30 @@ struct RetryBacklogAttributionTests {
         let placed = DriveFolderSource.applying(transfers: [], to: folders, retry: try Self.attribution())
         #expect(placed.map(\.status) == [.notSyncing(items: 1), .upToDate])
 
+        let queued = DriveFolderSource.applying(
+            transfers: [], to: folders, retry: RetryAttribution(locations: ["q": .driveFolder("Notes")]))
+        #expect(queued.map(\.status) == [.upToDate, .waitingToSync(items: 1)])
+
         var unplaced = try Self.attribution()
         unplaced.locations["mystery"] = .unplaced
         let uncertain = DriveFolderSource.applying(transfers: [], to: folders, retry: unplaced)
         #expect(uncertain.map(\.status) == [.notSyncing(items: 1), .unknown])
+    }
+
+    // L7: with no header, an "exact" match against a list that stopped at
+    // its cap may be the wrong file — the right one was never listed.
+    @Test("A header-less item matched against a capped candidate list stays unplaced")
+    func partialCandidatesDontPlace() {
+        let dump = BrctlDumpParser.parse("""
+        1 containers matching '*'
+        -----------------------------------------------------
+            r:1 i:<ITEM1> al:1 up:needs-upload uv:0 st{p:<root[1]> n:"REDACTED-9.txt" doc}
+        """)
+        let found = [Self.candidate("com~apple~CloudDocs/Notes/REDACTED-9.txt")]
+        let complete = BrctlDumpMapper.retryAttribution(from: dump, candidates: found, homeDirectory: Self.home)
+        #expect(complete.locations["ITEM1"] == .driveFolder("Notes"))
+        let partial = BrctlDumpMapper.retryAttribution(
+            from: dump, candidates: found, candidatesArePartial: true, homeDirectory: Self.home)
+        #expect(partial.locations["ITEM1"] == .unplaced)
     }
 }

@@ -251,6 +251,24 @@ struct StorageAggregationTests {
         #expect(totals[.archives] == nil, "nothing under a dot-directory is counted")
     }
 
+    // Review fix: dot-directory entries counted toward the entry cap before
+    // being skipped, so a large .Trash filled it and the walk went partial.
+    @Test("Dot-directory entries don't use up the entry cap")
+    func dotEntriesDontCountTowardCap() throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bw-storage-cap-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let trash = root.appendingPathComponent(".Trash", isDirectory: true)
+        try fm.createDirectory(at: trash, withIntermediateDirectories: true)
+        for index in 0..<20 { try Data("x".utf8).write(to: trash.appendingPathComponent("old-\(index).zip")) }
+        try Data(repeating: 0x41, count: 4_000).write(to: root.appendingPathComponent("song.mp3"))
+
+        let result = StorageBreakdownSource.totals(ofDirectories: [root], cap: 5)
+        #expect(!result.isPartial, "only song.mp3 counts toward the cap")
+        #expect(result.totals[.audio] != nil)
+    }
+
     @Test("The entry cap truncates rather than walking forever")
     func entryCap() throws {
         let root = try makeTree()

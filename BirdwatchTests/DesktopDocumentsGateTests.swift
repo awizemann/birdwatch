@@ -258,4 +258,36 @@ struct PermissionReprobeTests {
         await store.refresh(reprobePermissions: true)
         #expect(Array(source.log.suffix(2)) == ["reprobe", "reprobe"])
     }
+
+    // Review fix: ⌘R during a snapshot that was mid-probe let that probe
+    // write its pre-grant answer back as a fresh 5-minute cache.
+    @Test("A probe that started before an invalidation is not cached")
+    func probeStartedBeforeInvalidationIsNotCached() async {
+        let probes = OSAllocatedUnfairLock(initialState: 0)
+        let started = AsyncStream<Void>.makeStream()
+        let release = AsyncStream<Void>.makeStream()
+        let readers = SystemSyncSource.Readers.testing(
+            permissions: {
+                let n = probes.withLock { $0 += 1; return $0 }
+                if n == 1 {
+                    started.continuation.yield()
+                    for await _ in release.stream { break }
+                }
+                return [PermissionStatus(kind: .fullDiskAccess, state: n == 1 ? .denied : .granted)]
+            }
+        )
+        let source = SystemSyncSource(pathCandidates: { [] }, readers: readers)
+        let t0 = Date()
+
+        let first = Task { await source.fullDiskAccessGate(now: t0) }
+        var startedIterator = started.stream.makeAsyncIterator()
+        await startedIterator.next()                 // the probe is running
+        await source.invalidatePermissions()          // ⌘R lands mid-probe
+        release.continuation.yield()
+        #expect(await first.value.fullDiskAccess == .denied, "that snapshot still shows what it read")
+
+        let next = await source.fullDiskAccessGate(now: t0 + 15)
+        #expect(probes.withLock { $0 } == 2, "the stale answer was not cached")
+        #expect(next.fullDiskAccess == .granted)
+    }
 }

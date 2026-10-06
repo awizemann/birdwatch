@@ -576,6 +576,23 @@ struct UnknownAndActiveStateTests {
         ]) == "1 app up to date · 1 with state unknown")
     }
 
+    // Review fix: overallState treats a backlog as idle, so the hero said
+    // only "Nothing is transferring" beside rows reading "N items not syncing".
+    @Test("The idle hero names bird's backlog in the popover's words")
+    func heroMentionsBacklog() {
+        let apps = [app("a", status: .notSyncing(items: 3)), app("b", status: .waitingToSync(items: 2)),
+                    app("c", status: .upToDate)]
+        let line = BacklogSummary.appsLine(apps, leading: true)
+        #expect(line == "1 app with items not syncing · 1 with items waiting to sync")
+        let hero = OverviewHeroDisplay(state: .idle, progress: 1, progressIsIndeterminate: false,
+                                       inFlightCount: 0, pendingFileCount: 0, backlogLine: line)
+        #expect(hero.subtitle == "Nothing is transferring right now. 1 app with items not syncing · 1 with items waiting to sync.")
+        #expect(PopoverSummary.idleAppsLine(apps)
+                == "1 app up to date · 1 with items not syncing · 1 with items waiting to sync",
+                "popover and hero use the same phrases")
+        #expect(BacklogSummary.appsLine([app("c", status: .upToDate)], leading: true) == nil)
+    }
+
     // Without FDA the Desktop & Documents row is unwatched, not "not read
     // yet" — which would otherwise be claimed forever.
     @Test("Unwatched rows are counted apart: 'not watched — needs Full Disk Access'")

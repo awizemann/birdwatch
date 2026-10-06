@@ -55,8 +55,8 @@ struct ComponentDecisionTests {
     @Test("A bar that counts something says the count, not a percent")
     func retryBarValue() {
         let value = MiniProgressBar.spokenValue(progress: 12.0 / 62.0, indeterminate: false,
-                                                valueDescription: "attempt 12 of 62")
-        #expect(value == "attempt 12 of 62")
+                                                valueDescription: "3 failed attempts")
+        #expect(value == "3 failed attempts")
         #expect(!value.contains("percent"))
         // Ordinary bars are unchanged.
         #expect(MiniProgressBar.spokenValue(progress: 0.42, indeterminate: false, valueDescription: nil) == "42 percent")
@@ -125,5 +125,13 @@ struct ComponentDecisionTests {
         // Seeds arrive newest-first; they still end up newest at the top.
         let seeded = LogConsoleLines.merged([], with: [line(3), line(2), line(1)])
         #expect(seeded.map(\.message) == ["3", "2", "1"])
+
+        // A seed burst larger than the buffer bound arrives newest-first:
+        // trimming must keep the NEWEST by timestamp, not the latest arrivals.
+        var burst: [LogLine] = []
+        for second in (0..<200).reversed() { LogConsoleLines.buffer(line(second), into: &burst) }
+        let fromBurst = LogConsoleLines.merged([], with: burst)
+        #expect(fromBurst.first?.message == "199")
+        #expect(fromBurst.map(\.message) == (175..<200).reversed().map(String.init))
     }
 }

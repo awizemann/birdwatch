@@ -88,18 +88,20 @@
           marked read (<code>notifications_marked_read</code>) and a stuck item revealed in
           Finder (<code>retry_item_revealed</code>) — no details;</li>
         <li>an app muted or unmuted (<code>app_muted</code>) — its sync backend
-          (<code>backend</code>) and the new setting (<code>muted</code>);</li>
+          (<code>backend</code>: <code>cloudDocs</code>, <code>cloudKit</code> or
+          <code>fileProvider</code>) and the new setting (<code>muted</code>);</li>
         <li>an issue dismissed (<code>issue_dismissed</code>) — its severity
           (<code>severity</code>: <code>warning</code>, <code>conflict</code> or
           <code>error</code>);</li>
         <li>an issue's button pressed (<code>issue_action</code>) — which button
           (<code>action</code>: <code>review_versions</code>, <code>open_diagnostics</code> or
-          <code>manage_storage</code>) and the issue's severity (<code>severity</code>), never
-          its text;</li>
+          <code>manage_storage</code>) and the issue's severity (<code>severity</code>:
+          <code>warning</code>, <code>conflict</code> or <code>error</code>), never its text;</li>
         <li>a conflict resolved (<code>conflict_resolved</code>) — whether you kept the
           <code>current</code> version or an <code>other</code> one (<code>kept</code>);</li>
         <li>a stuck item moved to the Trash (<code>retry_item_trashed</code>) — whether it
-          worked (<code>outcome</code>);</li>
+          worked (<code>outcome</code>: <code>ok</code>, <code>unconfirmed</code> or
+          <code>failed</code>);</li>
         <li>a maintenance action (<code>maintenance_run</code>) — which one
           (<code>action</code>: <code>restart_daemon</code>, or the diagnose command's
           <code>diagnose_copy_command</code> / <code>diagnose_open_terminal</code> buttons),
