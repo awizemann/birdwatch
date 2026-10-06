@@ -4,9 +4,9 @@ import Foundation
 
 /// Which system service syncs an app's data, and therefore how much detail we can honestly show.
 enum SyncBackend: String, Sendable, Hashable, Codable {
-    case cloudDocs      // `bird` — full per-file fidelity
-    case cloudKit       // `cloudd` — status + item counts only
-    case fileProvider   // `fileproviderd` — domain status only
+    case cloudDocs      // `bird` — per-file in-flight flags (no percentage), engine state
+    case cloudKit       // `cloudd` — activity seen in the system log only
+    case fileProvider   // `fileproviderd` — listed from ~/Library/CloudStorage, no status
 
     var badgeLabel: String {
         switch self {
@@ -29,7 +29,8 @@ enum SyncBackend: String, Sendable, Hashable, Codable {
     var progressDetail: String {
         switch self {
         case .cloudDocs: "In flight / done only (no percentage)"
-        case .cloudKit, .fileProvider: "Status only"
+        case .cloudKit: "Activity only (no progress)"
+        case .fileProvider: "Not reported"
         }
     }
 }

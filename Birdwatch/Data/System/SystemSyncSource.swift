@@ -824,12 +824,12 @@ final class SystemSyncSource: SyncSource {
                 id: "fp-\(domain.lowercased())", name: name,
                 tileColorHex: tiles[index % tiles.count], backend: .fileProvider, isApple: false,
                 status: .upToDate,
-                statusLine: "File Provider domain active",
+                statusLine: "Sync status not reported",
                 lastActivity: nil,
-                // fileproviderd reports only domain status.
+                // Listed from its CloudStorage folder only — no status is read.
                 itemCount: nil, pendingItems: nil, localSize: nil,
                 locationPath: "\(home)/Library/CloudStorage/\(domain)".replacingOccurrences(of: home, with: "~"),
-                infoCallout: "\(name) syncs through a File Provider extension. macOS reports only the domain's overall status."
+                infoCallout: "\(name) syncs through a File Provider extension. Birdwatch finds it from its folder in ~/Library/CloudStorage but doesn't read its sync status, so it can't say whether \(name) is up to date."
             ))
         }
 
@@ -868,7 +868,7 @@ final class SystemSyncSource: SyncSource {
         if !ownTransfers.isEmpty {
             let progress = ownTransfers.map(\.progress).reduce(0, +) / Double(ownTransfers.count)
             return (.syncing(progress: progress),
-                    "\(ownTransfers.count) file\(ownTransfers.count == 1 ? "" : "s") in transfer")
+                    "\(Plural.count(ownTransfers.count, "file")) in transfer")
         }
         let suffix = stateNote.map { " · \($0)" } ?? ""
         guard let state else {
@@ -1029,9 +1029,4 @@ final class SystemSyncSource: SyncSource {
             return []
         }
     }
-}
-
-extension Format {
-    /// Nonisolated byte formatting for non-view contexts (Format itself is
-    /// MainActor for the view layer).
 }

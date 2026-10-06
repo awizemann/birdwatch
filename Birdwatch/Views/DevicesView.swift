@@ -21,7 +21,7 @@ struct DevicesView: View {
                 ForEach(store.devices) { device in
                     DeviceCard(device: device)
                 }
-                SourceFootnote(text: "Read from the CloudKit account device list and the bird device registry.")
+                SourceFootnote(text: "Sample devices from fixture data. On a real Mac this list can't be built: bird redacts device names, and macOS has no public device-list API.")
                 DeviceManagementFootnote()
             }
         }
@@ -36,7 +36,7 @@ struct DevicesView: View {
                 Label("No device list available", systemImage: "laptopcomputer.slash")
                     .scaledFont(size: 14, weight: .bold)
                     .foregroundStyle(Surface.fg)
-                Text("macOS does not expose the device registry to third-party apps. The devices on your account are visible in System Settings › iCloud.")
+                Text("macOS does not expose the device registry to third-party apps. The devices on your account are listed in System Settings › Apple Account.")
                     .scaledFont(size: 12.5)
                     .foregroundStyle(Surface.fg2)
             }
@@ -118,7 +118,7 @@ struct AnonymousDeviceSummary: View {
                 .scaledFont(size: 13, weight: .semibold, design: .monospaced)
                 .foregroundStyle(Surface.fg)
                 .frame(minWidth: 92, alignment: .leading)
-            Text("\(device.itemCount.formatted()) item\(device.itemCount == 1 ? "" : "s")")
+            Text(Plural.count(device.itemCount, "item"))
                 .scaledFont(size: 12.5)
                 .foregroundStyle(Surface.fg2)
                 .monospacedDigit()
@@ -129,7 +129,7 @@ struct AnonymousDeviceSummary: View {
                 .monospacedDigit()
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Device \(device.index), \(device.itemCount) items, \(lastTouch(device))")
+        .accessibilityLabel("Device \(device.index), \(Plural.count(device.itemCount, "item")), \(lastTouch(device))")
     }
 
     private func lastTouch(_ device: DeviceActivityItem) -> String {

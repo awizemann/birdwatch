@@ -1,7 +1,7 @@
 import Foundation
 
 /// Everything the UI needs, gathered in one Sendable value. In Phase 1 the
-/// real sources (brctl, NSMetadataQuery, log stream, ps sampling) assemble
+/// real sources (brctl, FSEvents + ubiquity flags, log show/stream, ps, nettop) assemble
 /// this off-main; the store diffs and publishes it.
 struct SyncSnapshot: Sendable {
     var apps: [AppSyncState]

@@ -157,8 +157,12 @@ func cpuTint(_ percent: Double) -> Color {
 
 // MARK: - Formatting helpers (allocated once — never in view bodies)
 
-/// MainActor-isolated on purpose: formatters are not Sendable, and all
-/// formatting happens in the view layer on main.
+/// The type is MainActor (the default isolation) because its two stored
+/// formatters, `bytes` and `relative`, are not Sendable — so `size(_:)`,
+/// `relative` and `gigabytes(_:)` are main-actor only. Every FormatStyle-based
+/// helper (`capacity`, `percent`, `duration`, `compactUnit`, `cpu`, `memory`,
+/// `clockTime`, `hourOfDay`) is `nonisolated`, since data sources build
+/// user-facing text with them off the main actor.
 enum Format {
     static let bytes: ByteCountFormatter = {
         let f = ByteCountFormatter()
@@ -174,14 +178,82 @@ enum Format {
 
     static func size(_ bytes: Int64) -> String { Self.bytes.string(fromByteCount: bytes) }
 
-    /// Compact age for engine-reported waits ("75d", "3.8h", "12m").
-    static func duration(_ seconds: TimeInterval) -> String {
-        switch seconds {
-        case ..<90: "\(Int(seconds.rounded()))s"
-        case ..<5_400: "\(Int((seconds / 60).rounded()))m"
-        case ..<172_800: "\(Int((seconds / 3_600).rounded()))h"
-        default: "\(Int((seconds / 86_400).rounded()))d"
+    /// Compact age for engine-reported waits, rounded to one unit: "45s",
+    /// "12m", "4h", "75d" in English ("12min", "75j" in French).
+    /// A non-finite input has no age to state, so it reads "—"; absurdly large
+    /// ones are clamped (`maxCompactSeconds`) rather than trapping.
+    nonisolated static func duration(_ seconds: TimeInterval, locale: Locale = .current) -> String {
+        guard seconds.isFinite else { return "—" }
+        let s = min(max(0, seconds), maxCompactSeconds)
+        switch s {
+        case ..<90: return compactUnit(Int(s.rounded()), .seconds, locale: locale)
+        case ..<5_400: return compactUnit(Int((s / 60).rounded()), .minutes, locale: locale)
+        case ..<172_800: return compactUnit(Int((s / 3_600).rounded()), .hours, locale: locale)
+        default: return compactUnit(Int((s / 86_400).rounded()), .days, locale: locale)
         }
+    }
+
+    /// One whole amount of one unit in the locale's narrow style ("12m" in
+    /// English, "12min" in German). The caller picks the unit and rounds, so
+    /// the formatter never re-rounds into a different unit.
+    /// ~31,700 years: far past any real age, far inside Int/Int64 range.
+    nonisolated static let maxCompactSeconds: TimeInterval = 1e12
+
+    nonisolated static func compactUnit(_ value: Int, _ unit: Duration.UnitsFormatStyle.Unit, locale: Locale = .current) -> String {
+        let perUnit: Int64 = switch unit {
+        case .days: 86_400
+        case .hours: 3_600
+        case .minutes: 60
+        default: 1
+        }
+        // Overflow clamps instead of trapping; a negative amount is an absence.
+        let product = Int64(clamping: max(0, value)).multipliedReportingOverflow(by: perUnit)
+        let seconds = product.overflow ? Int64.max / perUnit * perUnit : product.partialValue
+        var style = Duration.UnitsFormatStyle(allowedUnits: [unit], width: .narrow)
+        style.locale = locale
+        return Duration.seconds(seconds).formatted(style)
+    }
+
+    /// Daemon CPU load as "12% CPU" with a locale-aware percent. `ps` reports
+    /// percent of one core, so values above 100 are real and kept.
+    ///
+    /// Truncated, not rounded: `cpuTint` and the health words compare the raw
+    /// value against whole-number thresholds (15 / 30), and floor(x) < T
+    /// exactly when x < T — so 29.6 reads "29%" in amber, never "30%" in amber.
+    nonisolated static func cpu(_ percent: Double, locale: Locale = .current) -> String {
+        let value = percent.isFinite ? max(0, percent) : 0
+        return (value / 100).formatted(
+            .percent.precision(.fractionLength(0)).rounded(rule: .down).locale(locale)
+        ) + " CPU"
+    }
+
+    /// Resident memory from `ps` (MiB) as the locale writes memory sizes
+    /// ("412 MB", "1.2 GB").
+    nonisolated static func memory(megabytes: Double, locale: Locale = .current) -> String {
+        Int64((max(0, megabytes) * 1_048_576).rounded())
+            .formatted(.byteCount(style: .memory).locale(locale))
+    }
+
+    /// A clock time to the second in the user's 12/24-hour convention
+    /// ("9:41:02 PM", "21:41:02").
+    nonisolated static func clockTime(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        var style = Date.FormatStyle(date: .omitted, time: .standard)
+        style.locale = locale
+        style.timeZone = timeZone
+        return date.formatted(style)
+    }
+
+    /// The start of an hour of the day (0–23) as the locale writes it
+    /// ("2:00 PM", "14:00").
+    nonisolated static func hourOfDay(_ hour: Int, locale: Locale = .current) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+        let date = calendar.date(from: DateComponents(year: 2001, month: 1, day: 1, hour: hour))
+            ?? Date(timeIntervalSinceReferenceDate: TimeInterval(hour * 3_600))
+        var style = Date.FormatStyle().hour().minute()
+        style.locale = locale
+        style.timeZone = calendar.timeZone
+        return date.formatted(style)
     }
 
     /// Same formatter as `capacity` — one way to write a storage figure.

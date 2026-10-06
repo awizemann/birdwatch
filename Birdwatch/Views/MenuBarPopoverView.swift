@@ -209,7 +209,7 @@ struct MenuBarPopoverView: View {
                 switch display.bar {
                 case .determinate(let progress):
                     MiniProgressBar(progress: progress, label: "\(app.name) sync progress")
-                    Text("\(Int((progress * 100).rounded()))%")
+                    Text(Format.percent(progress))
                         .scaledFont(size: 11.5, weight: .semibold)
                         .foregroundStyle(Surface.fg2)
                         .monospacedDigit()
@@ -359,11 +359,11 @@ struct Sparkline: View {
     static func summary(of allHours: [BandwidthHourSample]) -> String {
         let hours = allHours.filter(\.isObserved)
         let totals = hours.map { $0.uploadedBytes + $0.downloadedBytes }
-        let hourWord = hours.count == 1 ? "hour" : "hours"
+        let hourCount = Plural.count(hours.count, "hour")
         guard let peak = totals.max(), peak > 0 else {
-            return "\(hours.count) \(hourWord), no traffic recorded"
+            return "\(hourCount), no traffic recorded"
         }
         let sum = totals.reduce(Int64(0), +)
-        return "\(hours.count) \(hourWord), peak \(Format.size(peak)) in one hour, \(Format.size(sum)) in total"
+        return "\(hourCount), peak \(Format.size(peak)) in one hour, \(Format.size(sum)) in total"
     }
 }

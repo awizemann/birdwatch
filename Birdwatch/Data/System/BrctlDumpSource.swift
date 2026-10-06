@@ -181,11 +181,9 @@ nonisolated enum BrctlDumpMapper {
         return IssueItem(
             id: "issue-stuck-items",
             severity: .warning,
-            title: count == 1
-                ? "1 item hasn't synced in \(days) day\(days == 1 ? "" : "s")"
-                : "\(count) items haven't synced in \(days) day\(days == 1 ? "" : "s")",
+            title: "\(Plural.count(count, "item")) \(count == 1 ? "hasn't" : "haven't") synced in \(Plural.count(days, "day"))",
             meta: "iCloud Drive · reported by bird",
-            reason: "bird still has \(count) item\(count == 1 ? "" : "s") scheduled for upload, but its last attempt on the oldest was \(days) day\(days == 1 ? "" : "s") ago. The item names are redacted by macOS, so Birdwatch can only report the count and the age.",
+            reason: "bird still has \(Plural.count(count, "item")) scheduled for upload, but its last attempt on the oldest was \(Plural.count(days, "day")) ago. The item names are redacted by macOS, so Birdwatch can only report the count and the age.",
             action: .openDiagnostics,
             symbolName: "clock.badge.exclamationmark",
             appID: "icloud-drive"
@@ -293,8 +291,11 @@ nonisolated enum BrctlDumpMapper {
             .contains { $0 >= 100 }
     }
 
-    private static func percent(_ value: Double) -> String {
-        String(format: value < 10 && value != value.rounded() ? "%.1f%%" : "%.0f%%", value)
+    /// "0.5%" below 10 when fractional, else whole ("57%"), in the user's
+    /// locale ("0,5 %" in French).
+    static func percent(_ value: Double, locale: Locale = .current) -> String {
+        let digits = value < 10 && value != value.rounded() ? 1 : 0
+        return (value / 100).formatted(.percent.precision(.fractionLength(digits)).locale(locale))
     }
 
     private static func count(_ value: Int) -> String {

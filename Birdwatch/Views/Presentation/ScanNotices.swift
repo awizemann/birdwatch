@@ -66,47 +66,49 @@ enum ScanFreshnessNotice {
 // MARK: - Issues empty state
 
 /// The Issues screen with nothing listed. "No issues detected" is the most it
-/// can say, and it says why the answer may be incomplete: a missing Full Disk
-/// Access grant, paused monitoring, or a conflict scan that stopped early.
+/// can say, and it says why the answer may be incomplete (paused monitoring,
+/// a scan that hasn't delivered or stopped early) and, always, where the
+/// conflict scan never looks.
 struct IssuesEmptyState: Equatable {
     let title: String
     let lines: [String]
     /// TRUE only when nothing qualifies the empty list — the green check.
+    /// The fixed `conflictScope` line is not a qualifier: it is true on every
+    /// Mac, so it can't be what makes one answer less complete than another.
     let isClean: Bool
+
+    /// Where `ConflictSource` looks, stated on every Issues screen. The walk
+    /// covers only ~/Library/Mobile Documents/com~apple~CloudDocs: its
+    /// Desktop/Documents entries are symlinks the enumerator doesn't follow,
+    /// and app containers (com~apple~Pages, iCloud~…) sit outside that root.
+    static let conflictScope = "Conflicts are checked in iCloud Drive only — Desktop & Documents and apps' own iCloud folders aren't scanned."
 
     /// - Parameter deliveredProducers: issue producers that have delivered a
     ///   successful result; nil for a fixture source (everything delivered).
     /// - Parameter conflictScanCap: the cap, when the conflict scan stopped at it.
-    init(
-        fullDiskAccess: PermissionState?, isPaused: Bool,
-        deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?
-    ) {
-        let lines = Self.qualifiers(fullDiskAccess: fullDiskAccess, isPaused: isPaused,
-                                    deliveredProducers: deliveredProducers, conflictScanCap: conflictScanCap)
+    init(isPaused: Bool, deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?) {
+        let lines = Self.qualifiers(isPaused: isPaused, deliveredProducers: deliveredProducers,
+                                    conflictScanCap: conflictScanCap)
         title = "No issues detected"
         isClean = lines.isEmpty
-        self.lines = isClean ? ["Birdwatch hasn't found anything that needs your attention."] : lines
+        self.lines = (isClean ? ["Birdwatch hasn't found anything that needs your attention."] : lines)
+            + [Self.conflictScope]
     }
 
     /// Why the issue list (empty or not) may be incomplete. Shared by the
     /// empty state, the lines above a non-empty list, and the Overview tile.
     static func qualifiers(
-        fullDiskAccess: PermissionState?, isPaused: Bool,
+        isPaused: Bool,
         deliveredProducers: Set<IssueProducer>?, conflictScanCap: Int?
     ) -> [String] {
         var lines: [String] = []
         if isPaused {
             lines.append("Monitoring is paused, so new issues aren't being detected.")
         }
-        // The cause before its symptoms.
-        switch fullDiskAccess {
-        case .denied:
-            lines.append("Full Disk Access isn't granted, so Birdwatch can't check iCloud Drive for conflicts or read bird's state.")
-        case .unknown:
-            lines.append("Birdwatch couldn't confirm Full Disk Access, so some checks may not have run.")
-        case .granted, nil:
-            break
-        }
+        // Full Disk Access is deliberately not a qualifier: no issue producer
+        // depends on it (brctl runs without it, and the conflict walk covers
+        // the CloudDocs root, which it doesn't gate). What the conflict scan
+        // never covers is stated unconditionally — see `conflictScope`.
         // A producer that hasn't delivered (still running, or failing) has
         // checked nothing — its silence is not "no issues".
         if let delivered = deliveredProducers {

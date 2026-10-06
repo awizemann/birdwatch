@@ -43,7 +43,7 @@ struct OnboardingView: View {
                 .kerning(-0.3)
                 .accessibilityAddTraits(.isHeader)
 
-            Text("Birdwatch watches the system services that run iCloud and shows you what they're doing — sync progress, files in transit, issues, and diagnostics — all in one place.")
+            Text("Birdwatch watches the system services that run iCloud and shows you what they're doing — sync activity, files in transit, issues, and diagnostics — all in one place.")
                 .scaledFont(size: 13.5)
                 .foregroundStyle(Surface.fg2)
                 .multilineTextAlignment(.center)
@@ -72,10 +72,10 @@ struct OnboardingView: View {
     }
 
     private let sources: [(String, String)] = [
-        ("brctl · bird", "CloudDocs sync engine"),
-        ("cloudd", "CloudKit status and counts"),
-        ("fileproviderd", "Third-party sync domains"),
-        ("NSMetadataQuery", "Per-file transfer progress"),
+        ("brctl · bird", "iCloud Drive engine state and quota"),
+        ("FSEvents", "Which iCloud Drive files are moving"),
+        ("log · cloudd", "CloudKit activity in the system log"),
+        ("ps · nettop", "Daemon load and estimated traffic"),
     ]
 
     private var grantAccess: some View {
@@ -85,7 +85,7 @@ struct OnboardingView: View {
                 .kerning(-0.3)
                 .accessibilityAddTraits(.isHeader)
 
-            Text("Birdwatch runs outside the App Sandbox and needs Full Disk Access to read iCloud's sync state. Your files and sync data never leave your Mac; anonymous usage counts do, and Diagnostics has the switch to turn that off.")
+            Text("Birdwatch runs outside the App Sandbox and asks for Full Disk Access so it can also watch Desktop & Documents, which macOS protects. Without it, most of Birdwatch still works and those folders are left alone. Your files and sync data never leave your Mac; anonymous usage counts do, and Diagnostics has the switch to turn that off.")
                 .scaledFont(size: 13.5)
                 .foregroundStyle(Surface.fg2)
                 .multilineTextAlignment(.center)
@@ -161,7 +161,7 @@ struct OnboardingView: View {
                     Button("Continue without Full Disk Access") { finish() }
                         .buttonStyle(.link)
                         .scaledFont(size: 12.5, weight: .semibold)
-                    Text("Some sync details may be missing. Diagnostics shows whether access is granted, and you can re-run setup from there.")
+                    Text("Desktop & Documents won't be watched. Diagnostics shows whether access is granted, and you can re-run setup from there.")
                         .scaledFont(size: 11.5)
                         .foregroundStyle(Surface.fg3)
                         .multilineTextAlignment(.center)

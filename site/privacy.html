@@ -26,7 +26,7 @@
 
 <div class="doc">
   <h1>Privacy</h1>
-  <p class="updated">Last updated August 18, 2026</p>
+  <p class="updated">Last updated October 6, 2026</p>
 
   <p>
     Birdwatch is a local diagnostic tool. It reads the state of the iCloud sync daemons already
@@ -45,13 +45,54 @@
   <p>
     So we know which parts of Birdwatch are actually used, the app sends a small number of
     usage events to our own analytics endpoint (<code>api.swiftstats.co</code>, run by us with
-    the open-source <a href="https://github.com/awizemann/swift-stats">swift-stats</a>). What
-    is sent: which screen was opened, which action was taken (for example “monitoring paused”
-    or “daemon restarted”, and whether it succeeded), coarse counts such as “2–5 issues”, the
-    Birdwatch version, the macOS version, device model and locale, and a random install
-    identifier that is hashed before it leaves your Mac and cannot be tied to you, your Apple
-    ID or your hardware.
+    the open-source <a href="https://github.com/awizemann/swift-stats">swift-stats</a>). This
+    is the complete list of what is sent:
   </p>
+  <ul>
+    <li><strong>Every event</strong> carries its name, the time it happened, its position in
+      the session, a random session ID, and a random install identifier that is hashed (SHA-256,
+      salted) before it leaves your Mac and cannot be tied to you, your Apple ID or your
+      hardware.</li>
+    <li><strong>Sent automatically by swift-stats:</strong> the app opening
+      (<code>app_open</code>), and the start and end of each session (<code>session_start</code>,
+      <code>session_end</code> with the session's length in seconds).</li>
+    <li><strong>Birdwatch's own events</strong>, each with only the details listed:
+      <ul>
+        <li>a screen opened — which screen, and how you got there (at launch, sidebar,
+          keyboard shortcut, search, menu bar, or a link);</li>
+        <li>an app's detail page opened — only its sync backend (CloudDocs, CloudKit or File
+          Provider), never the app;</li>
+        <li>the menu-bar popover opened — how many issues (as a range) and whether monitoring
+          was paused;</li>
+        <li>a search result chosen — whether it was an app or a screen, and how many results
+          (as a range), never the search text;</li>
+        <li>refresh, monitoring paused or resumed, and notifications marked read — no
+          details;</li>
+        <li>an app muted or unmuted — its sync backend and the new setting;</li>
+        <li>an issue dismissed — its severity (warning, conflict or error);</li>
+        <li>a conflict resolved — whether you kept the current version or another one;</li>
+        <li>a stuck item revealed in Finder or moved to the Trash — for the Trash, whether it
+          worked;</li>
+        <li>a maintenance action — which one (restart a daemon, or the <code>brctl
+          diagnose</code> copy / Open Terminal buttons), which daemon (<code>bird</code>,
+          <code>cloudd</code> or <code>fileproviderd</code>), whether it worked, and for a
+          failure only its kind (for example “daemon not running”);</li>
+        <li>your plan size set or cleared — only which of the two, never the size;</li>
+        <li>setup finished — whether Full Disk Access was granted and notifications
+          requested;</li>
+        <li>once per session, a health summary — how many apps use each sync backend and how
+          many issues are open (each as a range), how many of the three sync daemons weren't
+          running, and whether Full Disk Access and notifications are allowed.</li>
+      </ul>
+      Ranges are 0, 1, 2–5, 6–20 and 20+. The source of truth is
+      <a href="https://github.com/awizemann/birdwatch/blob/main/Birdwatch/Analytics/UsageEvent.swift">UsageEvent.swift</a>:
+      an event or detail that isn't in that file isn't sent.</li>
+    <li><strong>With each batch of events:</strong> the swift-stats version; Birdwatch's
+      version, build number and bundle ID; the OS name and version; the Mac model and CPU
+      architecture; your language and region settings; and whether the build is a debug or
+      TestFlight build. Screen-size fields are always sent as placeholder values (0 × 0 at
+      scale 1) — Birdwatch doesn't fill them in.</li>
+  </ul>
   <p>
     What is never sent: file or folder names, paths, app names, device names, storage sizes,
     log lines, search text, your iCloud account, or anything typed. There is no advertising
@@ -79,24 +120,38 @@
   <h2>Network activity</h2>
   <p>
     Apart from the two things above — usage counts and update checks — Birdwatch makes no
-    network requests. It reads local system state — daemon status, log output, and sync
-    metadata already present on disk and in memory — through system APIs such as
-    <code>brctl</code>, <code>NSMetadataQuery</code>, and <code>log stream</code>. Any network
+    network requests. It reads local system state — daemon status, log output, and file
+    metadata already present on your Mac — through system tools and APIs such as
+    <code>brctl</code>, <code>log</code>, <code>ps</code>, <code>nettop</code> and file-system
+    events. Any network
     activity you see reflected in the app (like estimated bandwidth) belongs to macOS's own
     iCloud daemons, not to Birdwatch.
   </p>
 
   <h2>What it reads, specifically</h2>
   <ul>
-    <li>Sync status and progress from the CloudDocs daemon (<code>bird</code>)</li>
-    <li>Sync status and item counts from the CloudKit daemon (<code>cloudd</code>)</li>
-    <li>Domain status from File Provider extensions (<code>fileproviderd</code>)</li>
+    <li>Sync engine state, remaining quota and retry queue from the CloudDocs daemon
+      (<code>bird</code>), via <code>brctl</code></li>
+    <li>Which iCloud Drive files are uploading or downloading, from file-system events and
+      the files' own iCloud flags</li>
+    <li>CloudKit activity in the system log — which apps synced, and when</li>
+    <li>The File Provider apps listed in <code>~/Library/CloudStorage</code></li>
     <li>System log output for these daemons, streamed locally</li>
-    <li>CPU and memory usage of these daemons, sampled locally</li>
+    <li>CPU, memory and network byte counts of these daemons, sampled locally (the network
+      counts feed the estimated bandwidth view)</li>
+    <li>The sizes of iCloud files stored on this Mac, for the Storage view</li>
+    <li>To check whether Full Disk Access is granted, Birdwatch opens one of these files and
+      closes it again without reading anything from it, stopping at the first that opens:
+      Safari's <code>CloudTabs.db</code>, <code>Bookmarks.plist</code> and
+      <code>History.db</code> in <code>~/Library/Safari</code>, Messages'
+      <code>~/Library/Messages/chat.db</code>, and the system privacy database
+      (<code>/Library/Application Support/com.apple.TCC/TCC.db</code>). Their contents are never
+      read.</li>
   </ul>
   <p>
-    None of this leaves your Mac. Full Disk Access is required to read it, which is why
-    Birdwatch asks for that permission on first launch.
+    None of this leaves your Mac. Birdwatch asks for Full Disk Access on first launch so it
+    can also watch your Desktop and Documents folders, which macOS protects; without it,
+    Birdwatch doesn't watch or measure those two folders.
   </p>
 
   <h2>Questions</h2>

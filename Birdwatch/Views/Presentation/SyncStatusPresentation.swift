@@ -41,7 +41,7 @@ struct SyncStatusDisplay: Equatable {
                 label = "Syncing…"
                 bar = .indeterminate
             } else {
-                label = "Syncing \(Int((progress * 100).rounded()))%"
+                label = "Syncing \(Format.percent(progress))"
                 bar = .determinate(progress)
             }
             showsSpinner = true
@@ -211,7 +211,7 @@ enum PopoverSummary {
 
     /// "1 issue needs attention" / "3 issues need attention".
     static func issuesLine(count: Int) -> String {
-        count == 1 ? "1 issue needs attention" : "\(count) issues need attention"
+        "\(Plural.count(count, "issue")) \(count == 1 ? "needs" : "need") attention"
     }
 }
 
@@ -242,9 +242,9 @@ enum AppDetailFacts {
         if app.needsFullDiskAccess { return ("Items", notWatched) }
         switch app.itemCount {
         case .indexed(let count):
-            return ("Items indexed", "\(count.formatted()) item\(count == 1 ? "" : "s")")
+            return ("Items indexed", Plural.count(count, "item"))
         case .topLevel(let count, let isCapped):
-            let value = isCapped ? "\(count.formatted())+ items" : "\(count.formatted()) item\(count == 1 ? "" : "s")"
+            let value = isCapped ? "\(count.formatted())+ items" : Plural.count(count, "item")
             return ("Top-level items", value)
         case nil:
             return ("Items", notReported(app))
@@ -254,7 +254,7 @@ enum AppDetailFacts {
     static func pendingValue(_ app: AppSyncState) -> String {
         if app.needsFullDiskAccess { return notWatched }
         guard let pending = app.pendingItems else { return notReported(app) }
-        return pending == 0 ? "None" : "\(pending.formatted()) item\(pending == 1 ? "" : "s")"
+        return pending == 0 ? "None" : Plural.count(pending, "item")
     }
 
     static func localSizeValue(_ app: AppSyncState) -> String {
@@ -296,8 +296,8 @@ enum LocalSizeText {
 extension DriveFolder {
     var itemCountText: String {
         guard let itemCount else { return "Not readable" }
-        if itemCountIsCapped { return "\(itemCount)+ items" }
-        return "\(itemCount) item\(itemCount == 1 ? "" : "s")"
+        if itemCountIsCapped { return "\(itemCount.formatted())+ items" }
+        return Plural.count(itemCount, "item")
     }
 }
 
@@ -345,23 +345,34 @@ enum DriveFolderDisplay {
 
 // MARK: - Small shared wording helpers
 
-enum Plural {
-    /// "1 app", "3 apps".
-    static func count(_ n: Int, _ noun: String) -> String {
-        "\(n) \(noun)\(n == 1 ? "" : "s")"
+/// English count phrases. The one place a noun agrees with its number, so no
+/// screen hand-builds a `n == 1 ? "" : "s"` ternary (and none ships "1 apps").
+/// The number is locale-grouped ("1,234 items"). Nonisolated: data sources
+/// build user-facing reasons with it off the main actor.
+nonisolated enum Plural {
+    /// "1 app", "3 apps", "2 directories" (pass `plural` for irregular nouns).
+    static func count(_ n: Int, _ singular: String, plural: String? = nil, locale: Locale = .current) -> String {
+        "\(n.formatted(.number.locale(locale))) \(word(n, singular, plural: plural))"
+    }
+
+    /// The noun alone, agreeing with `n`: "item" / "items".
+    static func word(_ n: Int, _ singular: String, plural: String? = nil) -> String {
+        n == 1 ? singular : (plural ?? singular + "s")
     }
 }
 
-enum Age {
+nonisolated enum Age {
     /// "45s", "12m", "3h", "2d" — the same compact style as the CloudKit
-    /// status lines ("Last synced 12m ago").
-    static func compact(_ seconds: TimeInterval) -> String {
-        let s = max(0, Int(seconds))
+    /// status lines ("Last synced 12m ago"), truncated to whole units and
+    /// written in the locale's narrow unit style.
+    static func compact(_ seconds: TimeInterval, locale: Locale = .current) -> String {
+        guard seconds.isFinite else { return "—" }
+        let s = Int(min(max(0, seconds), Format.maxCompactSeconds))
         switch s {
-        case ..<60: return "\(s)s"
-        case ..<3_600: return "\(s / 60)m"
-        case ..<86_400: return "\(s / 3_600)h"
-        default: return "\(s / 86_400)d"
+        case ..<60: return Format.compactUnit(s, .seconds, locale: locale)
+        case ..<3_600: return Format.compactUnit(s / 60, .minutes, locale: locale)
+        case ..<86_400: return Format.compactUnit(s / 3_600, .hours, locale: locale)
+        default: return Format.compactUnit(s / 86_400, .days, locale: locale)
         }
     }
 }

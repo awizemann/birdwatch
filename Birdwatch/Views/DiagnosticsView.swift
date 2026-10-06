@@ -7,11 +7,11 @@ private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", cat
 private struct ConfirmAction: Identifiable {
     let title: String
     let command: String
-    /// The consequence sentence. Defaulted to the sync-state wording; a Trash
-    /// action overrides it, because "this can't be undone" is simply false for
-    /// something recoverable from the Trash and would scare a user out of the
-    /// one safe cleanup the app offers.
-    var detail = "This can't be undone. Your files stay safe in iCloud — only local sync state is affected."
+    /// The consequence sentence, specific to the action: a daemon restart
+    /// says what SIGTERM + launchd respawn does (`RestartCopy`); a Trash
+    /// action says the item stays recoverable. No shared default — a generic
+    /// "can't be undone" line was false for both.
+    let detail: String
     /// Focus-restoration identity. Distinct from `title` because two retry rows
     /// can legitimately share the same human title ("Move .bin file to Trash")
     /// while needing different buttons to regain focus.
@@ -105,7 +105,7 @@ struct DiagnosticsView: View {
             SectionLabel(text: "System Access")
             systemAccessCard
 
-            SourceFootnote(text: "Daemon stats via proc_pid_rusage · engine state, retry queue, budgets and item counts via brctl dump -i · Desktop & Documents setting via brctl status")
+            SourceFootnote(text: "Daemon CPU and memory sampled with ps · engine state, retry queue, budgets and item counts via brctl dump -i · Desktop & Documents setting via brctl status")
         }
         // The three transient-status timers are the only tasks this screen
         // owns, and they outlive it: each sleeps 10s before clearing a line
@@ -256,7 +256,7 @@ struct DiagnosticsView: View {
                 MiniProgressBar(progress: daemon.cpuPercent / 100, tint: cpuTint(daemon.cpuPercent), label: "\(daemon.name) CPU")
                     .frame(maxWidth: 140)
 
-                Text("\(Int(daemon.cpuPercent))% CPU")
+                Text(Format.cpu(daemon.cpuPercent))
                     .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(Surface.fg)
                     .monospacedDigit()
@@ -266,7 +266,7 @@ struct DiagnosticsView: View {
                     .scaledFont(size: 11.5, weight: .semibold)
                     .foregroundStyle(cpuTint(daemon.cpuPercent))
 
-                Text("\(Int(daemon.memoryMB)) MB")
+                Text(Format.memory(megabytes: daemon.memoryMB))
                     .scaledFont(size: 12)
                     .foregroundStyle(Surface.fg2)
                     .monospacedDigit()
@@ -282,6 +282,7 @@ struct DiagnosticsView: View {
                 confirmAction = ConfirmAction(
                     title: "Restart \(name)",
                     command: MaintenanceActions.restartCommand(name: name),
+                    detail: RestartCopy.consequence(daemon: name),
                     perform: { run("Restart \(name)", daemon: UsageEvent.Daemon(rawValue: name)) { try await maintenance.restartDaemon(name: name) } }
                 )
             }
@@ -534,7 +535,7 @@ struct DiagnosticsView: View {
         let size = Format.size(bytes) + (item.sizeIsPartial ? "+" : "")
         guard let count = item.itemCount else { return size }
         if count == 0 { return "Empty folder" }
-        return "\(count) item\(count == 1 ? "" : "s") · \(size)"
+        return "\(Plural.count(count, "item")) · \(size)"
     }
 
     /// Why this row has no "Move to Trash" button, in the user's terms — or nil
@@ -769,6 +770,7 @@ struct DiagnosticsView: View {
                     confirmAction = ConfirmAction(
                         title: item.title,
                         command: item.command,
+                        detail: RestartCopy.consequence(daemon: item.daemon.rawValue),
                         perform: { run(item.title, daemon: item.daemon) { try await item.operation(maintenance) } }
                     )
                 } else {
@@ -824,7 +826,7 @@ struct DiagnosticsView: View {
                     Image(systemName: "info.circle")
                         .scaledFont(size: 12)
                         .foregroundStyle(Palette.accent)
-                    Text("Birdwatch runs outside the App Sandbox so it can read sync state from bird, cloudd and fileproviderd.")
+                    Text("Birdwatch runs outside the App Sandbox so it can read sync state from bird, cloudd and fileproviderd. Full Disk Access lets it also watch Desktop & Documents; without it, those two folders aren't watched or measured.")
                         .scaledFont(size: 12)
                         .foregroundStyle(Surface.fg2)
                         .fixedSize(horizontal: false, vertical: true)

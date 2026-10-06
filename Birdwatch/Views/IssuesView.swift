@@ -109,10 +109,10 @@ struct IssuesView: View {
             } else {
                 // A non-empty list can be incomplete for the same reasons.
                 ForEach(IssuesEmptyState.qualifiers(
-                    fullDiskAccess: store.fullDiskAccess, isPaused: store.isGloballyPaused,
+                    isPaused: store.isGloballyPaused,
                     deliveredProducers: store.deliveredIssueProducers,
                     conflictScanCap: store.conflictScanCap
-                ), id: \.self) { SourceFootnote(text: $0) }
+                ) + [IssuesEmptyState.conflictScope], id: \.self) { SourceFootnote(text: $0) }
                 ForEach(store.issues) { issue in
                     IssueCard(issue: issue)
                 }
@@ -123,7 +123,6 @@ struct IssuesView: View {
     private var emptyState: some View {
         // "No issues detected" plus whatever limits that answer (IssuesEmptyState).
         let state = IssuesEmptyState(
-            fullDiskAccess: store.fullDiskAccess,
             isPaused: store.isGloballyPaused,
             deliveredProducers: store.deliveredIssueProducers,
             conflictScanCap: store.conflictScanCap

@@ -340,8 +340,8 @@ enum AppContainerSource {
     /// actually counted, with a capped listing stated as a floor.
     nonisolated static func topLevelLine(_ container: Container) -> String {
         let count = container.itemCount
-        if container.itemCountIsCapped { return "\(count)+ top-level items" }
-        return "\(count) top-level item\(count == 1 ? "" : "s")"
+        if container.itemCountIsCapped { return "\(count.formatted())+ top-level items" }
+        return Plural.count(count, "top-level item")
     }
 
     /// Containers → `AppSyncState` rows, sorted active-first then by name.
@@ -363,7 +363,7 @@ enum AppContainerSource {
                 isApple: container.isApple,
                 status: syncing ? .syncing(progress: progress) : .upToDate,
                 statusLine: syncing
-                    ? "\(own.count) file\(own.count == 1 ? "" : "s") in transfer"
+                    ? "\(Plural.count(own.count, "file")) in transfer"
                     : topLevelLine(container),
                 lastActivity: container.lastModified,
                 // A shallow listing of the container, not an index of it.

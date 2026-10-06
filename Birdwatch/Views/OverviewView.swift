@@ -21,7 +21,7 @@ struct OverviewView: View {
                 activeTransfersColumn(active: active, paused: paused)
                 recentActivityColumn
             }
-            SourceFootnote(text: "Aggregated from brctl dump -i (bird engine state), FSEvents transfer flags, cloudd activity in the unified log and fileproviderd domain status.")
+            SourceFootnote(text: "Aggregated from brctl dump -i (bird engine state), FSEvents transfer flags and cloudd activity in the unified log. File Provider apps are listed from ~/Library/CloudStorage without sync status.")
         }
     }
 
@@ -89,7 +89,7 @@ struct OverviewView: View {
             StatTile(label: "Downloading", value: down.value, tint: Palette.success, caption: down.caption)
             StatTile(label: "Active apps", value: "\(activeCount)", tint: Surface.fg)
             let issues = IssuesTile.display(count: store.issueCount, qualifiers: IssuesEmptyState.qualifiers(
-                fullDiskAccess: store.fullDiskAccess, isPaused: store.isGloballyPaused,
+                isPaused: store.isGloballyPaused,
                 deliveredProducers: store.deliveredIssueProducers, conflictScanCap: store.conflictScanCap))
             StatTile(label: "Issues", value: issues.value,
                      tint: store.issueCount > 0 ? Palette.warning : Surface.fg, caption: issues.caption)
@@ -159,7 +159,7 @@ struct OverviewView: View {
             }
             Group {
                 switch display.bar {
-                case .determinate(let progress): Text("\(Int((progress * 100).rounded()))%")
+                case .determinate(let progress): Text(Format.percent(progress))
                 case .indeterminate: Text(Plural.count(pending, "file"))
                 case nil: EmptyView()
                 }
@@ -304,7 +304,7 @@ private struct ProgressRing: View {
             VStack(spacing: 1) {
                 switch ring {
                 case .percent(let progress):
-                    Text("\(Int((progress * 100).rounded()))%")
+                    Text(Format.percent(progress))
                         .scaledFont(size: 22, weight: .bold)
                         .foregroundStyle(Surface.fg)
                         .monospacedDigit()

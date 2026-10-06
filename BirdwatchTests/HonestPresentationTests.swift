@@ -454,34 +454,34 @@ struct HeadlineTests {
 
     @Test("Issues empty state: clean only when nothing limits the answer")
     func issuesEmptyClean() {
-        let clean = IssuesEmptyState(fullDiskAccess: .granted, isPaused: false,
+        let clean = IssuesEmptyState(isPaused: false,
                                      deliveredProducers: [.quota, .conflicts, .dump], conflictScanCap: nil)
         #expect(clean.title == "No issues detected")
         #expect(clean.isClean)
         #expect(!clean.lines.joined().contains("syncing normally"))
-        #expect(IssuesEmptyState(fullDiskAccess: .granted, isPaused: false,
+        #expect(clean.lines.last == IssuesEmptyState.conflictScope, "the scan's reach is stated even when clean")
+        #expect(IssuesEmptyState(isPaused: false,
                                  deliveredProducers: nil, conflictScanCap: nil).isClean, "fixture: everything delivered")
     }
 
-    @Test("Issues empty state names missing FDA, a paused monitor and a capped scan")
+    @Test("Issues empty state names a paused monitor and a capped scan")
     func issuesEmptyQualified() {
-        let state = IssuesEmptyState(fullDiskAccess: .denied, isPaused: true,
+        let state = IssuesEmptyState(isPaused: true,
                                      deliveredProducers: [.quota, .conflicts, .dump], conflictScanCap: 2_000)
         #expect(!state.isClean)
         #expect(state.lines.count == 3)
         #expect(state.lines.contains { $0.contains("paused") })
-        #expect(state.lines.contains { $0.contains("Full Disk Access") })
         #expect(state.lines.contains { $0.contains("2,000") })
-        #expect(!IssuesEmptyState(fullDiskAccess: .unknown, isPaused: false,
-                                  deliveredProducers: nil, conflictScanCap: nil).isClean)
+        #expect(state.lines.last == IssuesEmptyState.conflictScope)
     }
 
     @Test("Before the scans deliver, the empty state is not a green check")
     func issuesEmptyBeforeScans() {
-        let state = IssuesEmptyState(fullDiskAccess: .granted, isPaused: false,
+        let state = IssuesEmptyState(isPaused: false,
                                      deliveredProducers: [.quota], conflictScanCap: nil)
         #expect(!state.isClean)
-        #expect(state.lines == ["The conflict scan hasn't completed yet.", "Sync engine state hasn't been read yet."])
+        #expect(state.lines == ["The conflict scan hasn't completed yet.", "Sync engine state hasn't been read yet.",
+                                IssuesEmptyState.conflictScope])
     }
 
     @Test("Freshness is coarse and honest about never having loaded")

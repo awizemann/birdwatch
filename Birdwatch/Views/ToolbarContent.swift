@@ -108,7 +108,7 @@ struct SearchFieldView: View {
             .onChange(of: store.searchResults.count) { _, newCount in
                 selectedIndex = 0
                 if store.searchText.count >= 2 {
-                    let text = newCount == 0 ? "No results" : "\(newCount) result\(newCount == 1 ? "" : "s")"
+                    let text = newCount == 0 ? "No results" : Plural.count(newCount, "result")
                     AccessibilityNotification.Announcement(text).post()
                 }
             }

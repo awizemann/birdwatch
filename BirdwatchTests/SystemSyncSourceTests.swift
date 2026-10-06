@@ -127,7 +127,8 @@ struct SystemSyncSourceAssemblyTests {
         let fp = try #require(apps.first { $0.backend == .fileProvider })
         #expect(fp.id == "fp-googledrive-x")
         #expect(fp.name == "GoogleDrive")
-        #expect(fp.statusLine == "File Provider domain active")
+        // Only the folder is seen — the row must not claim a domain state.
+        #expect(fp.statusLine == "Sync status not reported")
     }
 
     // MARK: - CloudKit apps

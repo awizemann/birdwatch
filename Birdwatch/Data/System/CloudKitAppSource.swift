@@ -564,7 +564,7 @@ nonisolated enum CloudKitAppMapping {
         }
     }
 
-    static let calloutSuffix = "Status here is derived from cloudd's own log (container activity, operation types, throttling) — CloudKit exposes no public per-item or per-app progress API, so Birdwatch reports activity and recency, never a made-up percentage."
+    static let calloutSuffix = "Status here is derived from CloudKit's entries in the system log, up to the last 30 minutes (container activity, operation types, throttling) — CloudKit exposes no public per-item or per-app progress API, so Birdwatch reports activity and recency, never a made-up percentage."
 
     static func makeApp(
         activity: CloudKitAppActivity, bundleID: String, displayName: String, now: Date
@@ -587,7 +587,7 @@ nonisolated enum CloudKitAppMapping {
             pendingItems: nil,
             localSize: nil,
             locationPath: "",
-            infoCallout: "\(displayName) syncs through CloudKit in \(activity.containers.count) container\(activity.containers.count == 1 ? "" : "s") (\(containerList)). \(calloutSuffix)"
+            infoCallout: "\(displayName) syncs through CloudKit in \(Plural.count(activity.containers.count, "container")) (\(containerList)). \(calloutSuffix)"
         )
     }
 }

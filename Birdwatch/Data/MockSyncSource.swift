@@ -78,7 +78,7 @@ struct MockSyncSource: SyncSource {
                 itemCount: .indexed(48_213), pendingItems: 790, localSize: LocalSize(bytes: 84_300_000_000),
                 locationPath: "~/Pictures/Photos Library.photoslibrary",
                 queueLabels: ["Photos", "Videos", "Shared albums"], queueCounts: [612, 158, 20],
-                infoCallout: "Photos syncs through CloudKit, which reports status and item counts but has no per-item progress API. Percentages here are derived from queue counts."
+                infoCallout: "Photos syncs through CloudKit, which has no public per-item progress API. This is sample data — on a real Mac, Birdwatch shows CloudKit activity from the system log, never a percentage."
             ),
             AppSyncState(
                 id: "desktop-documents", name: "Desktop & Documents", tileColorHex: "ffa62b", backend: .cloudDocs, isApple: true,
@@ -204,7 +204,7 @@ struct MockSyncSource: SyncSource {
             id: "issue-conflict", severity: .conflict,
             title: "Sync conflict in Documents",
             meta: "Q3 Report.pages · 26 minutes ago",
-            reason: "This file was edited on two devices at the same time, so iCloud kept both versions instead of guessing. Review them and choose which to keep — nothing has been lost.",
+            reason: "iCloud kept one version as the current file and saved the others for you to choose from. Review them and choose which to keep.",
             action: .reviewVersions, symbolName: "doc.on.doc"
         ),
         IssueItem(

@@ -4,13 +4,6 @@ import os
 
 private let detailLogger = Logger(subsystem: "com.wizemann.birdwatch", category: "AppDetail")
 
-/// Allocated once — never in body.
-private let logTimestampFormatter: DateFormatter = {
-    let f = DateFormatter()
-    f.dateFormat = "HH:mm:ss"
-    return f
-}()
-
 struct AppDetailView: View {
     @Environment(SyncStore.self) private var store
     let appID: String
@@ -138,7 +131,7 @@ struct AppDetailView: View {
             // are tiny, so this is the on-disk footprint, not the cloud size.
             InfoTile(label: "On this Mac", value: AppDetailFacts.localSizeValue(app))
             InfoTile(label: "Sync daemon",
-                     value: daemon.map { "\($0.name) · \(Int($0.cpuPercent))% CPU" } ?? app.backend.daemonName,
+                     value: daemon.map { "\($0.name) · \(Format.cpu($0.cpuPercent))" } ?? app.backend.daemonName,
                      monospaced: true)
             InfoTile(label: "Progress detail", value: app.backend.progressDetail)
         }
@@ -212,7 +205,7 @@ struct AppDetailView: View {
                                     .monospaced()
                                     .foregroundStyle(Surface.fg)
                                 Spacer()
-                                Text("\(Int(daemon.cpuPercent))% CPU · \(healthLabel(daemon.cpuPercent))")
+                                Text("\(Format.cpu(daemon.cpuPercent)) · \(healthLabel(daemon.cpuPercent))")
                                     .scaledFont(size: 12, weight: .semibold)
                                     .foregroundStyle(cpuTint(daemon.cpuPercent))
                                     .monospacedDigit()
@@ -264,7 +257,7 @@ struct AppDetailView: View {
         case .cloudKit:
             "Data source: cloudd activity in the unified log (last 30 min) — no per-item progress or counts."
         case .fileProvider:
-            "Data source: fileproviderd domain status — File Provider reports domain-level status only."
+            "Data source: the app's folder in ~/Library/CloudStorage and fileproviderd's live log — Birdwatch doesn't read File Provider sync status."
         }
         return source + " macOS offers no supported command to force a sync, so that control isn't offered here."
     }
@@ -352,7 +345,7 @@ private struct TransferRow: View {
     private var statusText: String {
         if item.isDone { return "Done" }
         if item.isIndeterminate { return item.direction == .upload ? "Uploading…" : "Downloading…" }
-        return "\(Int((item.progress * 100).rounded()))%"
+        return Format.percent(item.progress)
     }
 }
 
@@ -444,7 +437,7 @@ private struct LiveLogConsole: View {
                 }
                 ForEach(lines) { line in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(logTimestampFormatter.string(from: line.date))
+                        Text(Format.clockTime(line.date))
                             .scaledFont(size: 11)
                             .monospaced()
                             .foregroundStyle(dimText) // ≥4.5:1 on the #0b0b0f console

@@ -54,9 +54,9 @@ struct ConflictResolutionView: View {
 
                 Button {
                     resolve(detail, keeping: ConflictSource.keepBothVersionID,
-                            success: "Kept both versions of \(detail.fileName)")
+                            success: "Kept \(detail.versions.count > 2 ? "all" : "both") versions of \(detail.fileName)")
                 } label: {
-                    Text("Keep both versions")
+                    Text(ConflictCopy.keepAllButton(versionCount: detail.versions.count))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -182,10 +182,10 @@ struct ConflictResolutionView: View {
                     Text("\(detail.fileName) has a sync conflict")
                         .scaledFont(size: 14, weight: .bold)
                         .foregroundStyle(Surface.fg)
-                    Text("\(detail.location) · edited on two devices at once")
+                    Text(ConflictCopy.subtitle(location: detail.location, versionCount: detail.versions.count))
                         .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(Surface.fg2)
-                    Text("iCloud kept both versions so nothing is lost. Choose which one to keep — or keep both and Birdwatch will rename one.")
+                    Text(ConflictCopy.explanation(versionCount: detail.versions.count))
                         .scaledFont(size: 13)
                         .lineSpacing(4)
                         .foregroundStyle(Surface.fg2)

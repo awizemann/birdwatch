@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Birdwatch — See what iCloud is actually doing</title>
-<meta name="description" content="Birdwatch is a macOS menu-bar and window app that shows exactly what iCloud sync is doing: per-app status, live daemon logs, file transfers, and honest diagnostics.">
+<meta name="description" content="Birdwatch is a macOS menu-bar and window app that shows what iCloud sync is doing: per-app activity, files in transit, live daemon logs, and honest diagnostics — with every estimate labeled.">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -29,9 +29,11 @@
     <h1>Birdwatch</h1>
     <p class="pitch">See what iCloud is actually doing.</p>
     <p class="sub">
-      macOS hides almost everything about how iCloud sync works. Birdwatch reads the same
-      system daemons Apple uses internally and shows you the real picture — per-app status,
-      files in transit, and what's actually going wrong — in a window or from the menu bar.
+      macOS hides almost everything about how iCloud sync works. Birdwatch reads what the
+      sync daemons themselves report — through <code>brctl</code>, the system log and the file
+      system — and shows you per-app activity, files in transit, and what's going wrong, in a
+      window or from the menu bar. Where macOS gives no number, Birdwatch says so — and it
+      labels every estimate as one.
     </p>
     <div class="hero-actions">
       <a class="btn btn-primary" href="#download">Download for macOS</a>
@@ -93,24 +95,26 @@
         <!-- content: hero ring card -->
         <rect x="196" y="60" width="330" height="150" rx="12" fill="var(--card)" stroke="var(--cardline)" stroke-width="1"/>
         <circle cx="270" cy="135" r="46" fill="none" stroke="var(--hover)" stroke-width="10"/>
-        <circle cx="270" cy="135" r="46" fill="none" stroke="url(#ring)" stroke-width="10" stroke-dasharray="180 289" stroke-linecap="round" transform="rotate(-90 270 135)"/>
-        <text x="270" y="131" text-anchor="middle" font-size="15" font-weight="700" fill="var(--fg)" font-family="-apple-system,Helvetica,Arial,sans-serif">62%</text>
-        <text x="270" y="144" text-anchor="middle" font-size="8" font-weight="700" letter-spacing="0.5" fill="var(--fg3)" font-family="-apple-system,Helvetica,Arial,sans-serif">SYNCED</text>
+        <!-- indeterminate: macOS reports these files as in flight, with no percentage -->
+        <circle cx="270" cy="135" r="46" fill="none" stroke="url(#ring)" stroke-width="10" stroke-dasharray="72 289" stroke-linecap="round" transform="rotate(30 270 135)"/>
+        <text x="270" y="133" text-anchor="middle" font-size="17" font-weight="700" fill="var(--fg2)" font-family="-apple-system,Helvetica,Arial,sans-serif">↻</text>
+        <text x="270" y="147" text-anchor="middle" font-size="8" font-weight="700" letter-spacing="0.5" fill="var(--fg3)" font-family="-apple-system,Helvetica,Arial,sans-serif">SYNCING</text>
 
-        <circle cx="340" cy="90" r="4" fill="var(--accent)"/>
-        <text x="350" y="94" font-size="13" font-weight="700" fill="var(--fg)" font-family="-apple-system,Helvetica,Arial,sans-serif">Syncing 3 apps</text>
-        <text x="340" y="112" font-size="10.5" fill="var(--fg2)" font-family="-apple-system,Helvetica,Arial,sans-serif">158 files remaining · about 4 minutes left</text>
+        <!-- the title the app shows for this state: 3 files in flight, plus Photos active without progress -->
+        <circle cx="338" cy="90" r="4" fill="var(--accent)"/>
+        <text x="346" y="94" font-size="10" font-weight="700" fill="var(--fg)" font-family="-apple-system,Helvetica,Arial,sans-serif">Syncing 3 files · activity in 1 more</text>
+        <text x="340" y="112" font-size="10.5" fill="var(--fg2)" font-family="-apple-system,Helvetica,Arial,sans-serif">macOS gives no percentage</text>
         <rect x="340" y="130" width="166" height="6" rx="3" fill="var(--hover)"/>
-        <rect x="340" y="130" width="103" height="6" rx="3" fill="url(#ring)"/>
+        <rect x="380" y="130" width="50" height="6" rx="3" fill="url(#ring)"/>
 
         <!-- stat tiles -->
         <g font-family="-apple-system,Helvetica,Arial,sans-serif">
           <rect x="196" y="222" width="150" height="66" rx="10" fill="var(--card)" stroke="var(--cardline)" stroke-width="1"/>
-          <text x="212" y="252" font-size="18" font-weight="700" fill="var(--accent)">4</text>
+          <text x="212" y="252" font-size="18" font-weight="700" fill="var(--accent)">18.4 MB</text>
           <text x="212" y="270" font-size="9" font-weight="600" fill="var(--fg2)">UPLOADING</text>
 
           <rect x="356" y="222" width="150" height="66" rx="10" fill="var(--card)" stroke="var(--cardline)" stroke-width="1"/>
-          <text x="372" y="252" font-size="18" font-weight="700" fill="#34c759">2</text>
+          <text x="372" y="252" font-size="18" font-weight="700" fill="#34c759">6.1 MB</text>
           <text x="372" y="270" font-size="9" font-weight="600" fill="var(--fg2)">DOWNLOADING</text>
         </g>
 
@@ -118,29 +122,29 @@
         <rect x="196" y="304" width="310" height="150" rx="12" fill="var(--card)" stroke="var(--cardline)" stroke-width="1"/>
         <text x="212" y="326" font-size="11" font-weight="700" fill="var(--fg)" font-family="-apple-system,Helvetica,Arial,sans-serif">Active transfers</text>
         <g font-family="-apple-system,Helvetica,Arial,sans-serif">
-          <rect x="212" y="338" width="20" height="20" rx="6" fill="#fe4f6d"/>
-          <text x="240" y="351" font-size="10.5" fill="var(--fg)">Photos</text>
+          <rect x="212" y="338" width="20" height="20" rx="6" fill="#ffa62b"/>
+          <text x="240" y="351" font-size="10.5" fill="var(--fg)">Desktop &amp; Docs</text>
           <rect x="330" y="345" width="120" height="4" rx="2" fill="var(--hover)"/>
-          <rect x="330" y="345" width="37" height="4" rx="2" fill="#fe4f6d"/>
-          <text x="460" y="351" font-size="9.5" fill="var(--fg2)">31%</text>
+          <rect x="356" y="345" width="40" height="4" rx="2" fill="#ffa62b"/>
+          <text x="460" y="351" font-size="9.5" fill="var(--fg2)">2 files</text>
 
-          <rect x="212" y="370" width="20" height="20" rx="6" fill="#ffa62b"/>
-          <text x="240" y="383" font-size="10.5" fill="var(--fg)">Desktop &amp; Docs</text>
+          <rect x="212" y="370" width="20" height="20" rx="6" fill="#0a84ff"/>
+          <text x="240" y="383" font-size="10.5" fill="var(--fg)">iCloud Drive</text>
           <rect x="330" y="377" width="120" height="4" rx="2" fill="var(--hover)"/>
-          <rect x="330" y="377" width="82" height="4" rx="2" fill="#ffa62b"/>
-          <text x="460" y="383" font-size="9.5" fill="var(--fg2)">68%</text>
+          <rect x="390" y="377" width="40" height="4" rx="2" fill="#0a84ff"/>
+          <text x="460" y="383" font-size="9.5" fill="var(--fg2)">1 file</text>
 
-          <rect x="212" y="402" width="20" height="20" rx="6" fill="#1a73e8"/>
-          <text x="240" y="415" font-size="10.5" fill="var(--fg)">1Password</text>
-          <rect x="330" y="409" width="120" height="4" rx="2" fill="var(--hover)"/>
-          <rect x="330" y="409" width="14" height="4" rx="2" fill="#1a73e8"/>
-          <text x="460" y="415" font-size="9.5" fill="var(--fg2)">12%</text>
+          <rect x="212" y="402" width="20" height="20" rx="6" fill="#fe4f6d"/>
+          <text x="240" y="415" font-size="10.5" fill="var(--fg)">Photos</text>
+          <text x="330" y="415" font-size="9.5" fill="var(--fg2)">Active — no progress reported</text>
         </g>
 
         <!-- log console -->
         <rect x="522" y="304" width="316" height="150" rx="12" fill="#0b0b0f" stroke="var(--cardline)" stroke-width="1"/>
-        <circle cx="538" cy="320" r="3" fill="#34c759"/>
-        <text x="548" y="323" font-size="9" font-family="ui-monospace,Menlo,monospace" fill="#9a9aa0">brctl log -w --shorten</text>
+        <text x="538" y="323" font-size="9" font-family="ui-monospace,Menlo,monospace" fill="#9a9aa0">log stream · com.apple.clouddocs</text>
+        <!-- the app's stream-state pill: dot + "live" -->
+        <circle cx="796" cy="320" r="3" fill="#34c759"/>
+        <text x="803" y="323" font-size="8.5" font-weight="700" font-family="-apple-system,Helvetica,Arial,sans-serif" fill="#34c759">live</text>
         <g font-family="ui-monospace,Menlo,monospace" font-size="8.5">
           <text x="538" y="342" fill="#68686e">09:41:02</text>
           <rect x="596" y="334" width="26" height="11" rx="3" fill="#34c759" opacity="0.25"/>
@@ -148,23 +152,25 @@
           <text x="628" y="342" fill="#c8c8cc">sync item complete</text>
 
           <text x="538" y="360" fill="#68686e">09:41:04</text>
-          <rect x="596" y="352" width="26" height="11" rx="3" fill="#ff9f0a" opacity="0.25"/>
-          <text x="601" y="360.5" fill="#ff9f0a" font-size="7">WARN</text>
-          <text x="628" y="360" fill="#c8c8cc">retry attempt 3</text>
+          <rect x="596" y="352" width="26" height="11" rx="3" fill="#34c759" opacity="0.25"/>
+          <text x="601" y="360.5" fill="#34c759" font-size="7">INFO</text>
+          <text x="628" y="360" fill="#c8c8cc">scheduling sync-up</text>
 
           <text x="538" y="378" fill="#68686e">09:41:07</text>
-          <rect x="596" y="370" width="26" height="11" rx="3" fill="#8e8e93" opacity="0.25"/>
-          <text x="601" y="378.5" fill="#9a9aa0" font-size="7">DBG</text>
-          <text x="628" y="378" fill="#c8c8cc">metadata refresh</text>
+          <rect x="596" y="370" width="26" height="11" rx="3" fill="#ff453a" opacity="0.25"/>
+          <text x="603" y="378.5" fill="#ff453a" font-size="7">ERR</text>
+          <text x="628" y="378" fill="#c8c8cc">upload failed, will retry</text>
 
           <text x="538" y="396" fill="#68686e">09:41:09</text>
           <rect x="596" y="388" width="26" height="11" rx="3" fill="#34c759" opacity="0.25"/>
           <text x="601" y="396.5" fill="#34c759" font-size="7">INFO</text>
           <text x="628" y="396" fill="#c8c8cc">upload started</text>
+
+          <text x="538" y="414" fill="#68686e">09:41:12</text>
+          <rect x="596" y="406" width="26" height="11" rx="3" fill="#34c759" opacity="0.25"/>
+          <text x="601" y="414.5" fill="#34c759" font-size="7">INFO</text>
+          <text x="628" y="414" fill="#c8c8cc">sync item complete</text>
         </g>
-        <rect x="538" y="415" width="284" height="24" rx="6" fill="rgba(255,255,255,.04)"/>
-        <circle cx="550" cy="427" r="3" fill="#ff453a"/>
-        <text x="562" y="430" font-size="8.5" font-family="ui-monospace,Menlo,monospace" fill="#9a9aa0">streaming live…</text>
       </svg>
     </div>
   </div>
@@ -182,29 +188,29 @@
       <div class="card">
         <div class="tile" style="background:#5e5ce6">▦</div>
         <h3>Per-app sync status</h3>
-        <p>See exactly what's syncing across CloudDocs, CloudKit, and File Provider apps — with honest fidelity labels for what each backend actually exposes.</p>
+        <p>iCloud Drive and its app folders, CloudKit apps seen syncing in the system log, and File Provider apps — each labeled with what its backend actually lets Birdwatch see.</p>
         <span class="badge badge-purple">CloudDocs · CloudKit · File Provider</span>
       </div>
       <div class="card">
         <div class="tile" style="background:#1c1c1e">▤</div>
         <h3>Live daemon log</h3>
-        <p>A real console streaming <code>brctl log</code> and <code>log stream</code> output for the daemon behind whatever app you're looking at — no polling, no guesswork.</p>
+        <p>A console streaming <code>log stream</code> output for whatever app you're looking at, as it happens: iCloud Drive's log (<code>com.apple.clouddocs</code>, from any process that writes to it), or the <code>cloudd</code> or <code>fileproviderd</code> process.</p>
       </div>
       <div class="card">
         <div class="tile" style="background:#0a84ff">⇅</div>
         <h3>Files in transfer</h3>
-        <p>For CloudDocs apps, watch individual files move with real per-file download and upload progress, straight from <code>NSMetadataQuery</code>.</p>
-        <span class="badge badge-blue">Exact % for CloudDocs</span>
+        <p>See which iCloud Drive files are uploading or downloading, with their names, folders and sizes. macOS only says whether a file is in flight, not how far along it is — so Birdwatch shows an in-progress bar, never a made-up percentage.</p>
+        <span class="badge badge-blue">In flight or done — no fake %</span>
       </div>
       <div class="card">
         <div class="tile" style="background:#ff9f0a">▲</div>
         <h3>Issues, explained</h3>
-        <p>Stalled uploads, low storage, and sync conflicts described in plain language — plus a built-in flow to review and resolve conflicting file versions.</p>
+        <p>Items stuck in bird's upload queue, low storage, bird's own error reports, and file conflicts in iCloud Drive (not yet in Desktop &amp; Documents or apps' own folders) — in plain language, with a flow to review and resolve conflicting versions.</p>
       </div>
       <div class="card">
         <div class="tile" style="background:#ff453a">◈</div>
         <h3>Diagnostics</h3>
-        <p>CPU and memory for <code>bird</code>, <code>cloudd</code>, and <code>fileproviderd</code>, retry-queue health, and one-click maintenance actions like restarting a daemon.</p>
+        <p>CPU and memory for <code>bird</code>, <code>cloudd</code>, and <code>fileproviderd</code>, sync-engine state, the retry queue, and a confirmed daemon restart (macOS relaunches the daemon itself).</p>
       </div>
       <div class="card">
         <div class="tile" style="background:#5856d6">◧</div>
@@ -215,7 +221,17 @@
       <div class="card">
         <div class="tile" style="background:#30b0c7">◍</div>
         <h3>Menu-bar popover</h3>
-        <p>A compact status dropdown with overall progress, top syncing apps, and quick-pause controls — no need to open the full window.</p>
+        <p>A compact dropdown with the overall sync state, the apps that are active, open issues, and a button to pause Birdwatch's own monitoring — no need to open the full window.</p>
+      </div>
+      <div class="card">
+        <div class="tile" style="background:#34c759">◔</div>
+        <h3>Storage</h3>
+        <p>Your remaining iCloud quota from <code>brctl quota</code>, and a breakdown of the iCloud files kept on this Mac. Apple doesn't publish your plan size or the per-service split, so Birdwatch asks for your plan once and labels any guess as estimated.</p>
+      </div>
+      <div class="card">
+        <div class="tile" style="background:#af52de">▣</div>
+        <h3>Devices, anonymously</h3>
+        <p>bird redacts device names, so Birdwatch can't show them. It shows what bird's records do support: at least how many devices have written to your iCloud Drive, and when. bird truncates its own records, so the counts are lower bounds.</p>
       </div>
     </div>
   </div>
@@ -227,23 +243,24 @@
       <span class="eyebrow">How it works</span>
       <h2 style="font-size:24px;font-weight:700;margin:0 0 10px;letter-spacing:-0.2px;">macOS doesn't expose the same detail for every app — so Birdwatch doesn't pretend it does</h2>
       <p style="color:var(--fg2);font-size:14.5px;margin:0;max-width:640px;">
-        iCloud sync runs through three different system daemons, and Apple gives each one a
-        different level of detail. Birdwatch reads directly from whichever daemon is responsible
-        for a given app, and labels every screen with exactly what that source can and can't tell you.
-        That's the whole point of the app: no invented progress bars, no fabricated percentages.
+        Sync on a Mac runs through three different system daemons, and each one lets an outside
+        app see a different amount. Birdwatch reads whatever the daemon responsible for a given
+        app makes available, and labels every screen with what that source can and can't tell you.
+        That's the whole point of the app: no invented progress bars, no fabricated percentages,
+        and every estimate marked as one.
       </p>
       <div class="honesty-grid">
         <div class="fidelity-row">
           <h4><span class="dot" style="background:#0a84ff"></span>CloudDocs (bird)</h4>
-          <p>Full fidelity: exact per-file download percent, upload complete/incomplete, and conflict versions. Covers iCloud Drive and Desktop &amp; Documents.</p>
+          <p>The most detail: which files are uploading or downloading (in flight or done — macOS gives no percentage), and the engine state and retry queue from <code>brctl dump</code>, for iCloud Drive and apps' iCloud Drive folders. Desktop &amp; Documents transfers are watched only with Full Disk Access. Conflicting versions are found in iCloud Drive itself; Desktop &amp; Documents and apps' own folders aren't scanned for conflicts.</p>
         </div>
         <div class="fidelity-row">
           <h4><span class="dot" style="background:#5e5ce6"></span>CloudKit (cloudd)</h4>
-          <p>Status and item counts only — there is no per-item progress API. Covers Photos, Notes, Messages, and Safari.</p>
+          <p>Activity only, read from the system log for up to the last 30 minutes: an app appears once it has synced, with how recently and what kind of work. No per-item progress or counts exist for outside apps. Covers apps such as Photos and Safari.</p>
         </div>
         <div class="fidelity-row">
           <h4><span class="dot" style="background:#30b0c7"></span>File Provider (fileproviderd)</h4>
-          <p>Domain-level status only. Covers third-party apps like 1Password, Bear, and Craft.</p>
+          <p>Listed only: Birdwatch finds these apps from their folders in <code>~/Library/CloudStorage</code> and streams <code>fileproviderd</code>'s log, but doesn't read their sync status.</p>
         </div>
       </div>
     </div>
@@ -263,15 +280,21 @@
       <details class="explainer">
         <summary>Runs outside the App Sandbox and asks for Full Disk Access — here's why</summary>
         <p>
-          The system data Birdwatch reads — <code>brctl</code> status, per-daemon logs, and
-          <code>NSMetadataQuery</code> sync metadata — isn't reachable from inside the App
-          Sandbox that Mac App Store apps run in. To read it, Birdwatch has to run unsandboxed
-          and ask macOS for Full Disk Access, the same permission Time Machine and backup tools
-          need. That's also why it's distributed directly rather than through the App Store.
+          The system data Birdwatch reads — <code>brctl</code> output, the system log, daemon
+          CPU, memory and network counters from <code>ps</code> and <code>nettop</code>, and
+          iCloud file flags — isn't reachable from inside the App Sandbox that Mac App Store apps
+          run in. So Birdwatch runs unsandboxed, which is also why it's distributed directly
+          rather than through the App Store.
         </p>
         <p>
-          Birdwatch only reads sync state — see the <a href="privacy.html">privacy page</a> for
-          what that means in practice.
+          Full Disk Access is what lets it watch Desktop &amp; Documents, which macOS protects.
+          Without it, most of Birdwatch still works; it just doesn't watch or measure those two
+          folders, and says so where that matters.
+        </p>
+        <p>
+          Birdwatch reads sync state. The only things it changes are ones you ask for:
+          restarting a sync daemon, resolving a file conflict, or moving a stuck item to the
+          Trash. See the <a href="privacy.html">privacy page</a> for what stays on your Mac.
         </p>
       </details>
     </div>

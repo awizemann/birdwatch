@@ -28,7 +28,7 @@ struct ApplicationsView: View {
             appGroup(label: "Apple apps", apps: apple)
             appGroup(label: "Third-party apps", apps: thirdParty)
 
-            SourceFootnote(text: "Per-app status from brctl dump -i and FSEvents transfer flags (CloudDocs), cloudd activity in the unified log over the last 30 min — no per-item progress or counts (CloudKit) — and fileproviderd domain status (File Provider).")
+            SourceFootnote(text: "Per-app status from brctl dump -i and FSEvents transfer flags (CloudDocs), cloudd activity in the unified log over the last 30 min — no per-item progress or counts (CloudKit) — and File Provider apps listed from ~/Library/CloudStorage, without sync status.")
         }
     }
 

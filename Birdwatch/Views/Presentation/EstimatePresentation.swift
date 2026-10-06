@@ -206,7 +206,7 @@ enum BandwidthPresentation {
               peak.uploadedBytes + peak.downloadedBytes > 0 else {
             return "\(base); no traffic recorded"
         }
-        return "\(base); busiest hour \(peak.hour):00"
+        return "\(base); busiest hour \(Format.hourOfDay(peak.hour))"
     }
 }
 

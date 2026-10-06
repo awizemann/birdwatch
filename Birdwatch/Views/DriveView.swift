@@ -117,7 +117,7 @@ private struct FolderRow: View {
             HStack(spacing: 8) {
                 MiniProgressBar(progress: progress, label: "\(folder.name) sync progress")
                     .frame(width: 90)
-                Text("\(Int((progress * 100).rounded()))%")
+                Text(Format.percent(progress))
                     .scaledFont(size: 12, weight: .bold)
                     .foregroundStyle(Palette.accent)
                     .monospacedDigit()
@@ -181,7 +181,7 @@ private struct TransferRow: View {
                     Text(transfer.direction == .upload ? "Uploading…" : "Downloading…")
                         .foregroundStyle(transfer.direction.tint)
                 } else {
-                    Text("\(Int((transfer.progress * 100).rounded()))%")
+                    Text(Format.percent(transfer.progress))
                         .foregroundStyle(transfer.direction.tint)
                         .monospacedDigit()
                 }

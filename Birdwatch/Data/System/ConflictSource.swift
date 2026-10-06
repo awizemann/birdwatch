@@ -183,27 +183,27 @@ enum ConflictSource {
 
         var versions: [ConflictVersion] = []
         let current = NSFileVersion.currentVersionOfItem(at: fileURL)
-        let currentDevice = current?.localizedNameOfSavingComputer ?? "This Mac"
+        let currentSaver = current?.localizedNameOfSavingComputer
         versions.append(ConflictVersion(
             id: currentVersionID,
-            deviceName: currentDevice,
+            deviceName: deviceLabel(currentSaver),
             tileColorHex: tiles[0],
             modified: current?.modificationDate
                 ?? (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
                 ?? .distantPast,
             sizeBytes: size(of: fileURL),
             // We cannot know WHAT changed — never invent it.
-            changeNote: "Edited on \(currentDevice)"
+            changeNote: changeNote(savedBy: currentSaver)
         ))
         for (index, version) in conflicts.enumerated() {
-            let device = version.localizedNameOfSavingComputer ?? "Unknown device"
+            let saver = version.localizedNameOfSavingComputer
             versions.append(ConflictVersion(
                 id: versionID(for: version),
-                deviceName: device,
+                deviceName: deviceLabel(saver),
                 tileColorHex: tiles[(index + 1) % tiles.count],
                 modified: version.modificationDate ?? .distantPast,
                 sizeBytes: size(of: version.url),
-                changeNote: "Edited on \(device)"
+                changeNote: changeNote(savedBy: saver)
             ))
         }
 
@@ -217,8 +217,8 @@ enum ConflictSource {
             id: issueID(forPath: fileURL.path),
             severity: .conflict,
             title: "Sync conflict in \(fileURL.deletingLastPathComponent().lastPathComponent)",
-            meta: "\(fileURL.lastPathComponent) · \(versions.count) versions",
-            reason: "This file was edited on more than one device, so iCloud kept every version instead of guessing. Review them and choose which to keep — nothing has been lost.",
+            meta: "\(fileURL.lastPathComponent) · \(Plural.count(versions.count, "version"))",
+            reason: "iCloud kept one version as the current file and saved the others for you to choose from. Review them and choose which to keep.",
             action: .reviewVersions,
             symbolName: "doc.on.doc",
             // Attributed to the owning CloudDocs app so per-app mute can
@@ -226,6 +226,17 @@ enum ConflictSource {
             appID: UbiquityTransferSource.appID(forPath: fileURL.path)
         )
         return FoundConflict(issue: issue, detail: detail)
+    }
+
+    /// The version's device as NSFileVersion reports it. When the saving
+    /// computer is unknown, say so — never assume it was this Mac.
+    nonisolated static func deviceLabel(_ savingComputer: String?) -> String {
+        savingComputer.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown device"
+    }
+
+    nonisolated static func changeNote(savedBy savingComputer: String?) -> String {
+        guard let name = savingComputer, !name.isEmpty else { return "Saved on an unknown device" }
+        return "Edited on \(name)"
     }
 
     /// Stable issue id: same path → same id across scans. FNV-1a, NOT

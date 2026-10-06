@@ -23,13 +23,14 @@ Birdwatch is built on one rule: **it never invents a number.** Where macOS expos
 
 | Area | Where the data comes from |
 |---|---|
-| **Applications** | Real iCloud app containers enumerated from `~/Library/Mobile Documents` (with on-this-Mac footprint), CloudKit apps *observed* in `cloudd`'s unified log (an app appears only when it has actually synced), File Provider domains from `~/Library/CloudStorage`. |
+| **Applications** | Real iCloud app containers enumerated from `~/Library/Mobile Documents` (with on-this-Mac footprint), CloudKit apps *observed* in the unified log (an app appears only when it has actually synced in the last 30 minutes), File Provider apps listed from `~/Library/CloudStorage` (no sync status is read for them). |
 | **Live transfers & activity** | FSEvents candidates probed with per-URL ubiquity resource values (`isUploading` / `isDownloading`). This channel is boolean-only, so in-flight items show an indeterminate bar — never a fabricated percentage. |
-| **Issues** | File conflicts via `NSFileVersion` (resolved under `NSFileCoordinator`), quota warnings, stuck retry items, and bird's own health-report and account errors from `brctl dump`. |
+| **Live log** | `log stream` for the app you're viewing: iCloud Drive's log (subsystem `com.apple.clouddocs`, from any process), or process `cloudd` / `fileproviderd`. |
+| **Issues** | File conflicts via `NSFileVersion` (resolved under `NSFileCoordinator`). The scan walks `com~apple~CloudDocs` only — its Desktop/Documents symlinks aren't followed and app containers are outside it, so conflicts there aren't found; it checks up to 2,000 items and says so when it stops. Also quota warnings, stuck retry items, and bird's own health-report and account errors from `brctl dump`. |
 | **Diagnostics** | Daemon CPU/memory (`ps`), sync-engine budgets and scheduler counts, the retry queue with real paths recovered from bird's redacted dump, and maintenance actions that actually work (daemon restart via SIGTERM + launchd respawn — `launchctl` is SIP-blocked). |
-| **Storage** | Account usage derived from your plan cap minus `brctl quota` (matches System Settings), plus a file-type breakdown of your local iCloud Drive footprint. Per-service split (Photos/Messages/backups) is private to Apple and shown as one honest remainder. |
+| **Storage** | Account usage derived from your plan size minus `brctl quota` remaining. Apple doesn't expose the plan size, so Birdwatch asks you once; until you confirm, the plan is estimated from local use plus remaining quota and labeled as such. Plus a file-type breakdown of your local iCloud Drive footprint. Per-service split (Photos/Messages/backups) is private to Apple and shown as one honest remainder. |
 | **Bandwidth** | Estimated from `nettop` deltas per daemon pid; labeled as an estimate. |
-| **Devices** | bird redacts device names permanently, so this is an honest anonymous view: how many devices have touched your Drive and when. |
+| **Devices** | bird redacts device names permanently, so this is an honest anonymous view: at least how many devices have touched your Drive, and when (bird truncates its dump, so counts are lower bounds). |
 
 The `operations/` notes under `.memory/` (if you use Memophant) and the code comments record every dead end we hit — `NSMetadataQuery` is silently empty without an iCloud entitlement, `brctl monitor` wraps that same dead query, `brctl status` blocks 15–28 s during active sync, and so on. Those findings are the most reusable part of this project.
 
@@ -38,7 +39,7 @@ The `operations/` notes under `.memory/` (if you use Memophant) and the code com
 - macOS 15 or later
 - Xcode 16 / Swift 6.2 toolchain (built with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, strict concurrency)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) — the `.xcodeproj` is generated from `project.yml`
-- Birdwatch runs **outside the App Sandbox** and asks for **Full Disk Access**; that's what lets it read the sync daemons' state. Your files and sync data never leave your Mac; anonymous usage counts do (see [Privacy](site/privacy.html)), and Diagnostics has the switch to turn that off.
+- Birdwatch runs **outside the App Sandbox**, which is what lets it read the sync daemons' state, and asks for **Full Disk Access** so it can also watch Desktop & Documents. Without the grant it doesn't watch or measure those two folders (so macOS doesn't prompt for them); most of the app keeps working. Your files and sync data never leave your Mac; anonymous usage counts do (see [Privacy](site/privacy.html)), and Diagnostics has the switch to turn that off.
 
 ## Build
 
@@ -57,7 +58,7 @@ Add `--mock` as a launch argument to run on the design-handoff fixture data inst
 
 To sign builds with your own team: `DEVELOPMENT_TEAM=<TEAMID> xcodegen generate`. Unsigned local builds work without it.
 
-Usage analytics ([swift-stats](https://github.com/awizemann/swift-stats)) is off in local builds unless a write key is supplied at build time: `xcodebuild … BW_STATS_WRITE_KEY=<key> build` bakes it into the built Info.plist. The key is never committed and is not a project.yml setting (so `xcodegen generate` cannot capture it); `scripts/release.sh` requires it in the environment. `--mock` and test runs always run with analytics off.
+Usage analytics ([swift-stats](https://github.com/awizemann/swift-stats)) is off in local builds unless a write key is supplied at build time. Set `BW_STATS_WRITE_KEY` for the one `xcodebuild` command only, read from your Keychain rather than typed — `BW_STATS_WRITE_KEY="$(security find-generic-password -s <your-keychain-item> -w)" xcodebuild … build` — and it is baked into the built Info.plist. Don't `export` it (every child process inherits it) and don't pass it as a `KEY=value` argument (it shows up in `ps` and the build log); `scripts/release.sh` scopes it to its archive command the same way. The key is never committed and is not a project.yml setting (so `xcodegen generate` cannot capture it); `scripts/release.sh` requires it in the environment. `--mock` and test runs always run with analytics off.
 
 ## Test
 

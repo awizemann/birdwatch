@@ -88,7 +88,7 @@ struct ConsistentWordingTests {
         #expect(IssuesTile.display(count: 0, qualifiers: []) == ("0", nil))
         #expect(IssuesTile.display(count: 0, qualifiers: ["x"]) == ("—", "None found — not fully checked"))
         #expect(IssuesTile.display(count: 2, qualifiers: ["x"]) == ("2", "May be incomplete"))
-        let lines = IssuesEmptyState.qualifiers(fullDiskAccess: .denied, isPaused: false,
+        let lines = IssuesEmptyState.qualifiers(isPaused: true,
                                                 deliveredProducers: nil, conflictScanCap: nil)
         #expect(lines.count == 1)
     }
