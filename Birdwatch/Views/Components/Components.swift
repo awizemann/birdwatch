@@ -102,8 +102,18 @@ struct MiniProgressBar: View {
     /// (the ubiquity resource values are booleans). Renders a moving shimmer
     /// instead of a fill, and never announces a fabricated percent.
     var indeterminate: Bool = false
+    /// What the bar measures when it is not a percentage of work done (e.g.
+    /// "attempt 12 of 62"). nil: the percent, or "In progress".
+    var valueDescription: String? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The bar's spoken value. A fill that is a count of something (retry
+    /// attempts) must not be read as "19 percent".
+    nonisolated static func spokenValue(progress: Double, indeterminate: Bool, valueDescription: String?) -> String {
+        if let valueDescription { return valueDescription }
+        return indeterminate ? "In progress" : "\(Int((progress * 100).rounded())) percent"
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -121,7 +131,7 @@ struct MiniProgressBar: View {
         .frame(height: height)
         .accessibilityElement()
         .accessibilityLabel(label)
-        .accessibilityValue(indeterminate ? "In progress" : "\(Int((progress * 100).rounded())) percent")
+        .accessibilityValue(Self.spokenValue(progress: progress, indeterminate: indeterminate, valueDescription: valueDescription))
         .accessibilityAddTraits(.updatesFrequently)
     }
 
@@ -178,19 +188,41 @@ private struct ShimmerFill: View {
 struct StatusDot: View {
     let color: Color
     var pulses = false
-    @State private var pulsing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var shouldPulse: Bool { pulses && !reduceMotion }
+    /// Pulse only when asked to and Reduce Motion is off.
+    nonisolated static func shouldPulse(pulses: Bool, reduceMotion: Bool) -> Bool {
+        pulses && !reduceMotion
+    }
+
+    var body: some View {
+        Group {
+            if Self.shouldPulse(pulses: pulses, reduceMotion: reduceMotion) {
+                PulsingDot(color: color)
+            } else {
+                Circle().fill(color)
+            }
+        }
+        .frame(width: 8, height: 8)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The pulse, in its own view so it owns its own `@State` — the same reason
+/// as `ShimmerFill`. When the flag lived on `StatusDot` and was latched in
+/// `onAppear`, a dot that appeared idle and later started syncing never
+/// pulsed (onAppear had already run). Here the view is created with the
+/// pulsing branch, so every idle → working change starts a fresh pulse.
+private struct PulsingDot: View {
+    let color: Color
+    @State private var dimmed = false
 
     var body: some View {
         Circle()
             .fill(color)
-            .frame(width: 8, height: 8)
-            .opacity(shouldPulse && pulsing ? 0.35 : 1)
-            .animation(shouldPulse ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : nil, value: pulsing)
-            .onAppear { if shouldPulse { pulsing = true } }
-            .accessibilityHidden(true)
+            .opacity(dimmed ? 0.35 : 1)
+            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: dimmed)
+            .onAppear { dimmed = true }
     }
 }
 
@@ -236,7 +268,7 @@ struct SeverityPill: View {
 
 // MARK: - View header
 
-/// Standard content header: 24/700 title + 13.5 muted subtitle, 920pt column.
+/// Standard content header: 24/700 title + 13.5 muted subtitle.
 struct ViewHeader: View {
     let title: String
     let subtitle: String
@@ -256,7 +288,10 @@ struct ViewHeader: View {
     }
 }
 
-/// Standard scrolling content column: max 920pt, 24/30 padding, fade-in.
+/// Standard scrolling content column: max 1180pt, 24/20 padding, fade-in.
+/// Wider than the design handoff's 920pt column on purpose — v0.1.1 widened
+/// the content (4c22bac) so cards use a large window; 1180 is the handoff's
+/// window cap.
 struct ContentColumn<Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ViewBuilder var content: Content
@@ -321,14 +356,38 @@ struct FreshnessText: View {
     }
 }
 
-/// Live-updating relative time ("26 min ago"); `.relative` style counts on its own.
+/// Relative time ("26 min. ago", "in 5 min.") on a once-a-minute timeline.
+///
+/// Was `Text(date, style: .relative) + Text(" ago")`: a per-second timer in
+/// every visible row, a seconds count VoiceOver read in full ("3 minutes, 4
+/// seconds"), a hard-coded English "ago", and "ago" stuck on future dates.
 struct RelativeTimeText: View {
     let date: Date
 
     var body: some View {
-        (Text(date, style: .relative) + Text(" ago"))
-            .scaledFont(size: 11.5)
-            .foregroundStyle(Surface.fg3)
-            .monospacedDigit()
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            Text(RelativeTimeLabel.text(for: date, now: context.date))
+                .scaledFont(size: 11.5)
+                .foregroundStyle(Surface.fg3)
+                .monospacedDigit()
+        }
+    }
+}
+
+/// The words `RelativeTimeText` shows, as a pure function of the clock.
+enum RelativeTimeLabel {
+    nonisolated static func text(for date: Date, now: Date, locale: Locale = .autoupdatingCurrent) -> String {
+        // No seconds field: a 60 s timeline can't keep a seconds count true.
+        // Inside a minute the formatter would round up to "1 min. ago", so
+        // format a zero interval instead — "this minute", in its own words.
+        let reference = abs(now.timeIntervalSince(date)) < 60 ? date : now
+        let style = Date.AnchoredRelativeFormatStyle(
+            anchor: date,
+            allowedFields: [.year, .month, .week, .day, .hour, .minute],
+            presentation: .named,
+            unitsStyle: .abbreviated,
+            locale: locale
+        )
+        return style.format(reference)
     }
 }

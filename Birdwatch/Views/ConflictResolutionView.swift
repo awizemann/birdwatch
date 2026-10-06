@@ -30,9 +30,13 @@ struct ConflictResolutionView: View {
             Button {
                 store.conflictIssueID = nil
             } label: {
-                Text("‹ Back to issues")
+                // A real chevron symbol, not a "‹" glyph typed into the
+                // string (which VoiceOver read aloud) — the same back-link
+                // shape as App detail's.
+                Label("Back to issues", systemImage: "chevron.left")
                     .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(Palette.accent)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Back to issues")

@@ -1,3 +1,4 @@
+import AppKit
 import os
 import SwiftUI
 import UserNotifications
@@ -32,10 +33,14 @@ struct OnboardingView: View {
 
     private var welcome: some View {
         VStack(spacing: 18) {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(LinearGradient(colors: [Palette.accent, Palette.navApplications], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 64, height: 64)
-                .overlay(Text("B").scaledFont(size: 30, weight: .bold).foregroundStyle(.white))
+            // The real app icon (already loaded by AppKit — no I/O here), not
+            // a lettered "B" tile that matched nothing the user will see in
+            // the Dock. The icon art carries its own transparent margin, so
+            // it is drawn a little larger than the old 64pt tile.
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 80, height: 80)
                 .accessibilityHidden(true)
 
             Text("Welcome to Birdwatch")

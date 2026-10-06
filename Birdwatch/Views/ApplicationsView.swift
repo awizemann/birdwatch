@@ -39,7 +39,7 @@ struct ApplicationsView: View {
                 VStack(spacing: 0) {
                     ForEach(apps) { app in
                         AppRow(app: app, display: SyncStatusDisplay(
-                            status: app.status, backend: app.backend,
+                            app: app,
                             progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
                         )) { store.detailAppID = app.id }
                         if app.id != apps.last?.id {

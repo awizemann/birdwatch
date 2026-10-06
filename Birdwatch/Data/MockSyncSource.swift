@@ -1,7 +1,8 @@
 import Foundation
 
-/// Phase 0 fixture source. Data mirrors the design handoff's sample content so
-/// every screen renders exactly as designed. Replaced per-backend in Phase 1.
+/// Fixture source for `--mock` (demos, screenshots, deterministic QA) and the
+/// app's test host. It shows only states the real backends can produce —
+/// see the fixture notes below.
 /// A struct, not an actor: everything here is immutable Sendable fixture data,
 /// so there is no state to protect (real Phase 1 sources own Process handles
 /// and WILL be actors — see the SyncSource execution-context note).
@@ -14,7 +15,7 @@ struct MockSyncSource: SyncSource {
         let now = Date()
         return ConflictDetail(
             fileName: "Q3 Report.pages",
-            location: "Documents",
+            location: DriveFolder.cloudDocsLocation + "/Presentations",
             versions: [
                 ConflictVersion(
                     id: "v-mac", deviceName: "MacBook Pro", tileColorHex: "0a84ff",
@@ -49,183 +50,221 @@ struct MockSyncSource: SyncSource {
         }
     }
 
-    // MARK: - Fixture data (handoff sample content)
+    // MARK: - Fixture data
+    //
+    // Every value below is something a real backend can produce, built where
+    // possible by the SAME pure builders the live source uses
+    // (SystemSyncSource.buildApps, CloudKitAppMapping.makeApp,
+    // AppContainerSource, DriveFolderSource, StorageBreakdownSource,
+    // SystemSyncSource.deriveIssues), so --mock exercises the honest states:
+    //   - Photos: CloudKit `.active`, no progress of any kind;
+    //   - iCloud Drive: CloudDocs transfers with no percentage (boolean channel);
+    //   - Desktop & Documents: on, but not watched without a confirmed Full
+    //     Disk Access grant (the probe answered "unknown");
+    //   - 1Password / Bear: File Provider rows Birdwatch reads nothing for
+    //     (`.unknown`);
+    //   - Obsidian: a per-app container row, idle = "no activity seen";
+    //   - a CloudKit scan that fell back to the 10-minute window and was
+    //     truncated, read 2 minutes ago;
+    //   - a derived (estimated) 200 GB plan cap from bird's remaining quota,
+    //     low enough to raise the real low-quota issue;
+    //   - bandwidth hours before launch that were never sampled;
+    //   - the engine card and bird's state, both read from one dump excerpt
+    //     shaped like the captured fixtures (`dumpText`).
+    // Not produced by any backend, so not here: per-app percentages for
+    // CloudKit / File Provider, paused or errored app rows, device names
+    // (bird redacts them), a "metered network" issue.
 
     nonisolated static func snapshot(now: Date) -> SyncSnapshot {
-        SyncSnapshot(
-            apps: apps(now: now),
+        let transfers = transfers
+        return SyncSnapshot(
+            apps: apps(now: now, transfers: transfers),
             transfers: transfers,
-            driveFolders: driveFolders,
-            devices: devices(now: now),
+            driveFolders: driveFolders(transfers: transfers),
+            devices: [],                       // names are permanently redacted by bird
+            deviceActivity: deviceActivity(now: now),
             issues: issues,
             activity: activity(now: now),
             daemons: daemons,
             retryQueue: retryQueue,
-            engine: engine,
+            engine: engine(now: now),
             permissions: permissions,
             bandwidth: bandwidth,
             storage: storage,
-            notifications: notifications(now: now)
+            quotaRemainingBytes: quotaRemaining,
+            notifications: notifications(now: now),
+            cloudKitScan: .scanned(
+                outcome: .observedApps, isStale: false,
+                observedAt: now.addingTimeInterval(-120), isTruncated: true,
+                windowMinutes: CloudKitAppSource.fallbackWindowMinutes
+            )
         )
     }
 
-    nonisolated private static func apps(now: Date) -> [AppSyncState] {
+    /// A `brctl dump -i` excerpt in the shape of the captured fixtures
+    /// (BirdwatchTests/Fixtures/brctl-dump-excerpt.txt for the scheduler,
+    /// brctl-dump-ga-container-excerpt.txt for the container line), parsed by
+    /// the real parser. Only `last-sync` is moved to "2 minutes ago" so the
+    /// mock never ages; every other value is as captured. The container line
+    /// says `client:idle` — the only client state on record — and per-file
+    /// transfers still make the iCloud Drive row "Syncing", as on a real Mac.
+    nonisolated static func dumpText(now: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let lastSync = formatter.string(from: now.addingTimeInterval(-120))
+        return """
+        scheduler
+        -----------------------------------------------------
+            + items:                 client:71 thousand (71489), server: 71 thousand (71460)
+            + push environment:      production
+            + global sync up budget: budget available {  0:01:10s ago  m:0.0% (0.5)  h:0.0% (20.0)  d:0.0% (98.7)  }
+            + periodic sync:         idle
+            + sync status:           itemsNeedUpload|nonIdleItems
+
+        1 containers matching '*'
+        -----------------------------------------------------
+        - <c{1}m.a{3}e.C{7}s[1] foreground {client:idle server:full-sync|fetched-recents|fetched-favorites|ever-full-sync sync:has-synced-down last-sync:\(lastSync), requestID:212280, caught-up, token:unkown-token-size:36 (AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA)}>
+        -----------------------------------------------------
+        """
+    }
+
+    /// bird's CloudDocs state, read from the dump's container line exactly as
+    /// the live source reads it.
+    nonisolated static func birdStatus(now: Date) -> BrctlStatus {
+        BrctlParser.containerState(inDump: dumpText(now: now)) ?? BrctlStatus()
+    }
+
+    /// Diagnostics' engine card, built by the live source's own builder from
+    /// the same dump and container state as the rows, so the two agree.
+    nonisolated static func engine(now: Date) -> SyncEngineInfo {
+        let status = birdStatus(now: now)
+        let mapped = SystemSyncSource.MappedDump(BrctlDumpParser.parse(dumpText(now: now)), cloudDocsState: status)
+        let reading = SystemSyncSource.CloudDocsReading(state: status, dumpAge: 60, dumpHasContainer: true)
+        return SystemSyncSource.engine(reading: reading, mapped: mapped, dumpFailure: nil,
+                                       fullDiskAccess: fullDiskAccess)
+    }
+
+    nonisolated private static func apps(now: Date, transfers: [TransferItem]) -> [AppSyncState] {
+        var obsidian = AppContainerSource.makeContainer(directoryName: "iCloud~md~obsidian")!
+        obsidian.itemCount = 14
+        obsidian.lastModified = now.addingTimeInterval(-5_400)
+        return SystemSyncSource.buildApps(
+            status: birdStatus(now: now),
+            transfers: transfers,
+            fileProviderDomains: ["1Password", "Bear"],
+            containers: [obsidian],
+            localSizes: [
+                "icloud-drive": LocalSize(bytes: 22_100_000_000),
+                obsidian.id: LocalSize(bytes: 48_000_000),
+            ],
+            cloudKitApps: cloudKitApps(now: now),
+            desktopDocuments: .on(lastKnown: nil),
+            // Full Disk Access not confirmed (see `permissions`): the row says it isn't
+            // watched instead of claiming a state.
+            desktopDocumentsReadable: false
+        )
+    }
+
+    /// CloudKit rows exactly as the log scan builds them: Photos moving data
+    /// (`.active`, no figure), the rest idle with their last activity.
+    nonisolated private static func cloudKitApps(now: Date) -> [AppSyncState] {
+        let observed: [(bundle: String, name: String, container: String, state: CloudKitActivityState, age: TimeInterval)] = [
+            ("com.apple.Photos", "Photos", "com.apple.photos.cloud", .transferring, 150),
+            ("com.apple.Notes", "Notes", "com.apple.notes", .idle, 480),
+            ("com.apple.MobileSMS", "Messages", "com.apple.messages.cloud", .idle, 900),
+            ("com.apple.Safari", "Safari", "com.apple.SafariShared.WBSCloudBookmarksStore", .idle, 1_500),
+        ]
+        return observed.map { entry in
+            CloudKitAppMapping.makeApp(
+                activity: CloudKitAppActivity(
+                    bundleID: entry.bundle, containers: [entry.container],
+                    lastActivity: now.addingTimeInterval(-entry.age), state: entry.state, operationCount: 12
+                ),
+                bundleID: entry.bundle, displayName: entry.name, now: now
+            )
+        }
+    }
+
+    /// iCloud Drive transfers as the ubiquity channel reports them: in flight
+    /// or done, no percentage. Desktop & Documents has none — it isn't watched.
+    nonisolated private static var transfers: [TransferItem] {
+        let root = DriveFolder.cloudDocsLocation
+        return [
+            TransferItem(id: "t1", appID: "icloud-drive", name: "Q3 Board Deck.key", location: root + "/Presentations", sizeBytes: 84_000_000, direction: .upload, progress: 0),
+            TransferItem(id: "t2", appID: "icloud-drive", name: "Brand Assets.zip", location: root + "/Design", sizeBytes: 420_000_000, direction: .download, progress: 0),
+            TransferItem(id: "t3", appID: "icloud-drive", name: "Roadmap.sketch", location: root + "/Design", sizeBytes: 96_000_000, direction: .download, progress: 0),
+            TransferItem(id: "t4", appID: "icloud-drive", name: "Invoice-2041.pdf", location: root + "/Finance", sizeBytes: 1_200_000, direction: .upload, progress: 1.0),
+        ]
+    }
+
+    nonisolated private static func driveFolders(transfers: [TransferItem]) -> [DriveFolder] {
+        let folders = [
+            ("Desktop", 312), ("Documents", 4_218), ("Design", 1_874),
+            ("Presentations", 96), ("Finance", 640), ("Downloads Archive", 2_130),
+        ].map { DriveFolderSource.makeFolder(name: $0.0, itemCount: $0.1, transferLocations: []) }
+        return DriveFolderSource.applying(transfers: transfers, to: folders)
+    }
+
+    /// bird's anonymous per-device attribution (device names are redacted).
+    nonisolated private static func deviceActivity(now: Date) -> DeviceActivitySummary {
+        DeviceActivitySummary(
+            devices: [
+                DeviceActivityItem(index: 1, itemCount: 1_204, lastModified: now.addingTimeInterval(-300)),
+                DeviceActivityItem(index: 2, itemCount: 388, lastModified: now.addingTimeInterval(-1_560)),
+                DeviceActivityItem(index: 3, itemCount: 96, lastModified: now.addingTimeInterval(-10_800)),
+                DeviceActivityItem(index: 4, itemCount: 12, lastModified: nil),
+            ],
+            registeredDeviceCount: 6,
+            countsArePartial: true
+        )
+    }
+
+    /// Every issue in a shape a real producer emits. Order is a test
+    /// contract (MockIssueFixtureTests): the Open Diagnostics card's
+    /// neighbour carries a DIFFERENT primary action, so a mark-to-element
+    /// mis-resolution in the QA harness shows up as the wrong button.
+    nonisolated private static var issues: [IssueItem] {
         [
-            AppSyncState(
-                id: "photos", name: "Photos", tileColorHex: "fe4f6d", backend: .cloudKit, isApple: true,
-                status: .syncing(progress: 0.31), statusLine: "Uploading 234 of 1,024 photos",
-                lastActivity: now.addingTimeInterval(-30),
-                itemCount: .indexed(48_213), pendingItems: 790, localSize: LocalSize(bytes: 84_300_000_000),
-                locationPath: "~/Pictures/Photos Library.photoslibrary",
-                queueLabels: ["Photos", "Videos", "Shared albums"], queueCounts: [612, 158, 20],
-                infoCallout: "Photos syncs through CloudKit, which has no public per-item progress API. This is sample data — on a real Mac, Birdwatch shows CloudKit activity from the system log, never a percentage."
+            // Shaped like BrctlDumpSource's SyncHealthReport error (severity
+            // .error, action .openDiagnostics). The id is deliberately stable
+            // and obvious — the Issues card derives its accessibility
+            // identifier as "issue-primary-<id>", so QA can target it.
+            IssueItem(
+                id: "issue-stuck-items-mock", severity: .error,
+                title: "Upload error reported by bird",
+                meta: "iCloud Drive · SyncHealthReport",
+                reason: "bird's own health report lists an upload error for iCloud Drive. macOS exposes no cause and redacts the item names, so Birdwatch shows the engine's report rather than guessing — Diagnostics has the raw output this came from.",
+                action: .openDiagnostics, symbolName: "exclamationmark.triangle.fill",
+                appID: "icloud-drive"
             ),
-            AppSyncState(
-                id: "desktop-documents", name: "Desktop & Documents", tileColorHex: "ffa62b", backend: .cloudDocs, isApple: true,
-                status: .syncing(progress: 0.68), statusLine: "Uploading 42 files · 218 MB remaining",
-                lastActivity: now.addingTimeInterval(-8),
-                itemCount: .indexed(12_480), pendingItems: 42, localSize: LocalSize(bytes: 18_700_000_000),
-                locationPath: "~/Desktop · ~/Documents",
-                retryWarning: "3 items stuck — attempt 12 of 62. Items that reach 62 attempts stop retrying."
-            ),
-            AppSyncState(
-                id: "icloud-drive", name: "iCloud Drive", tileColorHex: "30b0c7", backend: .cloudDocs, isApple: true,
-                status: .upToDate, statusLine: "All files synced",
-                lastActivity: now.addingTimeInterval(-120),
-                itemCount: .indexed(8_912), pendingItems: 0, localSize: LocalSize(bytes: 22_100_000_000),
-                locationPath: "~/Library/Mobile Documents/com~apple~CloudDocs"
-            ),
-            AppSyncState(
-                id: "notes", name: "Notes", tileColorHex: "ffcc00", backend: .cloudKit, isApple: true,
-                status: .upToDate, statusLine: "All notes synced",
-                lastActivity: now.addingTimeInterval(-480),
-                itemCount: .indexed(1_284), pendingItems: 0, localSize: LocalSize(bytes: 640_000_000),
-                locationPath: "~/Library/Group Containers/group.com.apple.notes"
-            ),
-            AppSyncState(
-                id: "messages", name: "Messages", tileColorHex: "34c759", backend: .cloudKit, isApple: true,
-                status: .upToDate, statusLine: "Messages in iCloud up to date",
-                lastActivity: now.addingTimeInterval(-900),
-                itemCount: .indexed(96_410), pendingItems: 0, localSize: LocalSize(bytes: 7_900_000_000),
-                locationPath: "~/Library/Messages"
-            ),
-            AppSyncState(
-                id: "safari", name: "Safari", tileColorHex: "1e8fff", backend: .cloudKit, isApple: true,
-                status: .upToDate, statusLine: "Tabs, bookmarks and history synced",
-                lastActivity: now.addingTimeInterval(-1_500),
-                itemCount: .indexed(3_120), pendingItems: 0, localSize: LocalSize(bytes: 210_000_000),
-                locationPath: "~/Library/Safari"
-            ),
-            AppSyncState(
-                id: "1password", name: "1Password", tileColorHex: "1a73e8", backend: .fileProvider, isApple: false,
-                status: .syncing(progress: 0.12), statusLine: "Syncing vault changes",
-                lastActivity: now.addingTimeInterval(-45),
-                itemCount: .indexed(890), pendingItems: 14, localSize: LocalSize(bytes: 120_000_000),
-                locationPath: "~/Library/CloudStorage/1Password",
-                infoCallout: "1Password syncs through a File Provider extension. macOS reports only the domain's overall status — Birdwatch cannot see individual items."
-            ),
-            AppSyncState(
-                id: "bear", name: "Bear", tileColorHex: "d63d3d", backend: .fileProvider, isApple: false,
-                status: .upToDate, statusLine: "Notes synced",
-                lastActivity: now.addingTimeInterval(-3_600),
-                itemCount: .indexed(640), pendingItems: 0, localSize: LocalSize(bytes: 310_000_000),
-                locationPath: "~/Library/CloudStorage/Bear"
-            ),
-            AppSyncState(
-                id: "craft", name: "Craft", tileColorHex: "4b5bd6", backend: .fileProvider, isApple: false,
-                status: .paused, statusLine: "Sync paused",
-                lastActivity: now.addingTimeInterval(-7_200),
-                itemCount: .indexed(1_120), pendingItems: 6, localSize: LocalSize(bytes: 480_000_000),
-                locationPath: "~/Library/CloudStorage/Craft"
+        ]
+        // The real low-quota issue for the fixture's remaining quota.
+        + SystemSyncSource.deriveIssues(quotaRemaining: quotaRemaining)
+        + [
+            // ConflictSource's shape for a file with two versions.
+            IssueItem(
+                id: "issue-conflict", severity: .conflict,
+                title: "Sync conflict in Presentations",
+                meta: "Q3 Report.pages · 2 versions",
+                reason: "iCloud kept one version as the current file and saved the others for you to choose from. Review them and choose which to keep.",
+                action: .reviewVersions, symbolName: "doc.on.doc",
+                appID: "icloud-drive"
             ),
         ]
     }
 
-    nonisolated private static let transfers: [TransferItem] = [
-        TransferItem(id: "t1", appID: "desktop-documents", name: "Q3 Board Deck.key", location: "Documents/Presentations", sizeBytes: 84_000_000, direction: .upload, progress: 0.72),
-        TransferItem(id: "t2", appID: "desktop-documents", name: "Team Offsite.mov", location: "Desktop", sizeBytes: 1_240_000_000, direction: .upload, progress: 0.31),
-        TransferItem(id: "t3", appID: "icloud-drive", name: "Brand Assets.zip", location: "iCloud Drive/Design", sizeBytes: 420_000_000, direction: .download, progress: 0.88),
-        TransferItem(id: "t4", appID: "desktop-documents", name: "Invoice-2041.pdf", location: "Documents/Finance", sizeBytes: 1_200_000, direction: .upload, progress: 1.0),
-        TransferItem(id: "t5", appID: "icloud-drive", name: "Roadmap.sketch", location: "iCloud Drive/Design", sizeBytes: 96_000_000, direction: .download, progress: 0.54),
-    ]
-
-    nonisolated private static let driveFolders: [DriveFolder] = [
-        DriveFolder(id: "f1", name: "Documents", itemCount: 4_218, status: .syncing(progress: 0.68)),
-        DriveFolder(id: "f2", name: "Desktop", itemCount: 312, status: .syncing(progress: 0.41)),
-        DriveFolder(id: "f3", name: "Design", itemCount: 1_874, status: .syncing(progress: 0.86)),
-        DriveFolder(id: "f4", name: "Finance", itemCount: 640, status: .upToDate),
-        DriveFolder(id: "f5", name: "Downloads Archive", itemCount: 2_130, status: .upToDate),
-        DriveFolder(id: "f6", name: "Old Projects", itemCount: 5_480, status: .paused),
-    ]
-
-    nonisolated private static func devices(now: Date) -> [DeviceItem] {
-        [
-            DeviceItem(id: "d1", name: "MacBook Pro", kind: "MacBook Pro 14″", osVersion: "macOS 15.5", tileColorHex: "0a84ff", isCurrentDevice: true, statusLabel: "Syncing now", isActive: true, lastChange: "Uploaded 42 files just now"),
-            DeviceItem(id: "d2", name: "iPhone 15 Pro", kind: "iPhone", osVersion: "iOS 18.5", tileColorHex: "af52de", isCurrentDevice: false, statusLabel: "Last seen 26m ago", isActive: false, lastChange: "Added 12 photos"),
-            DeviceItem(id: "d3", name: "iPad Air", kind: "iPad", osVersion: "iPadOS 18.5", tileColorHex: "30b0c7", isCurrentDevice: false, statusLabel: "Last seen 3h ago", isActive: false, lastChange: "Edited 2 notes"),
-            DeviceItem(id: "d4", name: "iMac", kind: "iMac 24″", osVersion: "macOS 15.4", tileColorHex: "ffa62b", isCurrentDevice: false, statusLabel: "Last seen 2d ago", isActive: false, lastChange: "No recent changes"),
-            DeviceItem(id: "d5", name: "iCloud.com", kind: "Web session", osVersion: "Safari · Chrome", tileColorHex: "8e8e93", isCurrentDevice: false, statusLabel: "Last seen 5d ago", isActive: false, lastChange: "Viewed Photos"),
-        ]
-    }
-
-    nonisolated private static let issues: [IssueItem] = [
-        // Shaped like BrctlDumpSource's SyncHealthReport error (severity
-        // .error, action .openDiagnostics) so `--mock` exercises the Open
-        // Diagnostics click path AT ALL: the live sources only emit this when
-        // bird actually reports an error, which no dev Mac currently does, so
-        // every --mock verification of that button was vacuous.
-        //
-        // The id is deliberately stable and obvious — the Issues card derives
-        // its accessibility identifier as "issue-primary-<id>", so QA can
-        // target this exact element. Its NEIGHBOUR below is deliberately
-        // action-less (.none): with a primary-bearing card next to a
-        // primary-less one, a mark-to-element mis-resolution shows up as the
-        // wrong button rather than passing silently.
-        //
-        // Copy rule (C1): this promises only what the button does — open
-        // Diagnostics and show the engine's own output. It does not claim
-        // Birdwatch can fix, retry, or interpret the error.
-        IssueItem(
-            id: "issue-stuck-items-mock", severity: .error,
-            title: "Upload error reported by bird",
-            meta: "iCloud Drive · SyncHealthReport",
-            reason: "bird's own health report lists an upload error for iCloud Drive. macOS exposes no cause and redacts the item names, so Birdwatch shows the engine's report rather than guessing — Diagnostics has the raw output this came from.",
-            action: .openDiagnostics, symbolName: "exclamationmark.triangle.fill",
-            appID: "icloud-drive"
-        ),
-        IssueItem(
-            id: "issue-photos-metered", severity: .warning,
-            title: "Photos upload paused on metered network",
-            meta: "Photos · 12 minutes ago",
-            reason: "macOS pauses large iCloud uploads when it detects a personal hotspot or metered connection to protect your data plan. Uploads resume automatically on Wi-Fi.",
-            action: .none, symbolName: "wifi.exclamationmark"
-        ),
-        IssueItem(
-            id: "issue-conflict", severity: .conflict,
-            title: "Sync conflict in Documents",
-            meta: "Q3 Report.pages · 26 minutes ago",
-            reason: "iCloud kept one version as the current file and saved the others for you to choose from. Review them and choose which to keep.",
-            action: .reviewVersions, symbolName: "doc.on.doc"
-        ),
-        IssueItem(
-            id: "issue-storage", severity: .warning,
-            title: "Not enough iCloud storage for full backup",
-            meta: "Storage · 2 hours ago",
-            reason: "Your account has 52.8 GB free but the next device backup needs more. Sync of new files continues, but backups will fail until you free space or upgrade the plan.",
-            action: .manageStorage, symbolName: "externaldrive.badge.exclamationmark"
-        ),
-    ]
-
+    /// The activity log only ever records transfers starting and finishing
+    /// (ActivityEventDescriptor); downloads start as neutral `.info`.
     nonisolated private static func activity(now: Date) -> [ActivityEvent] {
-        [
-            ActivityEvent(id: "a1", kind: .upload, title: "Uploading Q3 Board Deck.key", detail: "Documents/Presentations · 84 MB", date: now.addingTimeInterval(-40), symbolName: "arrow.up.circle"),
-            ActivityEvent(id: "a2", kind: .done, title: "Invoice-2041.pdf uploaded", detail: "Documents/Finance", date: now.addingTimeInterval(-180), symbolName: "checkmark.circle"),
-            ActivityEvent(id: "a3", kind: .conflict, title: "Conflict detected in Q3 Report.pages", detail: "Edited on MacBook Pro and iPhone 15 Pro", date: now.addingTimeInterval(-1_560), symbolName: "exclamationmark.triangle"),
-            ActivityEvent(id: "a4", kind: .warning, title: "Photos upload paused", detail: "Metered network detected", date: now.addingTimeInterval(-720), symbolName: "pause.circle"),
-            ActivityEvent(id: "a5", kind: .done, title: "Brand Assets.zip downloaded", detail: "iCloud Drive/Design · 420 MB", date: now.addingTimeInterval(-2_400), symbolName: "arrow.down.circle"),
-            ActivityEvent(id: "a6", kind: .info, title: "iPhone 15 Pro added 12 photos", detail: "Photo Library", date: now.addingTimeInterval(-1_560), symbolName: "iphone"),
-            ActivityEvent(id: "a7", kind: .done, title: "Notes synced", detail: "3 notes updated", date: now.addingTimeInterval(-3_800), symbolName: "checkmark.circle"),
-            ActivityEvent(id: "a8", kind: .info, title: "Metadata index refreshed", detail: "8,912 items · bird", date: now.addingTimeInterval(-5_400), symbolName: "arrow.triangle.2.circlepath"),
+        let root = DriveFolder.cloudDocsLocation
+        return [
+            ActivityEvent(id: "a1", kind: .upload, title: "Uploading Q3 Board Deck.key", detail: root + "/Presentations", date: now.addingTimeInterval(-40), symbolName: "arrow.up.circle"),
+            ActivityEvent(id: "a2", kind: .done, title: "Invoice-2041.pdf uploaded", detail: root + "/Finance", date: now.addingTimeInterval(-180), symbolName: "checkmark.circle"),
+            ActivityEvent(id: "a3", kind: .info, title: "Downloading Roadmap.sketch", detail: root + "/Design", date: now.addingTimeInterval(-420), symbolName: "arrow.down.circle"),
+            ActivityEvent(id: "a4", kind: .info, title: "Downloading Brand Assets.zip", detail: root + "/Design", date: now.addingTimeInterval(-600), symbolName: "arrow.down.circle"),
+            ActivityEvent(id: "a5", kind: .done, title: "Team Notes.md downloaded", detail: root + "/Finance", date: now.addingTimeInterval(-2_400), symbolName: "checkmark.circle"),
         ]
     }
 
@@ -241,57 +280,61 @@ struct MockSyncSource: SyncSource {
         RetryQueueItem(id: "r3", name: "node_modules.nosync", attempt: 4, maxAttempts: 62),
     ]
 
-    nonisolated private static let engine = SyncEngineInfo(
-        serverState: "Reachable · api.icloud.com",
-        clientState: "Active · pushing changes",
-        lastSyncToken: "Δ 8f3a…c21e · 2m ago",
-        pushBudget: "Throttled — next window in 4m",
-        pushThrottled: true,
-        metadataIndex: "Healthy · 71,489 items",
-        metadataHealthy: true
-    )
+    /// Full Disk Access not confirmed (the probe had no answer): Desktop &
+    /// Documents is read only with a confirmed grant, so it is unwatched.
+    /// The issue producers don't depend on the grant, so they still report.
+    nonisolated private static let fullDiskAccess: PermissionState = .unknown
 
+    /// Exactly the two permissions PermissionsProbe checks.
     nonisolated private static let permissions: [PermissionStatus] = [
-        PermissionStatus(name: "Full Disk Access", state: .granted),
-        PermissionStatus(name: "Automation", state: .granted),
-        PermissionStatus(name: "Local Network", state: .granted),
+        PermissionStatus(name: "Full Disk Access", state: fullDiskAccess),
         PermissionStatus(name: "Notifications", state: .granted),
     ]
 
+    /// Hours before Birdwatch started were never sampled: zeros there are
+    /// not data (`isObserved: false`), and the day's totals add up only the
+    /// hours that were.
     nonisolated private static let bandwidth: BandwidthSummary = {
-        // Rough daily curve peaking mid-day, mirroring the handoff chart shape.
         let up: [Int64] = [2, 1, 1, 0, 0, 1, 4, 12, 30, 48, 61, 52, 44, 58, 66, 51, 38, 42, 55, 34, 20, 12, 6, 3]
         let down: [Int64] = [4, 2, 1, 1, 0, 2, 8, 22, 41, 35, 28, 44, 52, 38, 30, 46, 61, 55, 40, 28, 18, 10, 8, 5]
+        let firstObservedHour = 7
         let hours = (0..<24).map { h in
-            BandwidthHourSample(hour: h, uploadedBytes: up[h] * 18_000_000, downloadedBytes: down[h] * 15_000_000)
+            h < firstObservedHour
+                ? BandwidthHourSample(hour: h, uploadedBytes: 0, downloadedBytes: 0, isObserved: false)
+                : BandwidthHourSample(hour: h, uploadedBytes: up[h] * 18_000_000, downloadedBytes: down[h] * 15_000_000)
         }
         return BandwidthSummary(
-            uploadedTodayBytes: 8_400_000_000,
-            downloadedTodayBytes: 6_100_000_000,
+            uploadedTodayBytes: hours.reduce(0) { $0 + $1.uploadedBytes },
+            downloadedTodayBytes: hours.reduce(0) { $0 + $1.downloadedBytes },
             currentRateBytesPerSec: 8_200_000,
             hours: hours
         )
     }()
 
-    nonisolated private static let storage = StorageInfo(
-        totalBytes: 200_000_000_000,
-        segments: [
-            StorageSegment(name: "Photos", colorHex: "fe4f6d", bytes: 84_300_000_000),
-            StorageSegment(name: "Backups", colorHex: "5e5ce6", bytes: 31_200_000_000),
-            StorageSegment(name: "iCloud Drive", colorHex: "0a84ff", bytes: 22_100_000_000),
-            StorageSegment(name: "Mail", colorHex: "34c759", bytes: 4_800_000_000),
-            StorageSegment(name: "Other", colorHex: "8e8e93", bytes: 4_800_000_000),
+    /// bird's `brctl quota` remaining figure: low enough for the real
+    /// low-quota issue, and the floor the plan cap is derived from.
+    nonisolated private static let quotaRemaining: Int64 = 3_600_000_000
+
+    /// Local footprint by file type (Apple publishes no per-service split),
+    /// with the plan cap DERIVED from footprint + remaining quota — an
+    /// estimate the UI must label as one.
+    nonisolated private static let storage: StorageInfo? = StorageBreakdownSource.makeStorageInfo(
+        totals: [
+            .video: 52_000_000_000, .documents: 41_200_000_000, .images: 38_500_000_000,
+            .archives: 6_400_000_000, .audio: 3_100_000_000, .codeData: 2_800_000_000,
+            .appsPackages: 1_600_000_000, .other: 1_600_000_000,
         ],
-        planName: "iCloud+ · 200 GB plan",
-        planPriceLine: "$2.99/month · renews Sep 3"
+        remainingBytes: quotaRemaining,
+        planCapOverride: nil
     )
 
+    /// What the store derives from issue arrivals: the issue's title and meta.
     nonisolated private static func notifications(now: Date) -> [AppNotification] {
-        [
-            AppNotification(id: "n1", severity: .warning, title: "Upload stalled", detail: "Team Offsite.mov has made no progress for 10 minutes", date: now.addingTimeInterval(-600), isRead: false),
-            AppNotification(id: "n2", severity: .conflict, title: "Sync conflict", detail: "Q3 Report.pages was edited on two devices", date: now.addingTimeInterval(-1_560), isRead: false),
-            AppNotification(id: "n3", severity: .warning, title: "Storage low", detail: "52.8 GB left on your 200 GB plan", date: now.addingTimeInterval(-7_200), isRead: true),
-        ]
+        issues.enumerated().map { index, issue in
+            AppNotification(id: "notif-\(issue.id)", severity: issue.severity, title: issue.title,
+                            detail: issue.meta, date: now.addingTimeInterval(Double(-600 * (index + 1))),
+                            isRead: index == 2)
+        }
     }
 
     // MARK: - Log fixtures

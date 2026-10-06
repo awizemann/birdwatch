@@ -143,6 +143,17 @@ struct BirdwatchApp: App {
                 .accessibilityLabel(menuBarAccessibilityLabel)
         }
         .menuBarExtraStyle(.window)
+
+        // ⌘, — existing preferences only (see SettingsView). Same inert rule
+        // as the main window under XCTest.
+        Settings {
+            if Self.isRunningTests {
+                EmptyView()
+            } else {
+                SettingsView()
+                    .environment(store)
+            }
+        }
     }
 
     private var menuBarBadge: String? {
@@ -171,7 +182,10 @@ struct BirdwatchApp: App {
             }
         }
 
-        CommandMenu("View") {
+        // Into the system View menu, ahead of its toolbar/sidebar/full-screen
+        // items. `CommandMenu("View")` added a SECOND top-level "View" menu
+        // beside the one SwiftUI always provides.
+        CommandGroup(before: .toolbar) {
             ForEach(Array(MonitorView.allCases.enumerated()), id: \.element.id) { index, view in
                 Button(view.title) {
                     store.navigate(to: view, via: .shortcut)
@@ -194,6 +208,8 @@ struct BirdwatchApp: App {
                 store.togglePauseAll()
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Divider()
         }
     }
 }

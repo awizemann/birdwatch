@@ -19,32 +19,31 @@ struct MainToolbar: ToolbarContent {
         // With a hidden title bar the content-column toolbar packs items
         // left-to-right; this flexible spacer is what actually pins the two
         // app-level controls to the trailing edge.
-        ToolbarItem(placement: .principal) {
-            Spacer()
+        // NOT ToolbarSpacer on macOS 26+: verified on macOS 27 that
+        // `ToolbarSpacer(.flexible)` (automatic or .primaryAction placement)
+        // leaves the bell and pause buttons packed against the search field in
+        // this hidden-title-bar split view. The principal Spacer still works.
+        if #available(macOS 26, *) {
+            // On 26+ every toolbar item gets a glass capsule; an empty one
+            // showed as a thin stray pill mid-toolbar (visible in Dark Mode).
+            ToolbarItem(placement: .principal) {
+                Spacer()
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) {
+                Spacer()
+            }
         }
 
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                store.notificationsPanelOpen.toggle()
-            } label: {
-                Image(systemName: "bell")
-                    .overlay(alignment: .topTrailing) {
-                        if store.unreadNotificationCount > 0 {
-                            Circle().fill(Palette.error).frame(width: 7, height: 7).offset(x: 2, y: -2)
-                                .accessibilityHidden(true)
-                        }
-                    }
-            }
-            .accessibilityLabel("Notifications, \(store.unreadNotificationCount) unread")
-            .help("Notifications")
-            .popover(isPresented: notificationsBinding, arrowEdge: .bottom) {
-                NotificationsPanelView()
-                    .environment(store) // §7: re-inject into presented content
-            }
+        ToolbarItem(placement: .primaryAction) {
+            notificationsButton
+        }
 
-            // Icon, and the icon shows what the click DOES: a play button when
-            // paused, a pause button when running. ⇧⌘P (Commands menu) is
-            // unchanged and still drives the same store method.
+        // Icon, and the icon shows what the click DOES: a play button when
+        // paused, a pause button when running. ⇧⌘P (Commands menu) is
+        // unchanged and still drives the same store method.
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 store.togglePauseAll()
             } label: {
@@ -52,6 +51,43 @@ struct MainToolbar: ToolbarContent {
             }
             .help(store.isGloballyPaused ? "Resume monitoring" : "Pause monitoring")
             .accessibilityLabel(store.isGloballyPaused ? "Resume monitoring" : "Pause monitoring")
+        }
+    }
+
+    @ViewBuilder
+    private var notificationsButton: some View {
+        let unread = store.unreadNotificationCount
+        let button = Button {
+            store.notificationsPanelOpen.toggle()
+        } label: {
+            if #available(macOS 26, *) {
+                Image(systemName: "bell")
+            } else {
+                // Pre-26 toolbars don't draw `.badge`, so the unread mark is
+                // hand-drawn there.
+                Image(systemName: "bell")
+                    .overlay(alignment: .topTrailing) {
+                        if unread > 0 {
+                            Circle().fill(Palette.error).frame(width: 7, height: 7).offset(x: 2, y: -2)
+                                .accessibilityHidden(true)
+                        }
+                    }
+            }
+        }
+        .accessibilityLabel("Notifications, \(unread) unread")
+        .help("Notifications")
+        .popover(isPresented: notificationsBinding, arrowEdge: .bottom) {
+            NotificationsPanelView()
+                .environment(store) // §7: re-inject into presented content
+        }
+
+        if #available(macOS 26, *) {
+            // The system toolbar badge: drawn on the glass, sized and tinted
+            // by the system. 0 shows no badge. The spoken count stays in the
+            // label above.
+            button.badge(unread)
+        } else {
+            button
         }
     }
 
@@ -95,9 +131,10 @@ struct SearchFieldView: View {
         .padding(.trailing, 8)
         .padding(.vertical, 4)
         // No filled background: the toolbar item supplies its own chrome, and a
-        // second fill rendered as a grey box inside a box. A hairline border
-        // alone reads as a field without fighting the system look.
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Surface.cardLine, lineWidth: 0.5))
+        // second fill rendered as a grey box inside a box. Before macOS 26 a
+        // hairline border alone reads as a field; on 26+ the item already sits
+        // in a Liquid Glass capsule, and the border drew a box inside it.
+        .modifier(PreGlassFieldBorder())
         .frame(width: 220)
             .task(id: draft) {
                 suppressPopover = false
@@ -143,6 +180,18 @@ struct SearchFieldView: View {
                 })
                 .environment(store) // §7: re-inject into presented content
             }
+    }
+}
+
+/// The search field's hairline border, drawn only where the toolbar does not
+/// already give the item its own glass capsule (before macOS 26).
+private struct PreGlassFieldBorder: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content
+        } else {
+            content.overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Surface.cardLine, lineWidth: 0.5))
+        }
     }
 }
 

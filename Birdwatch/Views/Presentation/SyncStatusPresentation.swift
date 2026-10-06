@@ -33,6 +33,18 @@ struct SyncStatusDisplay: Equatable {
     /// - Parameter progressIsIndeterminate: the store's per-app / per-folder
     ///   decision (`SyncStore.progressIsIndeterminate`).
     init(status: AppSyncStatus, backend: SyncBackend, progressIsIndeterminate: Bool) {
+        self.init(status: status, idleIsConfirmable: Self.canConfirmIdle(backend),
+                  progressIsIndeterminate: progressIsIndeterminate)
+    }
+
+    /// One app row: like the backend form, but a per-app container row is
+    /// never "Up to date" (see `canConfirmIdle(_:)`).
+    init(app: AppSyncState, progressIsIndeterminate: Bool) {
+        self.init(status: app.status, idleIsConfirmable: Self.canConfirmIdle(app),
+                  progressIsIndeterminate: progressIsIndeterminate)
+    }
+
+    private init(status: AppSyncStatus, idleIsConfirmable: Bool, progressIsIndeterminate: Bool) {
         switch status {
         case .syncing(let progress):
             // A zero mean is never shown as a measurement, whatever the flag
@@ -52,7 +64,7 @@ struct SyncStatusDisplay: Equatable {
             showsSpinner = true
             tone = .working
         case .upToDate:
-            let confirmable = Self.canConfirmIdle(backend)
+            let confirmable = idleIsConfirmable
             label = confirmable ? "Up to date" : "No activity seen"
             bar = nil
             showsSpinner = false
@@ -86,6 +98,39 @@ struct SyncStatusDisplay: Equatable {
     /// Only CloudDocs reports per-file transfer state; the others report
     /// activity at best, so their quiet is not a confirmed "synced".
     static func canConfirmIdle(_ backend: SyncBackend) -> Bool { backend == .cloudDocs }
+
+    /// Per row. A CloudDocs row built from bird's engine state (iCloud Drive,
+    /// Desktop & Documents) is idle on bird's word. A per-app container row
+    /// is `.upToDate` merely because no transfer was seen in its folder —
+    /// bird's state does not cover it and Birdwatch has no entitlement to ask
+    /// — so its quiet reads like CloudKit's: "No activity seen", neutral.
+    static func canConfirmIdle(_ app: AppSyncState) -> Bool {
+        canConfirmIdle(app.backend) && !app.isAppContainer
+    }
+}
+
+// MARK: - Why a row's state is unknown
+
+/// An `.unknown` row is one of three different facts, each worded
+/// differently: waiting for a read (CloudDocs before the first dump), never
+/// reported at all (File Provider — Birdwatch reads nothing for these), or
+/// deliberately not watched (no Full Disk Access).
+enum UnknownRowKind: Equatable {
+    case notReadYet
+    case notReported
+    case unwatched
+
+    /// nil when the row's state is known.
+    init?(of app: AppSyncState) {
+        guard app.status == .unknown else { return nil }
+        if app.needsFullDiskAccess {
+            self = .unwatched
+        } else if app.backend == .fileProvider {
+            self = .notReported
+        } else {
+            self = .notReadYet
+        }
+    }
 }
 
 // MARK: - Overview hero / popover header
@@ -115,8 +160,10 @@ struct OverviewHeroDisplay: Equatable {
     var barIsIndeterminate: Bool { ring == .indeterminate }
 
     /// - Parameter unknownAppCount: apps whose sync state has not been read
-    ///   yet (`AppSyncStatus.unknown`). The idle claim then says so instead of
-    ///   implying it covers them.
+    ///   yet (`UnknownRowKind.notReadYet`). The idle claim then says so
+    ///   instead of implying it covers them.
+    /// - Parameter unreportedAppCount: apps whose status is never reported
+    ///   (`UnknownRowKind.notReported`, File Provider) — never "not read yet".
     init(
         state: SyncStore.OverallState,
         progress: Double,
@@ -124,7 +171,8 @@ struct OverviewHeroDisplay: Equatable {
         inFlightCount: Int,
         pendingFileCount: Int,
         unknownAppCount: Int = 0,
-        unwatchedAppCount: Int = 0
+        unwatchedAppCount: Int = 0,
+        unreportedAppCount: Int = 0
     ) {
         switch state {
         case .paused:
@@ -156,6 +204,9 @@ struct OverviewHeroDisplay: Equatable {
             title = "No sync activity detected"
             var parts = ["Nothing is transferring right now."]
             if unknownAppCount > 0 { parts.append("\(Plural.count(unknownAppCount, "app")) not read yet.") }
+            if unreportedAppCount > 0 {
+                parts.append("\(Plural.count(unreportedAppCount, "app")) whose sync status macOS doesn't report.")
+            }
             if unwatchedAppCount > 0 {
                 parts.append("\(Plural.count(unwatchedAppCount, "app")) not watched — needs Full Disk Access.")
             }
@@ -180,11 +231,11 @@ enum PopoverSummary {
     }
 
     /// Idle apps in the same words their rows use (`SyncStatusDisplay`):
-    /// CloudDocs apps are "up to date", CloudKit / File Provider apps only
-    /// "no activity seen". nil when there are none.
+    /// engine-confirmed CloudDocs rows are "up to date"; CloudKit, File
+    /// Provider and per-app container rows only "no activity seen". nil when there are none.
     static func idleAppsLine(_ apps: [AppSyncState]) -> String? {
         let idle = apps.filter { $0.status == .upToDate }
-        let confirmed = idle.filter { SyncStatusDisplay.canConfirmIdle($0.backend) }.count
+        let confirmed = idle.filter { SyncStatusDisplay.canConfirmIdle($0) }.count
         let unconfirmed = idle.count - confirmed
         var parts: [String] = []
         if confirmed > 0 { parts.append("\(Plural.count(confirmed, "app")) up to date") }
@@ -194,11 +245,18 @@ enum PopoverSummary {
                 : "\(Plural.count(unconfirmed, "app")) with no activity seen")
         }
         // Not idle and not a problem: state not read yet (neutral).
-        let unknown = apps.filter { $0.status == .unknown && !$0.needsFullDiskAccess }.count
+        let unknown = apps.filter { UnknownRowKind(of: $0) == .notReadYet }.count
         if unknown > 0 {
             parts.append(parts.isEmpty
                 ? "\(Plural.count(unknown, "app")) with state unknown"
                 : "\(unknown) with state unknown")
+        }
+        // Never reported (File Provider): unknown for good, not pending.
+        let unreported = apps.filter { UnknownRowKind(of: $0) == .notReported }.count
+        if unreported > 0 {
+            parts.append(parts.isEmpty
+                ? "\(Plural.count(unreported, "app")) whose status macOS doesn't report"
+                : "\(unreported) whose status macOS doesn't report")
         }
         let unwatched = apps.filter(\.needsFullDiskAccess).count
         if unwatched > 0 {

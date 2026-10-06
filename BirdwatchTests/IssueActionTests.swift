@@ -35,33 +35,20 @@ struct IssueActionTests {
         #expect(!Self.issue(.none).hasPrimaryAction)
     }
 
-    // C1: an issue must not promise an action Birdwatch cannot perform. The
-    // mock's metered-network issue used to end "or you can resume them now"
-    // with a "Resume upload" button that no code path implemented. Fails if
-    // either the promise or the phantom button comes back.
-    @Test("The mock metered-network issue offers no button and promises no resume")
-    func meteredIssueMakesNoPromiseItCannotKeep() async throws {
-        let issues = await MockSyncSource().currentSnapshot().issues
-        let issue = try #require(issues.first { $0.title.localizedCaseInsensitiveContains("metered") })
+    // The metered-network test that lived here is REMOVED with its fixture:
+    // no real producer emits a metered-network issue (or any `.none` issue),
+    // so --mock no longer shows one. The no-button promise itself is still
+    // pinned above (`.none` offers no button) and by IssuePrimaryActionTests.
 
-        #expect(issue.action == .none, "Birdwatch cannot resume a metered upload — so no button")
-        #expect(!issue.hasPrimaryAction)
-        #expect(!issue.reason.localizedCaseInsensitiveContains("resume them now"),
-                "the copy must not offer an action the app does not have")
-        #expect(issue.reason.localizedCaseInsensitiveContains("resume automatically"),
-                "what macOS does on its own is still worth saying")
-    }
-
-    // The mock must exercise every action path the crew verifies through --mock,
-    // including the honest no-button case. Fails if a shipped mock issue kind
-    // disappears from the fixture set.
-    @Test("Mock issues cover the actionable kinds and the action-less one")
+    // The mock must exercise every action path the crew verifies through
+    // --mock, and only issue kinds a real producer emits — none of which is
+    // action-less. Fails if a shipped kind disappears or a `.none` issue
+    // (an invented one, like the old metered-network card) comes back.
+    @Test("Mock issues cover every action real producers emit, and nothing else")
     func mockIssuesAreTyped() async {
         let issues = await MockSyncSource().currentSnapshot().issues
-        #expect(!issues.isEmpty)
-        #expect(issues.contains { $0.action == .reviewVersions })
-        #expect(issues.contains { $0.action == .manageStorage })
-        #expect(issues.contains { $0.action == .none })
+        #expect(Set(issues.map(\.action)) == [.openDiagnostics, .manageStorage, .reviewVersions])
+        #expect(!issues.contains { $0.title.localizedCaseInsensitiveContains("metered") })
     }
 
     // The real (non-mock) sources: a low-quota issue is actionable via

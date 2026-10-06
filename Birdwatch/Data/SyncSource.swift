@@ -62,11 +62,14 @@ nonisolated struct ScanFreshness: Sendable, Hashable {
 /// outcome without its rows (the rows travel in `apps`).
 nonisolated enum CloudKitScanState: Sendable, Hashable {
     case scanning
-    case scanned(outcome: CloudKitScanOutcome, isStale: Bool, observedAt: Date?, isTruncated: Bool)
+    /// `windowMinutes`: how much log the scan read (`CloudKitScan.windowMinutes`).
+    case scanned(outcome: CloudKitScanOutcome, isStale: Bool, observedAt: Date?, isTruncated: Bool,
+                 windowMinutes: Int = CloudKitAppSource.windowMinutes)
 
     init(_ scan: CloudKitScan) {
         self = .scanned(outcome: scan.outcome, isStale: scan.isStale,
-                        observedAt: scan.observedAt, isTruncated: scan.isTruncated)
+                        observedAt: scan.observedAt, isTruncated: scan.isTruncated,
+                        windowMinutes: scan.windowMinutes)
     }
 }
 

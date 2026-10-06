@@ -241,12 +241,25 @@ final class SyncStore {
         navigate(to: view)
     }
 
+    /// FALSE when analytics is gated off for this launch (no write key,
+    /// `--mock`, tests): there is nothing to opt out of, so the toggle is
+    /// disabled rather than flipping and silently reverting.
+    var usageSharingAvailable: Bool { usage.isConfigured }
+
+    /// Bumped by every user flip. A load that started before a flip must not
+    /// overwrite it with the value it read before the flip landed.
+    private var usagePreferenceGeneration = 0
+
     func loadUsagePreference() async {
-        usageSharingEnabled = await usage.isEnabled
+        let generation = usagePreferenceGeneration
+        let enabled = await usage.isEnabled
+        guard generation == usagePreferenceGeneration else { return }
+        usageSharingEnabled = enabled
     }
 
     func setUsageSharing(_ enabled: Bool) {
-        guard enabled != usageSharingEnabled else { return }
+        guard usageSharingAvailable, enabled != usageSharingEnabled else { return }
+        usagePreferenceGeneration &+= 1
         usageSharingEnabled = enabled
         // Deliberately not tracked: opting out clears the queue, so an
         // "opted out" event could never leave the machine anyway.
@@ -308,8 +321,15 @@ final class SyncStore {
     /// Apps whose sync state has not been read yet — neutral, neither idle
     /// nor an issue (the hero's idle claim names them). Rows Birdwatch is
     /// deliberately not watching (no Full Disk Access) are counted apart.
+    /// File Provider rows are counted apart too (`unreportedAppCount`):
+    /// "not read yet" would promise a read that never comes.
     var unknownStateAppCount: Int {
-        effectiveApps.filter { $0.status == .unknown && !$0.needsFullDiskAccess }.count
+        effectiveApps.filter { UnknownRowKind(of: $0) == .notReadYet }.count
+    }
+    /// Rows whose sync status macOS never reports to Birdwatch (File
+    /// Provider): unknown for good, not pending.
+    var unreportedAppCount: Int {
+        effectiveApps.filter { UnknownRowKind(of: $0) == .notReported }.count
     }
     /// Rows not watched because Full Disk Access is missing.
     var unwatchedApps: [AppSyncState] { effectiveApps.filter(\.needsFullDiskAccess) }

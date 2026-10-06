@@ -652,6 +652,10 @@ nonisolated struct CloudKitScan: Sendable {
     /// the parse saw only the OLDEST part of the window and the newest
     /// activity may be missing.
     var isTruncated: Bool = false
+    /// Minutes of log the scan actually read: the 30-minute window, or the
+    /// 10-minute fallback. Anything that says "in the last N minutes" must
+    /// use this, never the primary window's constant.
+    var windowMinutes: Int = CloudKitAppSource.windowMinutes
 }
 
 // MARK: - Source
@@ -675,12 +679,14 @@ actor CloudKitAppSource {
 
     /// Window fed to `log show`. 30m matches the research: long enough to see
     /// every app that syncs at all, short enough that the call stays ~2s.
-    static let window = "30m"
+    static let windowMinutes = 30
+    static let window = "\(windowMinutes)m"
     /// Fallback when the 30m read times out or overruns ProcessRunner's
     /// capture cap. The runner keeps the HEAD of stdout, i.e. the OLDEST
     /// events, so a capped window would silently lose exactly the recent
     /// activity that drives the state — a shorter window is the honest fix.
-    static let fallbackWindow = "10m"
+    static let fallbackWindowMinutes = 10
+    static let fallbackWindow = "\(fallbackWindowMinutes)m"
     /// Timeouts for the two reads. Worst case (primary times out, fallback
     /// times out) is 30 s of spawn — the same bound the single read had.
     static let primaryTimeout: Duration = .seconds(20)
@@ -718,8 +724,9 @@ actor CloudKitAppSource {
     func scan(now: Date = Date()) async -> CloudKitScan {
         let output: String
         let isTruncated: Bool
+        let windowMinutes: Int
         do {
-            (output, isTruncated) = try await readWindow()
+            (output, isTruncated, windowMinutes) = try await readWindow()
         } catch {
             logger.warning("log show (cloudkit) failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private); keeping \(self.lastGood?.apps.count ?? 0, privacy: .public) last-good rows")
             return CloudKitScan(
@@ -761,17 +768,18 @@ actor CloudKitAppSource {
         }
         logger.info("observed \(rows.count, privacy: .public) CloudKit apps from \(activities.count, privacy: .public) bundle ids, \(attributed, privacy: .public)/\(containers.count, privacy: .public) containers attributed")
         lastGood = (rows, now)
-        return CloudKitScan(apps: rows, outcome: outcome, observedAt: now, isTruncated: isTruncated)
+        return CloudKitScan(apps: rows, outcome: outcome, observedAt: now, isTruncated: isTruncated,
+                            windowMinutes: windowMinutes)
     }
 
     /// The 30m read, falling back to 10m when it times out or overruns the
     /// capture cap. A fallback that ALSO overruns is reported, not hidden.
     /// Launch failures and non-zero exits are not retried — they would fail
     /// the same way.
-    private func readWindow() async throws -> (output: String, isTruncated: Bool) {
+    private func readWindow() async throws -> (output: String, isTruncated: Bool, windowMinutes: Int) {
         do {
             let (output, capped) = try await readLog(window: Self.window, timeout: Self.primaryTimeout)
-            guard capped else { return (output, false) }
+            guard capped else { return (output, false, Self.windowMinutes) }
             logger.warning("cloudkit log window \(Self.window, privacy: .public) hit the capture cap; retrying \(Self.fallbackWindow, privacy: .public)")
         } catch RunnerError.timeout {
             logger.warning("cloudkit log window \(Self.window, privacy: .public) timed out; retrying \(Self.fallbackWindow, privacy: .public)")
@@ -780,7 +788,7 @@ actor CloudKitAppSource {
         if capped {
             logger.warning("cloudkit fallback window \(Self.fallbackWindow, privacy: .public) also hit the capture cap; newest activity may be missing")
         }
-        return (output, capped)
+        return (output, capped, Self.fallbackWindowMinutes)
     }
 
     static func isCapped(_ output: String) -> Bool {

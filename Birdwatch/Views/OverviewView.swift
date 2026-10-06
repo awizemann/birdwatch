@@ -39,7 +39,8 @@ struct OverviewView: View {
             inFlightCount: store.inFlightTransfers.count,
             pendingFileCount: store.pendingFileCount,
             unknownAppCount: store.unknownStateAppCount,
-            unwatchedAppCount: store.unwatchedApps.count
+            unwatchedAppCount: store.unwatchedApps.count,
+            unreportedAppCount: store.unreportedAppCount
         )
         let tint: Color = switch hero.tone {
         case .paused: Palette.warning
@@ -135,7 +136,7 @@ struct OverviewView: View {
 
     private func activeTransferRow(_ app: AppSyncState) -> some View {
         let display = SyncStatusDisplay(
-            status: app.status, backend: app.backend,
+            app: app,
             progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
         )
         let pending = store.transfers(for: app.id).filter { !$0.isDone }.count
@@ -239,6 +240,11 @@ struct OverviewView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel { label in
+            // The dot's colour was the only mark of the kind.
+            if let kind = event.kind.spokenKind { Text(kind) }
+            label
+        }
     }
 }
 

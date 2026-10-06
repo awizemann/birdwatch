@@ -74,7 +74,7 @@ struct AppDetailView: View {
                         SourceBadge(backend: app.backend)
                     }
                     let display = SyncStatusDisplay(
-                        status: app.status, backend: app.backend,
+                        app: app,
                         progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
                     )
                     HStack(spacing: 6) {

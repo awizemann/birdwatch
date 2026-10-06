@@ -92,6 +92,25 @@ enum StorageCapLabel {
         return "Set by you — contested: iCloud reports \(Format.capacity(remaining)) available, more than this plan holds"
     }
 
+    /// The Settings window's plan row: the plan with its provenance, so a
+    /// derived cap never reads as fact there either (C2). `spoken` is the
+    /// VoiceOver form ("≈" is read as a symbol name).
+    static func settingsPlanText(_ storage: StorageInfo?) -> (text: String, spoken: String) {
+        guard let storage else { return ("Not known yet", "Not known yet") }
+        let name = storage.planName
+        switch storage.capSource {
+        case .derived:
+            return ("≈ \(name) · estimated", "about \(name), estimated from your remaining quota")
+        case .userChosen where storage.planCapBelowRemaining:
+            return ("\(name) · set by you, contested", "\(name), set by you, contested by iCloud's quota")
+        case .userChosen:
+            return ("\(name) · set by you", "\(name), set by you")
+        case .unknown:
+            // planName already says "not confirmed" / "size unknown".
+            return (name, name)
+        }
+    }
+
     /// Shown instead of any usage figure when iCloud reports more remaining
     /// than the plan setting allows: the setting is wrong, not the quota.
     static func planDisagreement(cap: Int64, remaining: Int64) -> String {

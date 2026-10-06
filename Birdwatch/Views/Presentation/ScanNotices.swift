@@ -10,7 +10,7 @@ import Foundation
 enum CloudKitNotice {
     static func text(_ state: CloudKitScanState?, now: Date) -> String? {
         guard let state else { return nil }
-        guard case let .scanned(outcome, _, observedAt, isTruncated) = state else {
+        guard case let .scanned(outcome, _, observedAt, isTruncated, windowMinutes) = state else {
             return "Reading the system log for CloudKit activity…"
         }
         let truncatedNote = "The log was too large to read in full, so the newest activity may be missing."
@@ -31,7 +31,13 @@ enum CloudKitNotice {
                 base = nil
             }
         case .noActivity:
-            base = "No CloudKit activity in the last 30 minutes."
+            // A capped read saw only the OLDEST part of the window, so it
+            // can't speak for the whole of it — say what it covered.
+            if isTruncated {
+                return "No CloudKit activity seen in the part of the log that was read — it was too large to read in full, so the newest activity may be missing."
+            }
+            // The window the scan actually read — 10 minutes after a fallback.
+            base = "No CloudKit activity in the last \(windowMinutes) minutes."
         case .unattributed(let containers):
             base = "CloudKit activity seen in \(Plural.count(containers, "container")), but this macOS doesn't say which app owns \(containers == 1 ? "it" : "them")."
         case .systemServicesOnly(let attributed, let unattributed):

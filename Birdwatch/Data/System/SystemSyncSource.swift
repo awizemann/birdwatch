@@ -823,7 +823,10 @@ final class SystemSyncSource: SyncSource {
             apps.append(AppSyncState(
                 id: "fp-\(domain.lowercased())", name: name,
                 tileColorHex: tiles[index % tiles.count], backend: .fileProvider, isApple: false,
-                status: .upToDate,
+                // Nothing is read for these rows: the folder's existence in
+                // ~/Library/CloudStorage is the only evidence, and it says
+                // nothing about sync. So no idle claim at all (C1).
+                status: .unknown,
                 statusLine: "Sync status not reported",
                 lastActivity: nil,
                 // Listed from its CloudStorage folder only — no status is read.

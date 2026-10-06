@@ -113,6 +113,11 @@ struct AppSyncState: Sendable, Hashable, Identifiable {
     /// Disk Access is granted (Desktop & Documents); the detail view offers
     /// the settings deep link.
     var needsFullDiskAccess = false
+    /// A per-app iCloud Drive container row (`AppContainerSource`). Its idle
+    /// state is only "no transfer seen in this folder" — bird's engine state
+    /// covers the CloudDocs zone, not these containers, so an unentitled
+    /// observer cannot confirm one is synced (`SyncStatusDisplay`).
+    var isAppContainer = false
     // Equatable/Hashable are synthesized over EVERY stored field: a custom
     // == that ignored size, counts, callouts or backend let SwiftUI skip a
     // real change.

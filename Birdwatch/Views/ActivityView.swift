@@ -55,5 +55,25 @@ private struct ActivityRow: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel { label in
+            // The kind was only the icon and its colour, both hidden from
+            // VoiceOver; say it before the title.
+            if let kind = event.kind.spokenKind { Text(kind) }
+            label
+        }
+    }
+}
+
+extension ActivityKind {
+    /// What the row's icon and colour mean, for VoiceOver. nil where the
+    /// title already says it ("Uploading …", "Downloading …") or there is
+    /// nothing to add (neutral info).
+    var spokenKind: String? {
+        switch self {
+        case .done: "Done"
+        case .warning: "Warning"
+        case .conflict: "Conflict"
+        case .upload, .info: nil
+        }
     }
 }

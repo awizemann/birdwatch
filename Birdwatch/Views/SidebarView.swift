@@ -4,23 +4,37 @@ struct SidebarView: View {
     @Environment(SyncStore.self) private var store
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            List(selection: selectionBinding) {
-                Section {
-                    ForEach(MonitorView.allCases) { item in
-                        SidebarRow(item: item, issueCount: item == .issues ? store.issueCount : 0)
-                            .tag(item)
-                    }
-                } header: {
-                    SectionLabel(text: "Monitor")
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
+        if #available(macOS 26, *) {
+            // macOS 26+ floats the sidebar in its own Liquid Glass panel. A
+            // material painted here sat under that glass as a second, duller
+            // layer, so the list keeps the system background and the footer
+            // rides in a safe-area bar (which also gets the scroll-edge effect
+            // when the list scrolls beneath it at large text sizes).
+            monitorList
+                .safeAreaBar(edge: .bottom, spacing: 0) { StorageFooter() }
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                monitorList
+                    .scrollContentBackground(.hidden)
 
-            StorageFooter()
+                StorageFooter()
+            }
+            .background(.ultraThinMaterial)
         }
-        .background(.ultraThinMaterial)
+    }
+
+    private var monitorList: some View {
+        List(selection: selectionBinding) {
+            Section {
+                ForEach(MonitorView.allCases) { item in
+                    SidebarRow(item: item, issueCount: item == .issues ? store.issueCount : 0)
+                        .tag(item)
+                }
+            } header: {
+                SectionLabel(text: "Monitor")
+            }
+        }
+        .listStyle(.sidebar)
     }
 
     private var selectionBinding: Binding<MonitorView?> {

@@ -373,7 +373,8 @@ enum AppContainerSource {
                 localSize: localSizes[container.id],
                 locationPath: "~/Library/Mobile Documents/\(container.directoryName)",
                 infoCallout: "\(container.name) stores documents in its own iCloud Drive container. Counts are the container's top level, and \"On this Mac\" is allocated bytes actually stored locally — files still in the cloud (dataless placeholders) take almost no space, so this can be far smaller than the container's cloud size.",
-                lastActivityLabel: "Last modified"   // the directory's mtime, not a sync time
+                lastActivityLabel: "Last modified",  // the directory's mtime, not a sync time
+                isAppContainer: true
             )
         }
         return rows.sorted { lhs, rhs in

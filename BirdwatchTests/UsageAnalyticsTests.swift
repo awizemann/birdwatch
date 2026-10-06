@@ -325,4 +325,75 @@ struct UsageStoreHookTests {
         #expect(await tracker.isEnabled == false)
         #expect(!store.usageSharingEnabled)
     }
+
+    // Fails without the generation check: the load read `true` before the
+    // flip, finished after it, and put the switch back on.
+    @Test("A load already in flight cannot undo a flip made while it waited")
+    func loadDoesNotOverwriteFlip() async {
+        let tracker = GatedUsageTracker()
+        let store = SyncStore(source: StubSyncSource(snapshot: .minimal()), notifier: noBanners,
+                              defaults: throwawayDefaults(), usage: tracker)
+        let load = Task { await store.loadUsagePreference() }
+        await tracker.waitUntilReadStarted()          // the load holds its old answer
+        store.setUsageSharing(false)
+        tracker.releaseRead(answer: true)              // …and returns it after the flip
+        await load.value
+        #expect(!store.usageSharingEnabled)
+    }
+
+    @Test("With analytics gated off the switch is unavailable and does not move")
+    func gatedOffSwitchIsInert() async {
+        let store = SyncStore(source: StubSyncSource(snapshot: .minimal()), notifier: noBanners,
+                              defaults: throwawayDefaults(), usage: NoopUsageTracker())
+        #expect(!store.usageSharingAvailable)
+        await store.loadUsagePreference()
+        let before = store.usageSharingEnabled
+        store.setUsageSharing(!before)
+        #expect(store.usageSharingEnabled == before)
+        #expect(makeStore().0.usageSharingAvailable, "a configured tracker keeps the switch")
+    }
+}
+
+/// A tracker whose `isEnabled` read waits until the test releases it, so a
+/// flip can land while a load is suspended — ordering by continuation, not by
+/// sleeping.
+final class GatedUsageTracker: UsageTracking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var started: CheckedContinuation<Void, Never>?
+    private var didStart = false
+    private var pending: CheckedContinuation<Bool, Never>?
+
+    func record(_ event: UsageEvent) {}
+    func applicationDidBecomeActive() async {}
+    func flush() async {}
+    func setEnabled(_ enabled: Bool) async {}
+    var isEnabled: Bool {
+        get async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+                    pending = continuation
+                    didStart = true
+                    defer { started = nil }
+                    return started
+                }
+                waiter?.resume()
+            }
+        }
+    }
+
+    func waitUntilReadStarted() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let already = lock.withLock {
+                if didStart { return true }
+                started = continuation
+                return false
+            }
+            if already { continuation.resume() }
+        }
+    }
+
+    func releaseRead(answer: Bool) {
+        let continuation = lock.withLock { defer { pending = nil }; return pending }
+        continuation?.resume(returning: answer)
+    }
 }

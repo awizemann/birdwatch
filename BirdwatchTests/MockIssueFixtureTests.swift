@@ -33,11 +33,13 @@ struct MockIssueFixtureTests {
         #expect(!diagnostic.reason.isEmpty)
     }
 
-    // The neighbour is the control: a primary-less card beside a primary-bearing
-    // one turns a mark-to-element mis-resolution into a visible wrong-button,
-    // instead of a click that silently lands on the only button on screen.
-    @Test("A primary-less issue sits adjacent to the Open Diagnostics one")
-    func actionlessNeighbourIsAdjacent() async throws {
+    // The neighbour is the control: a card whose primary does something ELSE
+    // beside the Open Diagnostics one turns a mark-to-element mis-resolution
+    // into a visible wrong action. (It used to be an action-less card; no real
+    // producer emits one, so the mock no longer invents it — see
+    // IssueActionTests.mockIssuesAreTyped.)
+    @Test("A card with a different primary action sits adjacent to the Open Diagnostics one")
+    func differentActionNeighbourIsAdjacent() async throws {
         let issues = await Self.issues()
         let index = try #require(issues.firstIndex { $0.action == .openDiagnostics })
         let neighbours = [index - 1, index + 1]
@@ -45,8 +47,8 @@ struct MockIssueFixtureTests {
             .map { issues[$0] }
 
         #expect(!neighbours.isEmpty)
-        #expect(neighbours.contains { $0.action == .none && !$0.hasPrimaryAction },
-                "the .openDiagnostics card must have an action-less immediate neighbour")
+        #expect(neighbours.contains { $0.hasPrimaryAction && $0.action != .openDiagnostics },
+                "the .openDiagnostics card must have a neighbour whose button does something else")
     }
 
     // NOTE: "Every mock issue's copy matches whether it actually offers a button"

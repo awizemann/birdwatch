@@ -22,6 +22,13 @@ nonisolated protocol UsageTracking: Sendable {
     /// The master opt-out. Persists inside the SDK.
     func setEnabled(_ enabled: Bool) async
     var isEnabled: Bool { get async }
+    /// FALSE for the no-op tracker: analytics is gated off for this launch,
+    /// so the opt-out switch has nothing to control.
+    var isConfigured: Bool { get }
+}
+
+nonisolated extension UsageTracking {
+    var isConfigured: Bool { true }
 }
 
 /// swift-stats-backed tracker for shipping builds.
@@ -44,6 +51,7 @@ struct NoopUsageTracker: UsageTracking {
     func flush() async {}
     func setEnabled(_ enabled: Bool) async {}
     var isEnabled: Bool { get async { false } }
+    nonisolated var isConfigured: Bool { false }
 }
 
 nonisolated extension UsageValue {

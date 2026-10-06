@@ -48,7 +48,7 @@ struct MenuBarPopoverView: View {
             popoverLogger.debug("popover closed; main window on screen: \(Self.isMainWindowVisible(in: NSApp.windows), privacy: .public)")
             store.syncTransferWatcher()
         }
-        .background(Surface.card)
+        .modifier(PopoverBackground())
     }
 
     /// Is the main monitor window on screen — open, not minimised, not fully
@@ -78,7 +78,8 @@ struct MenuBarPopoverView: View {
             inFlightCount: store.inFlightTransfers.count,
             pendingFileCount: store.pendingFileCount,
             unknownAppCount: store.unknownStateAppCount,
-            unwatchedAppCount: store.unwatchedApps.count
+            unwatchedAppCount: store.unwatchedApps.count,
+            unreportedAppCount: store.unreportedAppCount
         )
         return VStack(alignment: .leading, spacing: 0) {
             header(state: state, overall: overall)
@@ -203,7 +204,7 @@ struct MenuBarPopoverView: View {
                 }
                 .frame(minWidth: 118, alignment: .leading)
                 let display = SyncStatusDisplay(
-                    status: app.status, backend: app.backend,
+                    app: app,
                     progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
                 )
                 switch display.bar {
@@ -261,13 +262,16 @@ struct MenuBarPopoverView: View {
             .scaledFont(size: 12)
             .foregroundStyle(Surface.fg2)
             .monospacedDigit()
+            // Wraps rather than truncating: the clauses after the first are
+            // exactly the qualifiers (unknown, unwatched) that must be read.
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var issuesRow: some View {
         Button {
             store.navigate(to: .issues, via: .menubar)
             openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             dismiss()
         } label: {
             HStack(spacing: 8) {
@@ -301,12 +305,25 @@ struct MenuBarPopoverView: View {
 
             Button("Open Monitor") {
                 openWindow(id: "main")
-                NSApp.activate(ignoringOtherApps: true)
+                NSApp.activate()
                 dismiss()
             }
             .buttonStyle(.borderedProminent)
             .tint(Palette.accent)
             .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+/// macOS 26+ gives the menu-bar window its own system material; an opaque
+/// card painted over it hid that material and read as a white slab. Earlier
+/// systems keep the card fill the design specifies.
+private struct PopoverBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content
+        } else {
+            content.background(Surface.card)
         }
     }
 }

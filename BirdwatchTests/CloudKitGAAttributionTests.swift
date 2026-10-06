@@ -286,6 +286,7 @@ struct CloudKitScanOutcomeTests {
         #expect(scan.apps.map(\.name) == ["Example Notes", "Messages", "Photos", "Safari"])
         #expect(scan.apps.first { $0.id == "safari" }?.statusLine == "Pushing changes")
         #expect(!scan.isStale && !scan.isTruncated && scan.observedAt == gaNow)
+        #expect(scan.windowMinutes == 30, "a primary read covers the 30-minute window")
         let arguments = try #require(await runner.calls.first)
         #expect(arguments.contains("ndjson"))
         #expect(arguments.contains("--info"))
@@ -357,6 +358,8 @@ struct CloudKitScanOutcomeTests {
         #expect(calls.last?.contains(CloudKitAppSource.fallbackWindow) == true)
         #expect(scan.outcome == .observedApps)
         #expect(!scan.isTruncated)
+        // Fails on the old scan, which did not say which window it read.
+        #expect(scan.windowMinutes == 10)
     }
 
     @Test("A fallback read that ALSO overruns the cap is flagged truncated")
@@ -376,6 +379,7 @@ struct CloudKitScanOutcomeTests {
         #expect(calls.count == 2)
         #expect(calls.last?.contains(CloudKitAppSource.fallbackWindow) == true)
         #expect(scan.outcome == .observedApps)
+        #expect(scan.windowMinutes == 10)
         let total = await runner.timeouts.reduce(Duration.zero, +)
         #expect(total <= .seconds(30))
     }

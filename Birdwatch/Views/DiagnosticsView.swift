@@ -441,7 +441,9 @@ struct DiagnosticsView: View {
             MiniProgressBar(
                 progress: Double(item.attempt) / Double(item.maxAttempts),
                 tint: atMax ? Palette.error : Palette.warning,
-                label: "Retry attempts"
+                label: "Retry attempts",
+                // A count of tries, not work done: never "19 percent".
+                valueDescription: "attempt \(item.attempt) of \(item.maxAttempts)"
             )
             if let status = retryStatus, status.rowID == item.id {
                 statusLine(status).transition(.opacity)
@@ -847,27 +849,10 @@ struct DiagnosticsView: View {
                 Divider().overlay(Surface.cardLine).padding(.vertical, 10)
 
                 // The opt-out a person can find (swift-stats consumer
-                // checklist §4). Copy says exactly what is and isn't sent.
-                Toggle(isOn: usageSharingBinding) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Share anonymous usage")
-                            .scaledFont(size: 13, weight: .medium)
-                            .foregroundStyle(Surface.fg)
-                        Text("Which screens and actions get used, plus app version, macOS version, Mac model, language and region, under a random install ID. Never file names, paths, app names or account details.")
-                            .scaledFont(size: 11.5)
-                            .foregroundStyle(Surface.fg3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .task { await store.loadUsagePreference() }
+                // checklist §4) — the same control Settings shows.
+                UsageSharingToggle()
             }
         }
-    }
-
-    private var usageSharingBinding: Binding<Bool> {
-        Binding(get: { store.usageSharingEnabled }, set: { store.setUsageSharing($0) })
     }
 }
 
