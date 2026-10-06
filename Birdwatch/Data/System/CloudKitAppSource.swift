@@ -540,19 +540,27 @@ nonisolated enum CloudKitAppMapping {
 
     // MARK: Row assembly (pure — the resolved display name is injected)
 
+    /// Age-free on purpose: the line is computed once per scan (every ~5 min)
+    /// and shown next to the row's LIVE relative `lastActivity`, so a baked-in
+    /// "now" or "12m ago" would go stale and disagree with it. `now` only
+    /// rejects a future-dated `lastActivity`.
     static func statusLine(state: CloudKitActivityState, lastActivity: Date?, now: Date) -> String {
         switch state {
-        case .transferring: return "Transferring now"
+        case .transferring: return "Transferring"
         case .pushing: return "Pushing changes"
         case .throttled: return "Throttled by iCloud"
         case .idle:
-            guard let lastActivity else { return "No recent activity" }
-            let age = now.timeIntervalSince(lastActivity)
-            guard age >= 0 else { return "No recent activity" }
-            if age < 60 { return "Last synced just now" }
-            let minutes = Int(age / 60)
-            if minutes < 60 { return "Last synced \(minutes)m ago" }
-            return "Last synced \(minutes / 60)h ago"
+            guard let lastActivity, now.timeIntervalSince(lastActivity) >= 0 else { return "No recent activity" }
+            return "Last activity in cloudd's log"
+        }
+    }
+
+    /// Transferring, pushing and throttled are all work in flight with no
+    /// progress figure; only an idle container is quiet.
+    static func status(for state: CloudKitActivityState) -> AppSyncStatus {
+        switch state {
+        case .transferring, .pushing, .throttled: .active
+        case .idle: .upToDate
         }
     }
 
@@ -569,13 +577,15 @@ nonisolated enum CloudKitAppMapping {
             tileColorHex: tileColorHex(appID: id, name: displayName),
             backend: .cloudKit,
             isApple: isAppleBundle(bundleID),
-            // No progress is knowable — never a fabricated percentage.
-            status: .upToDate,
+            // No progress is knowable — never a fabricated percentage — but
+            // observed work is not "up to date" either.
+            status: status(for: activity.state),
             statusLine: statusLine(state: activity.state, lastActivity: activity.lastActivity, now: now),
             lastActivity: activity.lastActivity,
-            itemsIndexed: 0,
-            pendingItems: 0,
-            localSizeBytes: 0,
+            // cloudd reports none of these to a third-party app.
+            itemCount: nil,
+            pendingItems: nil,
+            localSize: nil,
             locationPath: "",
             infoCallout: "\(displayName) syncs through CloudKit in \(activity.containers.count) container\(activity.containers.count == 1 ? "" : "s") (\(containerList)). \(calloutSuffix)"
         )

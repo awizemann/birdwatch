@@ -33,6 +33,8 @@ final class SystemSyncSource: SyncSource {
     // caching — and then PRUNED (see `stillSuppressedConflictIDs`), or a new
     // conflict on the same file (same id) would stay hidden until relaunch.
     @MainActor private var resolvedConflictIDs: Set<String> = []
+    // The last successful conflict scan stopped at its item cap.
+    @MainActor private(set) var conflictScanCapped = false
     // Guarded by MainActor (currentSnapshot always runs on the caller's actor).
     // Cached because the notifications probe races a 1.5s timeout — paying that
     // on every 15s refresh (or on first paint) is wasted latency. 5-minute TTL
@@ -48,7 +50,7 @@ final class SystemSyncSource: SyncSource {
     // `includedDesktopDocuments` records the flag the walk ran with: a cache
     // from before the Desktop & Documents flag was known (or changed) is
     // stale regardless of age and is re-measured on the next cycle.
-    @MainActor private var cachedLocalSizes: (values: [String: Int64], at: Date, includedDesktopDocuments: Bool)?
+    @MainActor private var cachedLocalSizes: (values: [String: LocalSize], at: Date, includedDesktopDocuments: Bool)?
     @MainActor private var sizeScanInFlight = false
     // File-type breakdown of the local footprint (Storage view). Deep walk over
     // every container + Desktop/Documents — same rule as the size pass: 5-minute
@@ -61,7 +63,7 @@ final class SystemSyncSource: SyncSource {
     // so it follows the same rule as the size/conflict scans: 5-minute TTL,
     // single-flight, never on the paint path — rows appear on a later cycle.
     private let cloudKitApps = CloudKitAppSource()
-    @MainActor private var cachedCloudKitApps: (values: [AppSyncState], at: Date)?
+    @MainActor private var cachedCloudKitApps: (scan: CloudKitScan, at: Date)?
     @MainActor private var cloudKitScanInFlight = false
     // `brctl dump -i` is a ~2s spawn plus a multi-megabyte parse — far too
     // heavy for the 15s cycle and never allowed to gate paint. Same discipline
@@ -176,11 +178,12 @@ final class SystemSyncSource: SyncSource {
         // (getattrlistbulk on placeholders) blocked first paint for tens of
         // seconds. Single-flight on its own queue: a slow scan serves the last
         // result (empty only before the first one lands), never a pool thread.
-        async let foldersTask = folderScan.value(within: 5)
-        let (quota, processStats, scannedFolders) =
+        async let foldersTask = folderScan.reading(within: 5)
+        let (quota, processStats, folderReading) =
             await (quotaTask, processStatsTask, foldersTask)
         let (daemons, bandwidth) = processStats
-        let folders = DriveFolderSource.applying(transfers: transfers, to: scannedFolders ?? [])
+        // value: nil = no scan finished yet; .some(nil) = the root was unreadable.
+        let folders = DriveFolderSource.applying(transfers: transfers, to: (folderReading.value ?? nil) ?? [])
         // One hop for everything the background dump refresh maintains.
         // Read the MAPPED result, not the dump: the mapping (retry queue sort,
         // issue derivation, device rollup) walks every pending item in a
@@ -222,10 +225,11 @@ final class SystemSyncSource: SyncSource {
             // scan — the guard did not actually guard.
             if let resolvedBeforeScan = await MainActor.run(body: { claimConflictScan(now: Date()) }) {
                 Task { [weak self] in
-                    let scanned = await ConflictSource.findConflicts()
+                    let scanned = await ConflictSource.scanConflicts()
                     guard let self else { return }
                     await MainActor.run {
-                        self.completeConflictScan(scanned, resolvedBeforeScan: resolvedBeforeScan)
+                        self.completeConflictScan(scanned?.found, resolvedBeforeScan: resolvedBeforeScan,
+                                                  isCapped: scanned?.isCapped ?? false)
                     }
                 }
             }
@@ -234,7 +238,8 @@ final class SystemSyncSource: SyncSource {
         // One capped, shallow container enumeration, time-boxed like every other
         // system scan (§6) and single-flight on its own queue like the folder
         // scan: on timeout the last completed result is served.
-        let containers = await containerScan.value(within: 5) ?? []
+        let containerReading = await containerScan.reading(within: 5)
+        let containers = containerReading.value ?? []
         // Local footprint: served stale-or-empty, refreshed in the background at
         // most every 5 minutes. Sizes land on a later cycle — never gating paint.
         let sizesCache = await MainActor.run(body: { cachedLocalSizes })
@@ -284,7 +289,7 @@ final class SystemSyncSource: SyncSource {
         // discipline as the size pass — `log show` is a ~2s spawn and must
         // never gate first paint. Empty on the first cycle; real rows next.
         let ckCache = await MainActor.run(body: { cachedCloudKitApps })
-        let observedCloudKit = ckCache?.values ?? []
+        let observedCloudKit = ckCache?.scan.apps ?? []
         if ckCache == nil || Date().timeIntervalSince(ckCache!.at) >= 300 {
             let claimed = await MainActor.run { () -> Bool in
                 guard !cloudKitScanInFlight else { return false }
@@ -293,7 +298,9 @@ final class SystemSyncSource: SyncSource {
             }
             if claimed {
                 Task { [weak self] in
-                    let observed = await self?.cloudKitApps.currentApps() ?? []
+                    // The whole scan, not just its rows: the outcome is what
+                    // tells "nothing syncs" from "couldn't tell" (C1).
+                    guard let observed = await self?.cloudKitApps.scan() else { return }
                     guard let self else { return }
                     await MainActor.run {
                         self.cachedCloudKitApps = (observed, Date())
@@ -332,6 +339,9 @@ final class SystemSyncSource: SyncSource {
         if quota != nil { producers[.quota] = Set(quotaIssues.map(\.id)) }
         if cachedC != nil { producers[.conflicts] = Set(conflicts.map(\.issue.id)) }
         if let mapped { producers[.dump] = Set(mapped.issues.map(\.id)) }
+        // Only meaningful while a scan result is being served.
+        let conflictsCapped = cachedC != nil ? await MainActor.run(body: { conflictScanCapped }) : false
+        let folderRootUnreadable: Bool = if case .some(.none) = folderReading.value { true } else { false }
 
         return SyncSnapshot(
             apps: apps,
@@ -366,7 +376,12 @@ final class SystemSyncSource: SyncSource {
             },
             quotaRemainingBytes: quota,           // brctl quota — remaining only
             notifications: [],
-            issueProducers: producers
+            issueProducers: producers,
+            cloudKitScan: ckCache.map { CloudKitScanState($0.scan) } ?? .scanning,
+            folderScan: ScanFreshness(completedAt: folderReading.completedAt, isOverdue: folderReading.isOverdue,
+                                      isUnreadable: folderRootUnreadable),
+            containerScan: ScanFreshness(completedAt: containerReading.completedAt, isOverdue: containerReading.isOverdue),
+            conflictScanCap: conflictsCapped ? ConflictSource.maxItemsVisited : nil
         )
     }
 
@@ -527,10 +542,12 @@ final class SystemSyncSource: SyncSource {
     /// (bounded by `conflictMaxStaleness`) — "could not look" is not "no
     /// conflicts", and caching [] would count as the producer's delivery.
     @MainActor func completeConflictScan(
-        _ scanned: [ConflictSource.FoundConflict]?, resolvedBeforeScan: Set<String>, now: Date = Date()
+        _ scanned: [ConflictSource.FoundConflict]?, resolvedBeforeScan: Set<String>, now: Date = Date(),
+        isCapped: Bool = false
     ) {
         conflictScanInFlight = false
         guard let scanned else { return }
+        conflictScanCapped = isCapped
         resolvedConflictIDs = Self.stillSuppressedConflictIDs(
             resolved: resolvedConflictIDs,
             resolvedBeforeScan: resolvedBeforeScan,
@@ -654,7 +671,7 @@ final class SystemSyncSource: SyncSource {
         transfers: [TransferItem],
         fileProviderDomains: [String],
         containers: [AppContainerSource.Container] = [],
-        localSizes: [String: Int64] = [:],
+        localSizes: [String: LocalSize] = [:],
         cloudKitApps: [AppSyncState] = [],
         stateNote: String? = nil,
         desktopDocuments: DesktopDocumentsFlag? = nil
@@ -666,15 +683,18 @@ final class SystemSyncSource: SyncSource {
         } ?? .unknown("brctl status has not been read")
 
         func cloudDocsApp(id: String, name: String, tile: String, location: String) -> AppSyncState {
-            let own = transfers.filter { $0.appID == id }
+            // In flight only: a finished item lingers (completionGrace) at 1.0.
+            let own = transfers.filter { $0.appID == id && !$0.isDone }
             let (rowStatus, line) = cloudDocsRowStatus(ownTransfers: own, state: status, stateNote: stateNote)
             return AppSyncState(
                 id: id, name: name, tileColorHex: tile, backend: .cloudDocs, isApple: true,
                 status: rowStatus,
                 statusLine: line,
                 lastActivity: status?.lastSync,
-                itemsIndexed: 0, pendingItems: own.count,
-                localSizeBytes: localSizes[id] ?? 0,     // background size pass; 0 until it lands
+                // Birdwatch reads no item count for these rows, so it is
+                // absent rather than a placeholder zero.
+                itemCount: nil, pendingItems: own.count,
+                localSize: localSizes[id],     // background size pass; nil until it lands
                 locationPath: location
             )
         }
@@ -713,8 +733,8 @@ final class SystemSyncSource: SyncSource {
         // CloudKit services: OBSERVED only (Phase 5D). Rows come from cloudd's
         // unified log — an app that never appears there gets no row, because
         // absence of activity is the honest signal. cloudd still exposes no
-        // per-item progress API, so status is always .upToDate with an
-        // activity/recency status line, never a fabricated percentage.
+        // per-item progress API, so status is .active (work seen, no progress)
+        // or .upToDate (idle), never a fabricated percentage.
         let cloudKitIDs = Set(apps.map(\.id))
         apps.append(contentsOf: cloudKitApps.filter { !cloudKitIDs.contains($0.id) })
 
@@ -728,7 +748,8 @@ final class SystemSyncSource: SyncSource {
                 status: .upToDate,
                 statusLine: "File Provider domain active",
                 lastActivity: nil,
-                itemsIndexed: 0, pendingItems: 0, localSizeBytes: 0,
+                // fileproviderd reports only domain status.
+                itemCount: nil, pendingItems: nil, localSize: nil,
                 locationPath: "\(home)/Library/CloudStorage/\(domain)".replacingOccurrences(of: home, with: "~"),
                 infoCallout: "\(name) syncs through a File Provider extension. macOS reports only the domain's overall status."
             ))

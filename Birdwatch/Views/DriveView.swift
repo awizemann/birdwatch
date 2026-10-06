@@ -8,6 +8,14 @@ struct DriveView: View {
         ContentColumn {
             ViewHeader(title: MonitorView.drive.title, subtitle: MonitorView.drive.subtitle)
 
+            // Before the first folder scan lands the table would just be
+            // empty; once a rescan overruns, the rows are an older result.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if let notice = ScanFreshnessNotice.text(store.folderScan, subject: "iCloud Drive folders", now: context.date) {
+                    SourceFootnote(text: notice)
+                }
+            }
+
             // Folders table card
             Card(padding: 0) {
                 VStack(spacing: 0) {
@@ -24,7 +32,10 @@ struct DriveView: View {
 
                     ForEach(store.driveFolders) { folder in
                         Divider().overlay(Surface.cardLine)
-                        FolderRow(folder: folder)
+                        FolderRow(folder: folder, display: SyncStatusDisplay(
+                            status: folder.status, backend: .cloudDocs,
+                            progressIsIndeterminate: store.progressIsIndeterminate(folderName: folder.name)
+                        ))
                     }
                 }
             }
@@ -50,6 +61,7 @@ struct DriveView: View {
 
 private struct FolderRow: View {
     let folder: DriveFolder
+    let display: SyncStatusDisplay
 
     var body: some View {
         HStack(spacing: 10) {
@@ -61,7 +73,7 @@ private struct FolderRow: View {
 
             Spacer()
 
-            Text("\(folder.itemCount) items")
+            Text(folder.itemCountText)
                 .scaledFont(size: 12.5)
                 .foregroundStyle(Surface.fg2)
                 .monospacedDigit()
@@ -73,13 +85,13 @@ private struct FolderRow: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(folder.name), \(folder.itemCount) items, \(folder.status.shortLabel)")
+        .accessibilityLabel("\(folder.name), \(folder.itemCountText), \(display.label)")
     }
 
     @ViewBuilder
     private var statusColumn: some View {
-        switch folder.status {
-        case .syncing(let progress):
+        switch display.bar {
+        case .determinate(let progress):
             HStack(spacing: 8) {
                 MiniProgressBar(progress: progress, label: "\(folder.name) sync progress")
                     .frame(width: 90)
@@ -88,10 +100,19 @@ private struct FolderRow: View {
                     .foregroundStyle(Palette.accent)
                     .monospacedDigit()
             }
-        default:
-            Text(folder.status.shortLabel)
+        case .indeterminate:
+            // The channel says "in progress" and nothing more.
+            HStack(spacing: 8) {
+                MiniProgressBar(progress: 0, label: "\(folder.name) sync progress", indeterminate: true)
+                    .frame(width: 90)
+                Text(display.label)
+                    .scaledFont(size: 12, weight: .bold)
+                    .foregroundStyle(Palette.accent)
+            }
+        case nil:
+            Text(display.label)
                 .scaledFont(size: 12, weight: .semibold)
-                .foregroundStyle(folder.status.tint)
+                .foregroundStyle(display.tone.color)
         }
     }
 }

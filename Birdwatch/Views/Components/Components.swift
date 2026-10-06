@@ -301,6 +301,22 @@ struct SyncSpinner: View {
 
 // MARK: - Relative time
 
+/// "Updated 30s ago" from the store's last landed snapshot. A 15 s timeline,
+/// not a per-second one: the label is coarse by design (FreshnessLabel).
+struct FreshnessText: View {
+    let lastRefresh: Date?
+    var size: CGFloat = 11.5
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            Text(FreshnessLabel.text(lastRefresh: lastRefresh, now: context.date))
+                .scaledFont(size: size)
+                .foregroundStyle(Surface.fg3)
+                .monospacedDigit()
+        }
+    }
+}
+
 /// Live-updating relative time ("26 min ago"); `.relative` style counts on its own.
 struct RelativeTimeText: View {
     let date: Date

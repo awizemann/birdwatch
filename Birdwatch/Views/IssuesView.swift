@@ -115,18 +115,29 @@ struct IssuesView: View {
     }
 
     private var emptyState: some View {
-        Card {
+        // "No issues detected" plus whatever limits that answer (IssuesEmptyState).
+        let state = IssuesEmptyState(
+            fullDiskAccess: store.fullDiskAccess,
+            isPaused: store.isGloballyPaused,
+            deliveredProducers: store.deliveredIssueProducers,
+            conflictScanCap: store.conflictScanCap
+        )
+        return Card {
             VStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
+                Image(systemName: state.isClean ? "checkmark.circle.fill" : "info.circle.fill")
                     .scaledFont(size: 40)
-                    .foregroundStyle(Palette.success)
+                    .foregroundStyle(state.isClean ? Palette.success : Surface.fg3)
                     .accessibilityHidden(true)
-                Text("No issues")
+                Text(state.title)
                     .scaledFont(size: 15, weight: .bold)
                     .foregroundStyle(Surface.fg)
-                Text("Everything is syncing normally.")
-                    .scaledFont(size: 12.5)
-                    .foregroundStyle(Surface.fg2)
+                ForEach(state.lines, id: \.self) { line in
+                    Text(line)
+                        .scaledFont(size: 12.5)
+                        .foregroundStyle(Surface.fg2)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 24)

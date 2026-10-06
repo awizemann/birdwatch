@@ -8,16 +8,19 @@ struct BandwidthView: View {
             ViewHeader(title: MonitorView.bandwidth.title, subtitle: MonitorView.bandwidth.subtitle)
 
             if let bandwidth = store.bandwidth {
+                // Every figure is attributed from daemon traffic (C2), so each
+                // carries "≈"; a rate that wasn't measured says so (C1).
                 HStack(spacing: 14) {
-                    statTile(label: "Uploaded today", value: Format.size(bandwidth.uploadedTodayBytes), tint: Palette.accent)
-                    statTile(label: "Downloaded today", value: Format.size(bandwidth.downloadedTodayBytes), tint: Palette.success)
-                    statTile(label: "Current rate", value: "≈ \(Format.size(bandwidth.currentRateBytesPerSec))/s", tint: Surface.fg)
+                    statTile(label: "Uploaded today", value: BandwidthPresentation.totalText(bandwidth.uploadedTodayBytes, hours: bandwidth.hours), tint: Palette.accent)
+                    statTile(label: "Downloaded today", value: BandwidthPresentation.totalText(bandwidth.downloadedTodayBytes, hours: bandwidth.hours), tint: Palette.success)
+                    statTile(label: "Current rate", value: BandwidthPresentation.rateText(bandwidth),
+                             tint: bandwidth.rateIsMeasured && !bandwidth.lastSampleFailed ? Surface.fg : Surface.fg3)
                 }
 
                 Card {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text("Last 24 hours")
+                            Text(BandwidthPresentation.chartTitle)
                                 .scaledFont(size: 13.5, weight: .bold)
                                 .foregroundStyle(Surface.fg)
                             Spacer()
@@ -97,14 +100,23 @@ private struct DualBarChart: View {
                         VStack(spacing: 1) {
                             RoundedRectangle(cornerRadius: 2)
                                 .fill(Palette.accent)
-                                .frame(height: barHeight(sample.uploadedBytes, halfHeight: halfHeight, maxBytes: maxBytes))
+                                .frame(height: BandwidthPresentation.barHeight(
+                                    bytes: sample.uploadedBytes, isObserved: sample.isObserved,
+                                    available: halfHeight, maxBytes: maxBytes))
                                 .frame(maxHeight: .infinity, alignment: .bottom)
                             RoundedRectangle(cornerRadius: 2)
                                 .fill(Palette.success)
-                                .frame(height: barHeight(sample.downloadedBytes, halfHeight: halfHeight, maxBytes: maxBytes))
+                                .frame(height: BandwidthPresentation.barHeight(
+                                    bytes: sample.downloadedBytes, isObserved: sample.isObserved,
+                                    available: halfHeight, maxBytes: maxBytes))
                                 .frame(maxHeight: .infinity, alignment: .top)
                         }
                         .frame(maxWidth: .infinity)
+                        // Observed hours sit on a faint column so the window
+                        // Birdwatch actually watched is visible; the rest of
+                        // the day is blank — not data.
+                        .background(sample.isObserved ? Surface.hover.opacity(0.6) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 2))
                     }
                 }
                 .overlay {
@@ -124,18 +136,7 @@ private struct DualBarChart: View {
             }
         }
         .accessibilityElement()
-        .accessibilityLabel("24-hour upload and download chart")
-        .accessibilityValue(accessibilitySummary)
-    }
-
-    private var accessibilitySummary: String {
-        let uploaded = samples.map(\.uploadedBytes).reduce(0, +)
-        let downloaded = samples.map(\.downloadedBytes).reduce(0, +)
-        let peakHour = samples.max { ($0.uploadedBytes + $0.downloadedBytes) < ($1.uploadedBytes + $1.downloadedBytes) }?.hour ?? 0
-        return "Uploaded \(Format.size(uploaded)), downloaded \(Format.size(downloaded)) in the last 24 hours; busiest hour \(peakHour):00"
-    }
-
-    private func barHeight(_ bytes: Int64, halfHeight: CGFloat, maxBytes: Int64) -> CGFloat {
-        max(2, halfHeight * CGFloat(bytes) / CGFloat(maxBytes))
+        .accessibilityLabel("Hourly upload and download chart, today since Birdwatch started")
+        .accessibilityValue(BandwidthPresentation.chartSummary(samples))
     }
 }

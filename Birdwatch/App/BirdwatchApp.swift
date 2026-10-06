@@ -125,7 +125,7 @@ struct BirdwatchApp: App {
     }
 
     private var menuBarAccessibilityLabel: String {
-        if store.issueCount > 0 { return "Birdwatch, \(store.issueCount) issues" }
+        if store.issueCount > 0 { return "Birdwatch, \(Plural.count(store.issueCount, "issue"))" }
         if store.isGloballyPaused { return "Birdwatch, monitoring paused" }
         return "Birdwatch"
     }

@@ -250,16 +250,16 @@ struct CloudKitAppMappingTests {
     @Test("Status lines describe observed state and recency")
     func statusLines() {
         let now = fixtureNow
-        #expect(CloudKitAppMapping.statusLine(state: .transferring, lastActivity: now, now: now) == "Transferring now")
+        // Age-free: the row shows the live relative lastActivity beside this
+        // line, so a frozen "now" / "2m ago" would contradict it within minutes.
+        #expect(CloudKitAppMapping.statusLine(state: .transferring, lastActivity: now, now: now) == "Transferring")
         #expect(CloudKitAppMapping.statusLine(state: .pushing, lastActivity: now, now: now) == "Pushing changes")
         #expect(CloudKitAppMapping.statusLine(state: .throttled, lastActivity: now, now: now) == "Throttled by iCloud")
         #expect(CloudKitAppMapping.statusLine(state: .idle, lastActivity: nil, now: now) == "No recent activity")
         #expect(CloudKitAppMapping.statusLine(
-            state: .idle, lastActivity: now.addingTimeInterval(-30), now: now) == "Last synced just now")
+            state: .idle, lastActivity: now.addingTimeInterval(-120), now: now) == "Last activity in cloudd's log")
         #expect(CloudKitAppMapping.statusLine(
-            state: .idle, lastActivity: now.addingTimeInterval(-120), now: now) == "Last synced 2m ago")
-        #expect(CloudKitAppMapping.statusLine(
-            state: .idle, lastActivity: now.addingTimeInterval(-7200), now: now) == "Last synced 2h ago")
+            state: .idle, lastActivity: now.addingTimeInterval(60), now: now) == "No recent activity")
     }
 
     @Test("Rows are honest: never a progress percentage, always a real timestamp")
@@ -273,11 +273,25 @@ struct CloudKitAppMappingTests {
         )
         #expect(row.id == "photos")
         #expect(row.backend == .cloudKit)
-        #expect(row.status == .upToDate)
+        // Pushing is work in flight with no progress: neither a percentage
+        // nor "Up to date" next to "Pushing changes".
+        #expect(row.status == .active)
         #expect(row.statusLine == "Pushing changes")
         #expect(row.lastActivity == fixtureNow.addingTimeInterval(-60))
+        // cloudd reports none of these — absent, not a placeholder zero.
+        #expect(row.itemCount == nil)
+        #expect(row.pendingItems == nil)
+        #expect(row.localSize == nil)
         #expect(row.infoCallout?.contains("no public per-item or per-app progress API") == true)
         #expect(row.infoCallout?.contains("com.apple.photos.cloud") == true)
+    }
+
+    @Test("Only an idle container reads as up to date; observed work is active")
+    func statusMapping() {
+        #expect(CloudKitAppMapping.status(for: .transferring) == .active)
+        #expect(CloudKitAppMapping.status(for: .pushing) == .active)
+        #expect(CloudKitAppMapping.status(for: .throttled) == .active)
+        #expect(CloudKitAppMapping.status(for: .idle) == .upToDate)
     }
 }
 

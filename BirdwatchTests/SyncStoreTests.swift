@@ -77,7 +77,7 @@ extension AppSyncState {
         AppSyncState(
             id: id, name: id, tileColorHex: "0a84ff", backend: .cloudDocs, isApple: true,
             status: status, statusLine: statusLine, lastActivity: nil,
-            itemsIndexed: 0, pendingItems: pending, localSizeBytes: 0, locationPath: ""
+            itemCount: nil, pendingItems: pending, localSize: nil, locationPath: ""
         )
     }
 }

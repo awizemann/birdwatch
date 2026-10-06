@@ -37,10 +37,42 @@ enum SyncBackend: String, Sendable, Hashable, Codable {
 enum AppSyncStatus: Sendable, Hashable {
     case upToDate
     case syncing(progress: Double)   // 0...1
+    /// The backend reports work in progress (CloudKit transferring, pushing or
+    /// throttled) but no progress of any kind — no percentage, no file count.
+    /// Distinct from `.syncing` so nothing averages it into a percentage, and
+    /// from `.upToDate` so nothing calls it synced (C1).
+    case active
     case paused
     case issue(String)
 
     var isSyncing: Bool { if case .syncing = self { true } else { false } }
+    /// Syncing with or without progress — anything that is doing work.
+    var isActive: Bool {
+        switch self {
+        case .syncing, .active: true
+        case .upToDate, .paused, .issue: false
+        }
+    }
+}
+
+/// How many items an app holds, and what KIND of count it is — an engine's
+/// index and a shallow directory listing are different facts and must not
+/// share a label.
+nonisolated enum AppItemCount: Sendable, Hashable {
+    /// The sync engine's own count of indexed items.
+    case indexed(Int)
+    /// Visible top-level entries of the app's container (one shallow listing).
+    /// `isCapped`: the listing stopped at the cap, so the figure is a floor.
+    case topLevel(Int, isCapped: Bool)
+}
+
+/// Allocated bytes an app keeps on this Mac.
+nonisolated struct LocalSize: Sendable, Hashable {
+    let bytes: Int64
+    /// The walk hit its entry cap, so `bytes` is a floor ("at least").
+    var isPartial: Bool = false
+    /// The folder could not be read at all: `bytes` is not a measurement.
+    var isUnreadable: Bool = false
 }
 
 struct AppSyncState: Sendable, Hashable, Identifiable {
@@ -53,10 +85,11 @@ struct AppSyncState: Sendable, Hashable, Identifiable {
     var statusLine: String           // e.g. "Uploading 234 of 1,024 photos"
     var lastActivity: Date?
 
-    // Detail-view fields
-    var itemsIndexed: Int
-    var pendingItems: Int
-    var localSizeBytes: Int64
+    // Detail-view fields. nil means the backend does not report it (or, for
+    // `localSize`, it has not been measured yet) — never a placeholder zero.
+    var itemCount: AppItemCount?
+    var pendingItems: Int?
+    var localSize: LocalSize?
     var locationPath: String
     var queueBreakdown: [(String, Int)]? { queueLabels.isEmpty ? nil : Array(zip(queueLabels, queueCounts)) }
     var queueLabels: [String] = []
@@ -88,6 +121,14 @@ struct TransferItem: Sendable, Hashable, Identifiable {
     /// be fabricating a measurement. Fixture/mock rows carry real fractions
     /// (0 < progress < 1) and stay determinate.
     nonisolated var isIndeterminate: Bool { progress <= 0 }
+
+    /// TRUE when a set of in-flight rows carries no honest percentage at all,
+    /// so any mean over them would be a fabricated zero. Heuristic, the one
+    /// rule for every bar: ANY row with 0 < progress < 1 → determinate.
+    nonisolated static func progressIsIndeterminate(_ inFlight: [TransferItem]) -> Bool {
+        guard !inFlight.isEmpty else { return false }
+        return !inFlight.contains { $0.progress > 0 && $0.progress < 1 }
+    }
 }
 
 // MARK: - iCloud Drive folders
@@ -95,8 +136,24 @@ struct TransferItem: Sendable, Hashable, Identifiable {
 struct DriveFolder: Sendable, Hashable, Identifiable {
     let id: String
     let name: String
-    let itemCount: Int
+    /// Top-level entries; nil when the folder could not be read.
+    let itemCount: Int?
     var status: AppSyncStatus
+    /// The count stopped at the scan's cap, so it is a floor ("500+").
+    var itemCountIsCapped: Bool = false
+
+    /// Display location of the iCloud Drive root, as transfers report it.
+    nonisolated static let cloudDocsLocation = "~/Library/Mobile Documents/com~apple~CloudDocs"
+
+    /// The top-level iCloud Drive folder a transfer's display location falls
+    /// in, or nil when it is outside one. The one rule both a folder's status
+    /// and the store's per-folder progress decision use.
+    nonisolated static func folderName(containing location: String) -> String? {
+        let prefix = cloudDocsLocation + "/"
+        guard location.hasPrefix(prefix) else { return nil }
+        let name = location.dropFirst(prefix.count).split(separator: "/", maxSplits: 1).first
+        return name.map(String.init)
+    }
 }
 
 // MARK: - Devices
@@ -321,6 +378,9 @@ struct BandwidthHourSample: Sendable, Hashable, Identifiable {
     let hour: Int                    // 0...23
     let uploadedBytes: Int64
     let downloadedBytes: Int64
+    /// FALSE for hours Birdwatch never sampled successfully (before launch,
+    /// still to come, or every sample failed). Their zeros are not data.
+    var isObserved: Bool = true
 }
 
 struct BandwidthSummary: Sendable, Hashable {
@@ -328,6 +388,11 @@ struct BandwidthSummary: Sendable, Hashable {
     var downloadedTodayBytes: Int64
     var currentRateBytesPerSec: Int64
     var hours: [BandwidthHourSample]
+    /// FALSE when `currentRateBytesPerSec` is not a measurement: the first
+    /// sample only sets a baseline, and a failed sample measures nothing.
+    var rateIsMeasured: Bool = true
+    /// The latest sample failed (nettop or ps did not answer).
+    var lastSampleFailed: Bool = false
 }
 
 struct StorageSegment: Sendable, Hashable, Identifiable {

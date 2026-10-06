@@ -11,6 +11,20 @@ struct ApplicationsView: View {
         ContentColumn {
             ViewHeader(title: MonitorView.applications.title, subtitle: MonitorView.applications.subtitle)
 
+            // What the scans behind this list could say: an empty or old list
+            // is labelled, never passed off as complete (C1).
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                let notices = [
+                    ScanFreshnessNotice.text(store.containerScan, subject: "app containers", now: context.date),
+                    CloudKitNotice.text(store.cloudKitScan, now: context.date),
+                ].compactMap { $0 }
+                if !notices.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(notices, id: \.self) { SourceFootnote(text: $0) }
+                    }
+                }
+            }
+
             appGroup(label: "Apple apps", apps: apple)
             appGroup(label: "Third-party apps", apps: thirdParty)
 
@@ -24,7 +38,10 @@ struct ApplicationsView: View {
             Card(padding: 6) {
                 VStack(spacing: 0) {
                     ForEach(apps) { app in
-                        AppRow(app: app) { store.detailAppID = app.id }
+                        AppRow(app: app, display: SyncStatusDisplay(
+                            status: app.status, backend: app.backend,
+                            progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
+                        )) { store.detailAppID = app.id }
                         if app.id != apps.last?.id {
                             Divider().overlay(Surface.cardLine)
                         }
@@ -39,6 +56,7 @@ struct ApplicationsView: View {
 
 private struct AppRow: View {
     let app: AppSyncState
+    let display: SyncStatusDisplay
     let action: () -> Void
     @State private var hovering = false
     @FocusState private var focused: Bool
@@ -67,18 +85,18 @@ private struct AppRow: View {
 
                     VStack(alignment: .trailing, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text(app.status.shortLabel)
+                            Text(display.label)
                                 .scaledFont(size: 12, weight: .semibold)
-                                .foregroundStyle(app.status.tint)
+                                .foregroundStyle(display.tone.color)
                                 .monospacedDigit()
-                            if app.status.isSyncing { SyncSpinner() }
+                            if display.showsSpinner { SyncSpinner() }
                         }
                         if let last = app.lastActivity {
                             RelativeTimeText(date: last)
                         }
                         // Local footprint, once the background size pass lands.
-                        if app.localSizeBytes > 0 {
-                            Text(Format.size(app.localSizeBytes))
+                        if let size = app.localSize, size.bytes > 0 {
+                            Text(LocalSizeText.text(size))
                                 .scaledFont(size: 11)
                                 .foregroundStyle(Surface.fg3)
                                 .monospacedDigit()
@@ -90,8 +108,13 @@ private struct AppRow: View {
                         .foregroundStyle(Surface.fg3)
                 }
 
-                if case .syncing(let progress) = app.status {
-                    MiniProgressBar(progress: progress)
+                switch display.bar {
+                case .determinate(let progress):
+                    MiniProgressBar(progress: progress, label: "\(app.name) sync progress")
+                case .indeterminate:
+                    MiniProgressBar(progress: 0, label: "\(app.name) sync progress", indeterminate: true)
+                case nil:
+                    EmptyView()
                 }
             }
             .padding(.horizontal, 12)
@@ -113,8 +136,8 @@ private struct AppRow: View {
         .focusEffectDisabled(false)
         .onHover { hovering = $0 }
         .accessibilityLabel(
-            "\(app.name), \(app.backend.badgeLabel), \(app.status.shortLabel)"
-            + (app.localSizeBytes > 0 ? ", \(Format.size(app.localSizeBytes)) on this Mac" : "")
+            "\(app.name), \(app.backend.badgeLabel), \(display.label)"
+            + (app.localSize.map { $0.bytes > 0 ? ", \(LocalSizeText.text($0)) on this Mac" : "" } ?? "")
         )
         .accessibilityHint("Shows sync details")
     }

@@ -49,7 +49,19 @@ enum ConflictSource {
         root: URL = URL(fileURLWithPath: NSHomeDirectory())
             .appending(path: "Library/Mobile Documents/com~apple~CloudDocs")
     ) async -> [FoundConflict]? {
-        await BlockingWork.run(on: scanQueue) { scanConflicts(root: root) }
+        await scanConflicts(root: root)?.found
+    }
+
+    /// `findConflicts` plus whether the walk stopped at `maxItemsVisited`.
+    /// A capped scan found nothing in the part it never reached, so its empty
+    /// result must not read as "no conflicts" (C1). The walk runs on
+    /// `scanQueue` via `BlockingWork` (see `findConflicts`).
+    nonisolated static func scanConflicts(
+        root: URL = URL(fileURLWithPath: NSHomeDirectory())
+            .appending(path: "Library/Mobile Documents/com~apple~CloudDocs"),
+        maxItems: Int = maxItemsVisited
+    ) async -> (found: [FoundConflict], isCapped: Bool)? {
+        await BlockingWork.run(on: scanQueue) { walkConflicts(root: root, maxItems: maxItems) }
     }
 
     /// Dedicated serial queue for the conflict walk (see `findConflicts`).
@@ -58,7 +70,7 @@ enum ConflictSource {
     /// The blocking walk. Only ever runs on `scanQueue` — the precondition
     /// turns a future direct call from async code back onto the pool into a
     /// test failure instead of a silent pool-starvation risk.
-    private nonisolated static func scanConflicts(root: URL) -> [FoundConflict]? {
+    private nonisolated static func walkConflicts(root: URL, maxItems: Int) -> (found: [FoundConflict], isCapped: Bool)? {
         dispatchPrecondition(condition: .onQueue(scanQueue))
         let fm = FileManager.default
         guard (try? root.checkResourceIsReachable()) == true else {
@@ -83,13 +95,15 @@ enum ConflictSource {
         }
 
         var visited = 0
+        var isCapped = false
         var found: [FoundConflict] = []
         // NSEnumerator's makeIterator is unavailable in async contexts (Swift
         // 6.2 sendability); nextObject() is the supported equivalent.
         while let url = enumerator.nextObject() as? URL {
             visited += 1
-            if visited > maxItemsVisited {
-                logger.info("conflict scan: cap of \(maxItemsVisited) items reached, stopping")
+            if visited > maxItems {
+                logger.info("conflict scan: cap of \(maxItems) items reached, stopping")
+                isCapped = true
                 break
             }
             do {
@@ -105,7 +119,7 @@ enum ConflictSource {
                 continue
             }
         }
-        return rootUnreadable ? nil : found
+        return rootUnreadable ? nil : (found, isCapped)
     }
 
     /// `NSFileVersion.unresolvedConflictVersionsOfItem` inside a coordinated

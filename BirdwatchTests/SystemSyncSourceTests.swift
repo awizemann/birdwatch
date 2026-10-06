@@ -135,7 +135,7 @@ struct SystemSyncSourceAssemblyTests {
     // exposes no per-app API, so these stay activity-and-recency only. Since
     // Phase 5D the rows are OBSERVED (from cloudd's log): none are passed in
     // here, so none may appear.
-    @Test("CloudKit apps are observed-only, always up-to-date, never given progress")
+    @Test("CloudKit apps are observed-only and never given progress")
     func cloudKitAppsAreObservedOnly() {
         let observed = CloudKitAppMapping.makeApp(
             activity: CloudKitAppActivity(
@@ -163,7 +163,8 @@ struct SystemSyncSourceAssemblyTests {
             #expect(ck.map(\.id) == ["photos"])
             for app in ck {
                 #expect(app.status == .upToDate)
-                #expect(app.pendingItems == 0, "a stray transfer must not leak into a CloudKit tile")
+                // nil = cloudd reports no pending count (not a placeholder 0).
+                #expect(app.pendingItems == nil, "a stray transfer must not leak into a CloudKit tile")
             }
         }
     }

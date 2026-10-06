@@ -44,6 +44,8 @@ enum AppContainerSource {
         let name: String                // e.g. "Obsidian"
         let isApple: Bool
         var itemCount: Int = 0
+        /// The shallow listing held more than `itemCountCap` entries.
+        var itemCountIsCapped = false
         var lastModified: Date?
     }
 
@@ -82,6 +84,7 @@ enum AppContainerSource {
             // fall back to the container root when it doesn't.
             let documents = url.appendingPathComponent("Documents", isDirectory: true)
             var count = 0
+            var capped = false
             var modified: Date?
             for candidate in [documents, url] {
                 do {
@@ -92,6 +95,7 @@ enum AppContainerSource {
                     let visible = items.filter { $0.lastPathComponent != "Documents" || candidate == documents }
                     if !visible.isEmpty {
                         count = min(visible.count, itemCountCap)
+                        capped = visible.count > itemCountCap
                         modified = visible.compactMap {
                             try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
                         }.max()
@@ -104,6 +108,7 @@ enum AppContainerSource {
             }
             guard count > 0 else { continue }       // empty stub — not an app the user has data in
             container.itemCount = count
+            container.itemCountIsCapped = capped
             container.lastModified = modified
             result.append(container)
         }
@@ -220,21 +225,36 @@ enum AppContainerSource {
     ///
     /// Pure w.r.t. its input directory, so tests drive it with a temp dir.
     nonisolated static func allocatedSize(ofDirectory url: URL, cap: Int = sizeEntryCap) -> Int64 {
+        measuredSize(ofDirectory: url, cap: cap).bytes
+    }
+
+    /// `allocatedSize` plus whether the walk stopped at `cap` — a capped walk
+    /// is a floor and must be labelled "at least", never shown as exact (C1).
+    nonisolated static func measuredSize(ofDirectory url: URL, cap: Int = sizeEntryCap) -> LocalSize {
         let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
+        // A folder that can't be read at all measured nothing: say so rather
+        // than report "Zero KB" (C1).
+        let unreadable = LocalSize(bytes: 0, isUnreadable: true)
+        guard (try? url.checkResourceIsReachable()) == true else { return unreadable }
+        var rootUnreadable = false
         guard let enumerator = FileManager.default.enumerator(
             at: url, includingPropertiesForKeys: keys, options: [],
             errorHandler: { failed, error in
                 logger.debug("size walk skipped \(failed.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .private)")
+                // Runs synchronously inside nextObject() on this thread.
+                if failed.standardizedFileURL == url.standardizedFileURL { rootUnreadable = true }
                 return true      // per-item fault tolerance: keep walking
             }
-        ) else { return 0 }
+        ) else { return unreadable }
 
         var total: Int64 = 0
         var visited = 0
+        var isPartial = false
         for case let item as URL in enumerator {
             visited += 1
             if visited > cap {
                 logger.notice("size walk hit the \(cap, privacy: .public)-entry cap for \(url.lastPathComponent, privacy: .private); reporting a partial figure")
+                isPartial = true
                 break
             }
             guard let values = try? item.resourceValues(forKeys: Set(keys)),
@@ -243,7 +263,8 @@ enum AppContainerSource {
                 total += Int64(allocated)
             }
         }
-        return total
+        if rootUnreadable && total == 0 { return unreadable }
+        return LocalSize(bytes: total, isPartial: isPartial || rootUnreadable)
     }
 
     /// Serial queue for the blocking size walk (see `BlockingWork`).
@@ -256,7 +277,7 @@ enum AppContainerSource {
     nonisolated static func localSizes(
         containers: [Container], homeDirectory: String = NSHomeDirectory(),
         includeDesktopDocuments: Bool = false
-    ) async -> [String: Int64] {
+    ) async -> [String: LocalSize] {
         await BlockingWork.run(on: sizeWalkQueue) {
             measureLocalSizes(containers: containers, homeDirectory: homeDirectory,
                               includeDesktopDocuments: includeDesktopDocuments)
@@ -266,21 +287,27 @@ enum AppContainerSource {
     /// The blocking walk behind `localSizes`. Never call it from a Task directly.
     nonisolated static func measureLocalSizes(
         containers: [Container], homeDirectory: String, includeDesktopDocuments: Bool
-    ) -> [String: Int64] {
-        var sizes: [String: Int64] = [:]
+    ) -> [String: LocalSize] {
+        var sizes: [String: LocalSize] = [:]
         let home = URL(fileURLWithPath: homeDirectory)
         let root = home.appendingPathComponent("Library/Mobile Documents", isDirectory: true)
 
-        sizes["icloud-drive"] = allocatedSize(ofDirectory: root.appendingPathComponent("com~apple~CloudDocs", isDirectory: true))
+        sizes["icloud-drive"] = measuredSize(ofDirectory: root.appendingPathComponent("com~apple~CloudDocs", isDirectory: true))
         // Only when Desktop & Documents sync is on — otherwise these are plain
         // local folders and reading them just triggers a TCC prompt.
         if includeDesktopDocuments {
-            sizes["desktop-documents"] = allocatedSize(ofDirectory: home.appendingPathComponent("Desktop", isDirectory: true))
-                + allocatedSize(ofDirectory: home.appendingPathComponent("Documents", isDirectory: true))
+            let desktop = measuredSize(ofDirectory: home.appendingPathComponent("Desktop", isDirectory: true))
+            let documents = measuredSize(ofDirectory: home.appendingPathComponent("Documents", isDirectory: true))
+            // One unreadable half makes the sum a floor; both make it nothing.
+            sizes["desktop-documents"] = LocalSize(
+                bytes: desktop.bytes + documents.bytes,
+                isPartial: desktop.isPartial || documents.isPartial || desktop.isUnreadable != documents.isUnreadable,
+                isUnreadable: desktop.isUnreadable && documents.isUnreadable
+            )
         }
 
         for container in containers {
-            sizes[container.id] = allocatedSize(
+            sizes[container.id] = measuredSize(
                 ofDirectory: root.appendingPathComponent(container.directoryName, isDirectory: true)
             )
         }
@@ -309,11 +336,21 @@ enum AppContainerSource {
 
     // MARK: - App rows
 
+    /// "7 top-level items" / "500+ top-level items" — what the shallow listing
+    /// actually counted, with a capped listing stated as a floor.
+    nonisolated static func topLevelLine(_ container: Container) -> String {
+        let count = container.itemCount
+        if container.itemCountIsCapped { return "\(count)+ top-level items" }
+        return "\(count) top-level item\(count == 1 ? "" : "s")"
+    }
+
     /// Containers → `AppSyncState` rows, sorted active-first then by name.
     nonisolated static func makeApps(
-        containers: [Container], transfers: [TransferItem], localSizes: [String: Int64] = [:]
+        containers: [Container], transfers: [TransferItem], localSizes: [String: LocalSize] = [:]
     ) -> [AppSyncState] {
-        let byApp = Dictionary(grouping: transfers, by: \.appID)
+        // In flight only: a finished item lingers (completionGrace) at 1.0 and
+        // must not keep the row "Syncing 100%".
+        let byApp = Dictionary(grouping: transfers.filter { !$0.isDone }, by: \.appID)
         let rows = containers.map { container -> AppSyncState in
             let own = byApp[container.id] ?? []
             let syncing = !own.isEmpty
@@ -327,18 +364,19 @@ enum AppContainerSource {
                 status: syncing ? .syncing(progress: progress) : .upToDate,
                 statusLine: syncing
                     ? "\(own.count) file\(own.count == 1 ? "" : "s") in transfer"
-                    : "\(container.itemCount) item\(container.itemCount == 1 ? "" : "s") in iCloud Drive",
+                    : topLevelLine(container),
                 lastActivity: container.lastModified,
-                itemsIndexed: container.itemCount,
+                // A shallow listing of the container, not an index of it.
+                itemCount: .topLevel(container.itemCount, isCapped: container.itemCountIsCapped),
                 pendingItems: own.count,
-                // Filled by the background size pass (5-min cache); 0 until it lands.
-                localSizeBytes: localSizes[container.id] ?? 0,
+                // Filled by the background size pass (5-min cache); nil until it lands.
+                localSize: localSizes[container.id],
                 locationPath: "~/Library/Mobile Documents/\(container.directoryName)",
                 infoCallout: "\(container.name) stores documents in its own iCloud Drive container. Counts are the container's top level, and \"On this Mac\" is allocated bytes actually stored locally — files still in the cloud (dataless placeholders) take almost no space, so this can be far smaller than the container's cloud size."
             )
         }
         return rows.sorted { lhs, rhs in
-            let lActive = lhs.pendingItems > 0, rActive = rhs.pendingItems > 0
+            let lActive = (lhs.pendingItems ?? 0) > 0, rActive = (rhs.pendingItems ?? 0) > 0
             if lActive != rActive { return lActive }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }

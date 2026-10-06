@@ -36,6 +36,15 @@ actor BandwidthSource {
         /// (the whole buffer resets on day rollover).
         var hourUploaded = [Int64](repeating: 0, count: 24)
         var hourDownloaded = [Int64](repeating: 0, count: 24)
+        /// Hours of the current day with at least one SUCCESSFUL sample. Every
+        /// other hour's zero is "not observed", not "no traffic".
+        var observedHours: Set<Int> = []
+        /// The latest sample failed (nettop or ps did not answer).
+        var lastSampleFailed = false
+        /// `currentRateBytesPerSec` came from two consecutive successful
+        /// samples. The first sample is only a baseline, and a failure
+        /// measures nothing — both leave a 0 that is not a measurement.
+        var rateIsMeasured = false
     }
 
     struct Reading: Sendable, Equatable {
@@ -52,7 +61,7 @@ actor BandwidthSource {
         let pids = await discoverDaemonPids(psOutput: psOutput)
         guard !pids.isEmpty else {
             logger.warning("no iCloud daemons found; bandwidth stays at last state")
-            state = Self.advance(state: state, readings: [:], now: Date())
+            state = Self.advance(state: state, readings: [:], now: Date(), measured: false)
             return Self.summary(from: state)
         }
         var arguments = ["-P", "-x", "-L", "1"]
@@ -69,7 +78,7 @@ actor BandwidthSource {
             state = Self.advance(state: state, readings: readings, now: Date())
         } catch {
             logger.error("nettop sample failed: \(String(describing: error), privacy: .public)")
-            state = Self.advance(state: state, readings: [:], now: Date())
+            state = Self.advance(state: state, readings: [:], now: Date(), measured: false)
         }
         return Self.summary(from: state)
     }
@@ -132,11 +141,15 @@ actor BandwidthSource {
     ///   pid reuse) yields 0, never a negative.
     /// - Unseen pids (first sample) yield 0 — a baseline, not traffic.
     /// - Day rollover resets today's totals and the whole hour buffer.
+    /// - `measured: false` marks a FAILED sample (nettop/ps did not answer):
+    ///   the math is the same as an empty reading (the accepted re-baseline),
+    ///   but the hour is not marked observed and the rate is not a measurement.
     nonisolated static func advance(
         state: State,
         readings: [Int32: Reading],
         now: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        measured: Bool = true
     ) -> State {
         var next = state
 
@@ -148,7 +161,11 @@ actor BandwidthSource {
             next.downloadedTodayBytes = 0
             next.hourUploaded = [Int64](repeating: 0, count: 24)
             next.hourDownloaded = [Int64](repeating: 0, count: 24)
+            next.observedHours = []
         }
+        next.lastSampleFailed = !measured
+        // A rate needs this sample AND the previous one to have succeeded.
+        next.rateIsMeasured = measured && state.lastSampleAt != nil && !state.lastSampleFailed
 
         var deltaIn: Int64 = 0
         var deltaOut: Int64 = 0
@@ -167,6 +184,9 @@ actor BandwidthSource {
         if (0..<24).contains(hour) {
             next.hourDownloaded[hour] += deltaIn
             next.hourUploaded[hour] += deltaOut
+            // Observed only once a DELTA was measured: a baseline sample
+            // (first, or right after a failure) measured no traffic at all.
+            if next.rateIsMeasured { next.observedHours.insert(hour) }
         }
 
         if let last = state.lastSampleAt {
@@ -190,9 +210,12 @@ actor BandwidthSource {
                 BandwidthHourSample(
                     hour: $0,
                     uploadedBytes: state.hourUploaded[$0],
-                    downloadedBytes: state.hourDownloaded[$0]
+                    downloadedBytes: state.hourDownloaded[$0],
+                    isObserved: state.observedHours.contains($0)
                 )
-            }
+            },
+            rateIsMeasured: state.rateIsMeasured,
+            lastSampleFailed: state.lastSampleFailed
         )
     }
 }

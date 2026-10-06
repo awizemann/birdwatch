@@ -89,12 +89,14 @@ struct StorageView: View {
                     accountLegendRow(
                         color: Color(hex: StorageCategory.documents.colorHex),
                         name: "iCloud Drive on this Mac",
-                        bytes: storage.accountLocalSegmentBytes ?? 0
+                        bytes: storage.accountLocalSegmentBytes ?? 0,
+                        isEstimated: Self.localPartIsEstimated(storage)
                     )
                     accountLegendRow(
                         color: Surface.fg3,
                         name: "Photos, Messages, backups & other devices",
-                        bytes: storage.accountRemainderBytes ?? 0
+                        bytes: storage.accountRemainderBytes ?? 0,
+                        isEstimated: Self.remainderIsEstimated(storage)
                     )
                 }
 
@@ -120,24 +122,36 @@ struct StorageView: View {
         guard let used = storage.accountUsedBytes, let cap = storage.totalBytes else {
             return usageHeadline(storage)
         }
-        return "\(Format.capacity(used)) of \(Format.capacity(cap)) used"
+        return StorageCapLabel.accountHeadline(used: used, cap: cap, capIsEstimated: storage.capSource == .derived)
+    }
+
+    private static func remainderIsEstimated(_ storage: StorageInfo) -> Bool {
+        StorageCapLabel.estimatedAccountParts(storage).remainder
+    }
+
+    private static func localPartIsEstimated(_ storage: StorageInfo) -> Bool {
+        StorageCapLabel.estimatedAccountParts(storage).local
     }
 
     private func accountBar(_ storage: StorageInfo) -> some View {
         let local = storage.accountLocalSegmentBytes ?? 0
         let remainder = storage.accountRemainderBytes ?? 0
+        let localEstimated = Self.localPartIsEstimated(storage)
+        let remainderEstimated = Self.remainderIsEstimated(storage)
         let denominator = max(storage.totalBytes ?? 1, 1)
         return GeometryReader { geo in
             HStack(spacing: 2) {
                 ForEach([
-                    (name: "iCloud Drive on this Mac", bytes: local, color: Color(hex: StorageCategory.documents.colorHex)),
-                    (name: "Photos, Messages, backups & other devices", bytes: remainder, color: Surface.fg3),
+                    (name: "iCloud Drive on this Mac", bytes: local, estimated: localEstimated,
+                     color: Color(hex: StorageCategory.documents.colorHex)),
+                    (name: "Photos, Messages, backups & other devices", bytes: remainder, estimated: remainderEstimated,
+                     color: Surface.fg3),
                 ], id: \.name) { part in
                     if part.bytes > 0 {
                         RoundedRectangle(cornerRadius: 3)
                             .fill(part.color)
                             .frame(width: max(4, geo.size.width * CGFloat(part.bytes) / CGFloat(denominator)))
-                            .help("\(part.name): \(Format.size(part.bytes))")
+                            .help("\(part.name): \(StorageCapLabel.accountPartText(part.bytes, isEstimated: part.estimated))")
                     }
                 }
                 Spacer(minLength: 0)
@@ -148,11 +162,11 @@ struct StorageView: View {
         .accessibilityElement()
         .accessibilityLabel("iCloud account storage")
         .accessibilityValue(
-            "\(accountHeadline(storage)), iCloud Drive on this Mac \(Format.size(local)), Photos, Messages, backups and other devices \(Format.size(remainder))"
+            "\(accountHeadline(storage)), iCloud Drive on this Mac \(StorageCapLabel.accountPartAccessibility(local, isEstimated: localEstimated)), Photos, Messages, backups and other devices \(StorageCapLabel.accountPartAccessibility(remainder, isEstimated: remainderEstimated))"
         )
     }
 
-    private func accountLegendRow(color: Color, name: String, bytes: Int64) -> some View {
+    private func accountLegendRow(color: Color, name: String, bytes: Int64, isEstimated: Bool) -> some View {
         HStack(spacing: 8) {
             Circle()
                 .fill(color)
@@ -161,14 +175,14 @@ struct StorageView: View {
                 .scaledFont(size: 12.5, weight: .medium)
                 .foregroundStyle(Surface.fg)
             Spacer()
-            Text(Format.size(bytes))
+            Text(StorageCapLabel.accountPartText(bytes, isEstimated: isEstimated))
                 .scaledFont(size: 12.5)
                 .foregroundStyle(Surface.fg2)
                 .monospacedDigit()
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(name)
-        .accessibilityValue(Format.size(bytes))
+        .accessibilityValue(StorageCapLabel.accountPartAccessibility(bytes, isEstimated: isEstimated))
     }
 
     private var manageButton: some View {
@@ -217,7 +231,7 @@ struct StorageView: View {
                         .monospacedDigit()
                     Spacer()
                     if !storage.hasAccountTier, let available = storage.availableBytes {
-                        Text("\(Format.gigabytes(available)) available")
+                        Text(StorageCapLabel.availableText(available, capIsEstimated: storage.capSource == .derived))
                             .scaledFont(size: 12.5)
                             .foregroundStyle(Surface.fg2)
                             .monospacedDigit()
@@ -243,10 +257,8 @@ struct StorageView: View {
         if storage.hasAccountTier {
             return "iCloud Drive on this Mac — \(Format.gigabytes(storage.usedBytes))"
         }
-        guard let total = storage.totalBytes else {
-            return "\(Format.gigabytes(storage.usedBytes)) of iCloud files on this Mac"
-        }
-        return "\(Format.gigabytes(storage.usedBytes)) of \(Format.gigabytes(total)) used"
+        return StorageCapLabel.usageHeadline(
+            used: storage.usedBytes, cap: storage.totalBytes, capIsEstimated: storage.capSource == .derived)
     }
 
     private func segmentedBar(_ storage: StorageInfo) -> some View {

@@ -4,7 +4,9 @@ struct OverviewView: View {
     @Environment(SyncStore.self) private var store
 
     var body: some View {
-        let syncing = store.syncingApps
+        // Every app doing work, with or without progress — the hero's
+        // "Activity in N apps" and this column must count the same apps.
+        let active = store.activeApps
         let paused = store.isGloballyPaused
 
         ContentColumn {
@@ -14,9 +16,9 @@ struct OverviewView: View {
             if paused {
                 SourceFootnote(text: "Pause stops Birdwatch's own polling and log streams. iCloud continues syncing in the background; data shown is the last snapshot taken before the pause.")
             }
-            statGrid
+            statGrid(activeCount: active.count)
             HStack(alignment: .top, spacing: 18) {
-                activeTransfersColumn(syncing: syncing, paused: paused)
+                activeTransfersColumn(active: active, paused: paused)
                 recentActivityColumn
             }
             SourceFootnote(text: "Aggregated from brctl status (bird), cloudd item counts and fileproviderd domain status.")
@@ -26,62 +28,46 @@ struct OverviewView: View {
     // MARK: - Hero
 
     private var heroCard: some View {
-        // Three-way state; overallProgress is pause-aware in the store, so no
-        // view-side special-casing.
-        let state = store.overallState
+        // Every claim the hero makes is decided in OverviewHeroDisplay: the
+        // live channel is boolean, CloudKit reports work without progress,
+        // and a paused monitor knows nothing current.
         let progress = store.overallProgress
-        // The live channel reports a boolean per file. When nothing in flight
-        // carries a real fraction the ring must NOT show a mean of zeros.
-        let indeterminate = store.overallProgressIsIndeterminate
-        let inFlightCount = store.inFlightTransfers.count
-
-        let dotColor: Color
-        let pulses: Bool
-        let title: String
-        let subtitle: String
-        var ringTint: Color = Palette.accent
-        switch state {
-        case .paused:
-            dotColor = Palette.warning
-            pulses = false
-            title = "Monitoring paused"
-            subtitle = "macOS does not offer a supported way to pause iCloud sync itself — Birdwatch has stopped watching."
-        case .syncing(let appCount):
-            dotColor = Palette.accent
-            pulses = true
-            title = indeterminate
-                ? "Syncing \(inFlightCount) file\(inFlightCount == 1 ? "" : "s")"
-                : "Syncing \(appCount) apps"
-            subtitle = indeterminate
-                ? "macOS reports these as in progress without a percentage."
-                : "\(store.pendingFileCount) files remaining"
-        case .allSynced:
-            dotColor = Palette.success
-            pulses = false
-            title = "Everything is up to date"
-            subtitle = "All apps are fully synced."
-            ringTint = Palette.success
+        let hero = OverviewHeroDisplay(
+            state: store.overallState,
+            progress: progress,
+            progressIsIndeterminate: store.overallProgressIsIndeterminate,
+            inFlightCount: store.inFlightTransfers.count,
+            pendingFileCount: store.pendingFileCount
+        )
+        let tint: Color = switch hero.tone {
+        case .paused: Palette.warning
+        case .working: Palette.accent
+        // Neutral, not success green: "nothing detected" is not "synced".
+        case .idle: Palette.gray
         }
 
         return Card(padding: 22) {
             HStack(spacing: 24) {
-                ProgressRing(progress: progress, tint: ringTint, indeterminate: indeterminate)
+                ProgressRing(ring: hero.ring, tint: tint)
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        StatusDot(color: dotColor, pulses: pulses)
-                        Text(title)
+                        StatusDot(color: tint, pulses: hero.tone == .working)
+                        Text(hero.title)
                             .scaledFont(size: 19, weight: .bold)
                             .foregroundStyle(Surface.fg)
                             .monospacedDigit()
                     }
-                    Text(subtitle)
+                    Text(hero.subtitle)
                         .scaledFont(size: 13)
                         .foregroundStyle(Surface.fg2)
                         .monospacedDigit()
-                    MiniProgressBar(progress: progress, tint: ringTint, height: 6,
-                                    label: "Overall sync progress", indeterminate: indeterminate)
-                        .padding(.top, 8)
+                    FreshnessText(lastRefresh: store.lastRefresh)
+                    if hero.showsBar {
+                        MiniProgressBar(progress: progress, tint: tint, height: 6,
+                                        label: "Overall sync progress", indeterminate: hero.barIsIndeterminate)
+                            .padding(.top, 8)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -90,13 +76,13 @@ struct OverviewView: View {
 
     // MARK: - Stat grid
 
-    private var statGrid: some View {
+    private func statGrid(activeCount: Int) -> some View {
         let uploadingBytes = remainingBytes(direction: .upload)
         let downloadingBytes = remainingBytes(direction: .download)
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
             StatTile(label: "Uploading", value: Format.size(uploadingBytes), tint: Palette.accent)
             StatTile(label: "Downloading", value: Format.size(downloadingBytes), tint: Palette.success)
-            StatTile(label: "Active apps", value: "\(store.syncingApps.count)", tint: Surface.fg)
+            StatTile(label: "Active apps", value: "\(activeCount)", tint: Surface.fg)
             StatTile(label: "Issues", value: "\(store.issueCount)",
                      tint: store.issueCount > 0 ? Palette.warning : Surface.fg)
         }
@@ -110,11 +96,11 @@ struct OverviewView: View {
 
     // MARK: - Columns
 
-    private func activeTransfersColumn(syncing: [AppSyncState], paused: Bool) -> some View {
+    private func activeTransfersColumn(active: [AppSyncState], paused: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionLabel(text: "Active transfers")
             Card {
-                if paused || syncing.isEmpty {
+                if paused || active.isEmpty {
                     Text(paused ? "Monitoring is paused — transfer activity is not being watched." : "No apps are actively transferring.")
                         .scaledFont(size: 12.5)
                         .foregroundStyle(Surface.fg2)
@@ -122,7 +108,7 @@ struct OverviewView: View {
                         .padding(.vertical, 6)
                 } else {
                     VStack(spacing: 12) {
-                        ForEach(syncing.prefix(4)) { app in
+                        ForEach(active.prefix(4)) { app in
                             activeTransferRow(app)
                         }
                     }
@@ -133,8 +119,10 @@ struct OverviewView: View {
     }
 
     private func activeTransferRow(_ app: AppSyncState) -> some View {
-        let progress: Double = if case .syncing(let p) = app.status { p } else { 0 }
-        let indeterminate = store.progressIsIndeterminate(appID: app.id)
+        let display = SyncStatusDisplay(
+            status: app.status, backend: app.backend,
+            progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
+        )
         let pending = store.transfers(for: app.id).filter { !$0.isDone }.count
         return HStack(spacing: 10) {
             ColorTile(colorHex: app.tileColorHex, letter: app.name, size: 26)
@@ -142,14 +130,28 @@ struct OverviewView: View {
                 Text(app.name)
                     .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(Surface.fg)
-                MiniProgressBar(progress: progress, label: "\(app.name) sync progress",
-                                indeterminate: indeterminate)
+                switch display.bar {
+                case .determinate(let progress):
+                    MiniProgressBar(progress: progress, label: "\(app.name) sync progress")
+                case .indeterminate:
+                    MiniProgressBar(progress: 0, label: "\(app.name) sync progress", indeterminate: true)
+                case nil:
+                    // Work reported without any progress (CloudKit): no bar.
+                    Text("Active — no progress reported")
+                        .scaledFont(size: 11.5)
+                        .foregroundStyle(Surface.fg2)
+                }
             }
-            Text(indeterminate ? "\(pending) file\(pending == 1 ? "" : "s")"
-                               : "\(Int((progress * 100).rounded()))%")
-                .scaledFont(size: 12, weight: .semibold)
-                .foregroundStyle(Surface.fg2)
-                .monospacedDigit()
+            Group {
+                switch display.bar {
+                case .determinate(let progress): Text("\(Int((progress * 100).rounded()))%")
+                case .indeterminate: Text(Plural.count(pending, "file"))
+                case nil: EmptyView()
+                }
+            }
+            .scaledFont(size: 12, weight: .semibold)
+            .foregroundStyle(Surface.fg2)
+            .monospacedDigit()
         }
         .accessibilityElement(children: .combine)
     }
@@ -201,24 +203,36 @@ struct OverviewView: View {
 
 // MARK: - Progress ring
 
-/// 104pt conic-gradient ring with "N% / SYNCED" center, per the Overview hero spec.
+/// 104pt conic-gradient ring with "N% / SYNCED" center, per the Overview hero
+/// spec. Only a real percentage shows a number: no honest percentage spins a
+/// short arc ("SYNCING"), a paused monitor shows a pause glyph, and the idle
+/// state says "NO ACTIVITY" rather than "100% SYNCED".
 private struct ProgressRing: View {
-    let progress: Double
+    let ring: OverviewHeroDisplay.Ring
     var tint: Color = Palette.accent
-    /// No honest percentage available — the ring spins a short arc and the
-    /// centre says SYNCING instead of "0%".
-    var indeterminate: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var spin = false
 
+    private var indeterminate: Bool { ring == .indeterminate }
+
+    private var trim: Double {
+        switch ring {
+        case .percent(let progress): min(max(progress, 0), 1)
+        case .indeterminate: 0.22
+        case .paused: 0
+        // No arc: a full ring would read as 100% synced, which idle isn't.
+        case .idle: 0
+        }
+    }
+
     var body: some View {
-        let percent = Int((progress * 100).rounded())
         ZStack {
             Circle()
-                .stroke(Surface.hover, lineWidth: 10)
+                // Idle: a dashed track — neither empty (0%) nor complete.
+                .stroke(Surface.hover, style: StrokeStyle(lineWidth: 10, dash: ring == .idle ? [4, 6] : []))
             Circle()
-                .trim(from: 0, to: indeterminate ? 0.22 : min(max(progress, 0), 1))
+                .trim(from: 0, to: trim)
                 .stroke(
                     // Fixed 0–360° gradient under the trim — the trim alone
                     // clips it, so the gradient never double-scales.
@@ -247,17 +261,20 @@ private struct ProgressRing: View {
                 }
                 .onAppear { spin = indeterminate && !reduceMotion }
             VStack(spacing: 1) {
-                if indeterminate {
-                    Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90.icloud")
-                        .scaledFont(size: 20, weight: .semibold)
-                        .foregroundStyle(Surface.fg)
-                } else {
-                    Text("\(percent)%")
+                switch ring {
+                case .percent(let progress):
+                    Text("\(Int((progress * 100).rounded()))%")
                         .scaledFont(size: 22, weight: .bold)
                         .foregroundStyle(Surface.fg)
                         .monospacedDigit()
+                case .indeterminate:
+                    centerSymbol("arrow.trianglehead.2.clockwise.rotate.90.icloud")
+                case .paused:
+                    centerSymbol("pause.fill")
+                case .idle:
+                    centerSymbol("icloud")
                 }
-                Text(indeterminate ? "SYNCING" : "SYNCED")
+                Text(caption)
                     .scaledFont(size: 9, weight: .heavy)
                     .kerning(0.5)
                     .foregroundStyle(Surface.fg3)
@@ -266,7 +283,31 @@ private struct ProgressRing: View {
         .frame(width: 104, height: 104)
         .accessibilityElement()
         .accessibilityLabel("Overall sync progress")
-        .accessibilityValue(indeterminate ? "In progress" : "\(percent) percent synced")
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private func centerSymbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .scaledFont(size: 20, weight: .semibold)
+            .foregroundStyle(Surface.fg)
+    }
+
+    private var caption: String {
+        switch ring {
+        case .percent: "SYNCED"
+        case .indeterminate: "SYNCING"
+        case .paused: "PAUSED"
+        case .idle: "NO ACTIVITY"
+        }
+    }
+
+    private var accessibilityValue: String {
+        switch ring {
+        case .percent(let progress): "\(Int((progress * 100).rounded())) percent synced"
+        case .indeterminate: "In progress"
+        case .paused: "Monitoring paused"
+        case .idle: "No sync activity detected"
+        }
     }
 }
 

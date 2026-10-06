@@ -75,7 +75,7 @@ struct MockSyncSource: SyncSource {
                 id: "photos", name: "Photos", tileColorHex: "fe4f6d", backend: .cloudKit, isApple: true,
                 status: .syncing(progress: 0.31), statusLine: "Uploading 234 of 1,024 photos",
                 lastActivity: now.addingTimeInterval(-30),
-                itemsIndexed: 48_213, pendingItems: 790, localSizeBytes: 84_300_000_000,
+                itemCount: .indexed(48_213), pendingItems: 790, localSize: LocalSize(bytes: 84_300_000_000),
                 locationPath: "~/Pictures/Photos Library.photoslibrary",
                 queueLabels: ["Photos", "Videos", "Shared albums"], queueCounts: [612, 158, 20],
                 infoCallout: "Photos syncs through CloudKit, which reports status and item counts but has no per-item progress API. Percentages here are derived from queue counts."
@@ -84,7 +84,7 @@ struct MockSyncSource: SyncSource {
                 id: "desktop-documents", name: "Desktop & Documents", tileColorHex: "ffa62b", backend: .cloudDocs, isApple: true,
                 status: .syncing(progress: 0.68), statusLine: "Uploading 42 files · 218 MB remaining",
                 lastActivity: now.addingTimeInterval(-8),
-                itemsIndexed: 12_480, pendingItems: 42, localSizeBytes: 18_700_000_000,
+                itemCount: .indexed(12_480), pendingItems: 42, localSize: LocalSize(bytes: 18_700_000_000),
                 locationPath: "~/Desktop · ~/Documents",
                 retryWarning: "3 items stuck — attempt 12 of 62. Items that reach 62 attempts stop retrying."
             ),
@@ -92,35 +92,35 @@ struct MockSyncSource: SyncSource {
                 id: "icloud-drive", name: "iCloud Drive", tileColorHex: "30b0c7", backend: .cloudDocs, isApple: true,
                 status: .upToDate, statusLine: "All files synced",
                 lastActivity: now.addingTimeInterval(-120),
-                itemsIndexed: 8_912, pendingItems: 0, localSizeBytes: 22_100_000_000,
+                itemCount: .indexed(8_912), pendingItems: 0, localSize: LocalSize(bytes: 22_100_000_000),
                 locationPath: "~/Library/Mobile Documents/com~apple~CloudDocs"
             ),
             AppSyncState(
                 id: "notes", name: "Notes", tileColorHex: "ffcc00", backend: .cloudKit, isApple: true,
                 status: .upToDate, statusLine: "All notes synced",
                 lastActivity: now.addingTimeInterval(-480),
-                itemsIndexed: 1_284, pendingItems: 0, localSizeBytes: 640_000_000,
+                itemCount: .indexed(1_284), pendingItems: 0, localSize: LocalSize(bytes: 640_000_000),
                 locationPath: "~/Library/Group Containers/group.com.apple.notes"
             ),
             AppSyncState(
                 id: "messages", name: "Messages", tileColorHex: "34c759", backend: .cloudKit, isApple: true,
                 status: .upToDate, statusLine: "Messages in iCloud up to date",
                 lastActivity: now.addingTimeInterval(-900),
-                itemsIndexed: 96_410, pendingItems: 0, localSizeBytes: 7_900_000_000,
+                itemCount: .indexed(96_410), pendingItems: 0, localSize: LocalSize(bytes: 7_900_000_000),
                 locationPath: "~/Library/Messages"
             ),
             AppSyncState(
                 id: "safari", name: "Safari", tileColorHex: "1e8fff", backend: .cloudKit, isApple: true,
                 status: .upToDate, statusLine: "Tabs, bookmarks and history synced",
                 lastActivity: now.addingTimeInterval(-1_500),
-                itemsIndexed: 3_120, pendingItems: 0, localSizeBytes: 210_000_000,
+                itemCount: .indexed(3_120), pendingItems: 0, localSize: LocalSize(bytes: 210_000_000),
                 locationPath: "~/Library/Safari"
             ),
             AppSyncState(
                 id: "1password", name: "1Password", tileColorHex: "1a73e8", backend: .fileProvider, isApple: false,
                 status: .syncing(progress: 0.12), statusLine: "Syncing vault changes",
                 lastActivity: now.addingTimeInterval(-45),
-                itemsIndexed: 890, pendingItems: 14, localSizeBytes: 120_000_000,
+                itemCount: .indexed(890), pendingItems: 14, localSize: LocalSize(bytes: 120_000_000),
                 locationPath: "~/Library/CloudStorage/1Password",
                 infoCallout: "1Password syncs through a File Provider extension. macOS reports only the domain's overall status — Birdwatch cannot see individual items."
             ),
@@ -128,14 +128,14 @@ struct MockSyncSource: SyncSource {
                 id: "bear", name: "Bear", tileColorHex: "d63d3d", backend: .fileProvider, isApple: false,
                 status: .upToDate, statusLine: "Notes synced",
                 lastActivity: now.addingTimeInterval(-3_600),
-                itemsIndexed: 640, pendingItems: 0, localSizeBytes: 310_000_000,
+                itemCount: .indexed(640), pendingItems: 0, localSize: LocalSize(bytes: 310_000_000),
                 locationPath: "~/Library/CloudStorage/Bear"
             ),
             AppSyncState(
                 id: "craft", name: "Craft", tileColorHex: "4b5bd6", backend: .fileProvider, isApple: false,
                 status: .paused, statusLine: "Sync paused",
                 lastActivity: now.addingTimeInterval(-7_200),
-                itemsIndexed: 1_120, pendingItems: 6, localSizeBytes: 480_000_000,
+                itemCount: .indexed(1_120), pendingItems: 6, localSize: LocalSize(bytes: 480_000_000),
                 locationPath: "~/Library/CloudStorage/Craft"
             ),
         ]

@@ -54,15 +54,31 @@ struct MenuBarPopoverView: View {
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
+        // Each derived fact computed ONCE per render: every one of these walks
+        // the app list, and the body used to rebuild them several times over.
+        let apps = store.effectiveApps
+        let active = apps.filter(\.status.isActive)
+        let state = store.overallState
+        let overall = OverviewHeroDisplay(
+            state: state,
+            progress: store.overallProgress,
+            progressIsIndeterminate: store.overallProgressIsIndeterminate,
+            inFlightCount: store.inFlightTransfers.count,
+            pendingFileCount: store.pendingFileCount
+        )
+        return VStack(alignment: .leading, spacing: 0) {
+            header(state: state, overall: overall)
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
 
-            MiniProgressBar(progress: store.overallProgress, label: "Overall sync progress",
-                            indeterminate: store.overallProgressIsIndeterminate)
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
+            // Same decision as the Overview hero: a bar only while something
+            // is in flight — never "0%" for a paused monitor or "100%" for idle.
+            if overall.showsBar {
+                MiniProgressBar(progress: store.overallProgress, label: "Overall sync progress",
+                                indeterminate: overall.barIsIndeterminate)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+            }
 
             if let hours = store.bandwidth?.hours, !hours.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
@@ -71,7 +87,7 @@ struct MenuBarPopoverView: View {
                     // The chart carried no caption at all: sighted users saw
                     // bars with no unit and no hint that the figures are
                     // attributed, not measured (C2).
-                    Text("iCloud traffic per hour, estimated")
+                    Text("iCloud traffic per hour today, estimated")
                         .scaledFont(size: 10.5)
                         .foregroundStyle(Surface.fg2)
                         // The chart element already speaks this line as its
@@ -83,12 +99,13 @@ struct MenuBarPopoverView: View {
                 .padding(.top, 8)
             }
 
-            if !store.syncingApps.isEmpty {
+            // Every app the header counts, with or without progress.
+            if !active.isEmpty {
                 VStack(spacing: 0) {
-                    ForEach(store.syncingApps) { app in
+                    ForEach(active) { app in
                         appRow(app)
                             .padding(.vertical, 7)
-                        if app.id != store.syncingApps.last?.id {
+                        if app.id != active.last?.id {
                             Divider().overlay(Surface.cardLine)
                         }
                     }
@@ -100,9 +117,11 @@ struct MenuBarPopoverView: View {
             Divider().overlay(Surface.cardLine)
                 .padding(.top, 6)
 
-            upToDateRow
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+            if let idleLine = PopoverSummary.idleAppsLine(apps) {
+                idleRow(idleLine)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+            }
 
             if store.issueCount > 0 {
                 issuesRow
@@ -118,44 +137,33 @@ struct MenuBarPopoverView: View {
 
     // MARK: - Header
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func header(state: SyncStore.OverallState, overall: OverviewHeroDisplay) -> some View {
+        let isSyncing: Bool = if case .syncing = state { true } else { false }
+        let tint: Color = switch state {
+        case .paused: Palette.warning
+        case .syncing, .active: Palette.accent
+        // Neutral: "no activity" is not a confirmed "synced".
+        case .idle: Palette.gray
+        }
+        return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 7) {
-                StatusDot(color: headerTint, pulses: isSyncing)
-                Text(headerTitle)
+                StatusDot(color: tint, pulses: overall.tone == .working)
+                Text(PopoverSummary.headerTitle(state))
                     .scaledFont(size: 14, weight: .bold)
                     .foregroundStyle(Surface.fg)
                     .monospacedDigit()
             }
             if isSyncing {
-                Text("\(store.pendingFileCount) files remaining")
+                Text(overall.subtitle)
                     .scaledFont(size: 11.5)
                     .foregroundStyle(Surface.fg2)
                     .monospacedDigit()
                     .padding(.leading, 15)
             }
+            FreshnessText(lastRefresh: store.lastRefresh, size: 11)
+                .padding(.leading, 15)
         }
         .accessibilityElement(children: .combine)
-    }
-
-    private var isSyncing: Bool {
-        if case .syncing = store.overallState { true } else { false }
-    }
-
-    private var headerTitle: String {
-        switch store.overallState {
-        case .paused: "Monitoring paused"
-        case .syncing(let appCount): appCount == 1 ? "Syncing 1 app" : "Syncing \(appCount) apps"
-        case .allSynced: "All synced"
-        }
-    }
-
-    private var headerTint: Color {
-        switch store.overallState {
-        case .paused: Palette.warning
-        case .syncing: Palette.accent
-        case .allSynced: Palette.success
-        }
     }
 
     // MARK: - App rows
@@ -180,15 +188,32 @@ struct MenuBarPopoverView: View {
                     }
                 }
                 .frame(minWidth: 118, alignment: .leading)
-                MiniProgressBar(progress: appProgress(app), label: "\(app.name) sync progress",
-                                indeterminate: store.progressIsIndeterminate(appID: app.id))
-                // No percent when the channel has none (see TransferItem.isIndeterminate).
-                Text(store.progressIsIndeterminate(appID: app.id)
-                     ? "…" : "\(Int((appProgress(app) * 100).rounded()))%")
-                    .scaledFont(size: 11.5, weight: .semibold)
-                    .foregroundStyle(Surface.fg2)
-                    .monospacedDigit()
-                    .frame(minWidth: 32, alignment: .trailing)
+                let display = SyncStatusDisplay(
+                    status: app.status, backend: app.backend,
+                    progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
+                )
+                switch display.bar {
+                case .determinate(let progress):
+                    MiniProgressBar(progress: progress, label: "\(app.name) sync progress")
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .scaledFont(size: 11.5, weight: .semibold)
+                        .foregroundStyle(Surface.fg2)
+                        .monospacedDigit()
+                        .frame(minWidth: 32, alignment: .trailing)
+                case .indeterminate:
+                    // No percent when the channel has none (TransferItem.isIndeterminate).
+                    MiniProgressBar(progress: 0, label: "\(app.name) sync progress", indeterminate: true)
+                    Text("…")
+                        .scaledFont(size: 11.5, weight: .semibold)
+                        .foregroundStyle(Surface.fg2)
+                        .frame(minWidth: 32, alignment: .trailing)
+                case nil:
+                    // Work reported with no progress at all (CloudKit).
+                    Text("Active — no progress reported")
+                        .scaledFont(size: 11.5)
+                        .foregroundStyle(Surface.fg2)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
             }
             .accessibilityElement(children: .combine)
             // Muting silences notifications only — it never pauses sync, so the
@@ -213,15 +238,12 @@ struct MenuBarPopoverView: View {
         .opacity(store.isMuted(appID: app.id) ? 0.45 : 1)
     }
 
-    private func appProgress(_ app: AppSyncState) -> Double {
-        if case .syncing(let p) = app.status { p } else { 0 }
-    }
-
     // MARK: - Summary rows
 
-    private var upToDateRow: some View {
-        let upToDateCount = store.effectiveApps.filter { $0.status == .upToDate }.count
-        return Label("\(upToDateCount) apps up to date", systemImage: "checkmark")
+    /// Idle apps in their rows' own words (PopoverSummary). No checkmark:
+    /// "no activity seen" is not a verified result.
+    private func idleRow(_ line: String) -> some View {
+        Label(line, systemImage: "circle.dashed")
             .scaledFont(size: 12)
             .foregroundStyle(Surface.fg2)
             .monospacedDigit()
@@ -236,7 +258,7 @@ struct MenuBarPopoverView: View {
         } label: {
             HStack(spacing: 8) {
                 StatusDot(color: Palette.warning)
-                Text("\(store.issueCount) issues need attention")
+                Text(PopoverSummary.issuesLine(count: store.issueCount))
                     .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(Palette.warning)
                     .monospacedDigit()
@@ -289,7 +311,11 @@ struct Sparkline: View {
             let barWidth = geo.size.width / CGFloat(totals.count)
             Path { path in
                 for (i, total) in totals.enumerated() {
-                    let h = max(2, geo.size.height * CGFloat(total) / CGFloat(maxTotal))
+                    // Unobserved and silent hours draw nothing (no 2 pt stub).
+                    let h = BandwidthPresentation.barHeight(
+                        bytes: total, isObserved: hours[i].isObserved,
+                        available: geo.size.height, maxBytes: maxTotal)
+                    guard h > 0 else { continue }
                     path.addRoundedRect(
                         in: CGRect(
                             x: CGFloat(i) * barWidth,
@@ -307,14 +333,17 @@ struct Sparkline: View {
         // popover, unreadable to VoiceOver. Summarize the series instead of
         // exposing 24 unlabeled bars, and keep the estimate wording (C2).
         .accessibilityElement()
-        .accessibilityLabel("iCloud traffic per hour, estimated")
+        .accessibilityLabel("iCloud traffic per hour today, estimated")
         .accessibilityValue(Self.summary(of: hours))
     }
 
     /// "N hours, peak X in the busiest hour, Y total" — derived from the same
     /// samples the bars are drawn from, so the spoken value and the picture can
     /// never disagree. An all-zero series says so rather than implying traffic.
-    static func summary(of hours: [BandwidthHourSample]) -> String {
+    /// Only OBSERVED hours count: an hour before launch or still to come is
+    /// not an hour with no traffic.
+    static func summary(of allHours: [BandwidthHourSample]) -> String {
+        let hours = allHours.filter(\.isObserved)
         let totals = hours.map { $0.uploadedBytes + $0.downloadedBytes }
         let hourWord = hours.count == 1 ? "hour" : "hours"
         guard let peak = totals.max(), peak > 0 else {

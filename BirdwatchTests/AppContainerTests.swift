@@ -190,6 +190,21 @@ struct AppContainerSizeTests {
         #expect(AppContainerSource.sizeEntryCap == 50_000)
     }
 
+    // The capped walk used to return a plain Int64, so a floor was shown as
+    // an exact "On this Mac" figure.
+    @Test("A capped size walk is flagged partial and reads \"At least\"")
+    func cappedWalkIsPartial() throws {
+        let root = try makeTree(fileCount: 12, bytes: 10_000)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let full = AppContainerSource.measuredSize(ofDirectory: root)
+        let capped = AppContainerSource.measuredSize(ofDirectory: root, cap: 4)
+        #expect(!full.isPartial)
+        #expect(capped.isPartial)
+        #expect(LocalSizeText.text(capped).hasPrefix("At least "))
+        #expect(!LocalSizeText.text(full).hasPrefix("At least"))
+    }
+
     // Desktop & Documents are only iCloud data when that sync feature is ON.
     // Measuring them regardless read two folders the app had no business
     // touching — and earned a TCC prompt for it on every fresh dev build.
@@ -250,20 +265,34 @@ struct AppContainerRowTests {
         let rows = AppContainerSource.makeApps(
             containers: [container("iCloud~md~obsidian"), container("com~apple~Keynote")],
             transfers: [],
-            localSizes: ["container-icloud-md-obsidian": 4_096]
+            localSizes: ["container-icloud-md-obsidian": LocalSize(bytes: 4_096)]
         )
         let obsidian = rows.first { $0.name == "Obsidian" }
         let keynote = rows.first { $0.name == "Keynote" }
-        #expect(obsidian?.localSizeBytes == 4_096)
-        #expect(keynote?.localSizeBytes == 0)      // not measured yet — never invented
+        #expect(obsidian?.localSize == LocalSize(bytes: 4_096))
+        #expect(keynote?.localSize == nil)      // not measured yet — never invented
     }
 
     @Test("Rows never claim a local size they did not measure")
     func noFakeSize() {
         let rows = AppContainerSource.makeApps(containers: [container("iCloud~md~obsidian", items: 7)], transfers: [])
-        #expect(rows[0].localSizeBytes == 0)
-        #expect(rows[0].itemsIndexed == 7)
-        #expect(rows[0].statusLine == "7 items in iCloud Drive")
+        #expect(rows[0].localSize == nil)
+        #expect(rows[0].itemCount == .topLevel(7, isCapped: false))
+        #expect(rows[0].statusLine == "7 top-level items")
+    }
+
+    // The shallow listing stops at 500 entries; "500 items" (and an "Items
+    // indexed" label) presented a capped directory count as an exact index.
+    @Test("A capped container listing is a top-level floor, never an exact index")
+    func cappedCountIsAFloor() {
+        var big = container("iCloud~md~obsidian", items: AppContainerSource.itemCountCap)
+        big.itemCountIsCapped = true
+        let row = AppContainerSource.makeApps(containers: [big], transfers: [])[0]
+        #expect(row.itemCount == .topLevel(500, isCapped: true))
+        #expect(row.statusLine == "500+ top-level items")
+        let tile = AppDetailFacts.itemTile(row)
+        #expect(tile.label == "Top-level items")
+        #expect(tile.value == "500+ items")
     }
 
     @Test("buildApps keeps the built-ins and appends containers with unique ids")

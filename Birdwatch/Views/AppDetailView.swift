@@ -75,12 +75,16 @@ struct AppDetailView: View {
                             .foregroundStyle(Surface.fg)
                         SourceBadge(backend: app.backend)
                     }
+                    let display = SyncStatusDisplay(
+                        status: app.status, backend: app.backend,
+                        progressIsIndeterminate: store.progressIsIndeterminate(appID: app.id)
+                    )
                     HStack(spacing: 6) {
-                        Text(app.status.shortLabel)
+                        Text(display.label)
                             .scaledFont(size: 12.5, weight: .semibold)
-                            .foregroundStyle(app.status.tint)
+                            .foregroundStyle(display.tone.color)
                             .monospacedDigit()
-                        if app.status.isSyncing { SyncSpinner() }
+                        if display.showsSpinner { SyncSpinner() }
                         Text("· \(app.statusLine)")
                             .scaledFont(size: 12.5)
                             .foregroundStyle(Surface.fg2)
@@ -119,23 +123,20 @@ struct AppDetailView: View {
     private func infoGrid(_ app: AppSyncState) -> some View {
         let daemon = store.daemons.first { $0.name == app.backend.daemonName }
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 14)], spacing: 14) {
-            InfoTile(label: "Items indexed", value: "\(app.itemsIndexed.formatted()) items")
-            InfoTile(label: "Pending", value: app.pendingItems == 0 ? "None" : "\(app.pendingItems.formatted()) items")
-            InfoTile(label: "Last synced", value: lastSyncedText(app))
+            // Unreported counts say so (AppDetailFacts) — never a placeholder 0.
+            let items = AppDetailFacts.itemTile(app)
+            InfoTile(label: items.label, value: items.value)
+            InfoTile(label: "Pending", value: AppDetailFacts.pendingValue(app))
+            let recency = AppDetailFacts.lastActivityTile(app, now: Date())
+            InfoTile(label: recency.label, value: recency.value)
             // Allocated bytes actually stored locally — dataless placeholders
             // are tiny, so this is the on-disk footprint, not the cloud size.
-            InfoTile(label: "On this Mac", value: Format.size(app.localSizeBytes))
+            InfoTile(label: "On this Mac", value: AppDetailFacts.localSizeValue(app))
             InfoTile(label: "Sync daemon",
                      value: daemon.map { "\($0.name) · \(Int($0.cpuPercent))% CPU" } ?? app.backend.daemonName,
                      monospaced: true)
             InfoTile(label: "Progress detail", value: app.backend.progressDetail)
         }
-    }
-
-    private func lastSyncedText(_ app: AppSyncState) -> String {
-        if app.status.isSyncing { return "Syncing now" }
-        guard let last = app.lastActivity else { return "—" }
-        return Format.relative.localizedString(for: last, relativeTo: Date())
     }
 
     // MARK: - Transfers (CloudDocs only)

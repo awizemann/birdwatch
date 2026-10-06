@@ -102,8 +102,12 @@ struct AnonymousDeviceSummary: View {
     }
 
     private var headline: String {
-        let total = summary.registeredDeviceCount
-        return "\(total) device\(total == 1 ? "" : "s") have touched your iCloud Drive · \(activeThisWeek) active this week"
+        // The registry lists more devices than wrote items in bird's
+        // (truncated) tree, so the two counts are stated separately.
+        DevicesHeadline.text(registered: summary.registeredDeviceCount,
+                             wroteItems: summary.devices.count,
+                             activeThisWeek: activeThisWeek,
+                             countsArePartial: summary.countsArePartial)
     }
 
     private func row(_ device: DeviceActivityItem) -> some View {

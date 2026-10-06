@@ -55,7 +55,7 @@ private struct SidebarRow: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1.5)
                     .background(Palette.error, in: Capsule())
-                    .accessibilityLabel("\(issueCount) issues")
+                    .accessibilityLabel(Plural.count(issueCount, "issue"))
             }
         }
         .padding(.vertical, 1)
@@ -82,6 +82,9 @@ struct StorageFooter: View {
 
     var body: some View {
         if let storage = store.storage {
+            // A derived plan cap is a guess: every figure built on it carries
+            // "≈" and says "estimated" to VoiceOver (C2).
+            let estimated = storage.capSource == .derived
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("iCloud Storage")
@@ -91,29 +94,22 @@ struct StorageFooter: View {
                     // Account figure when the quota makes it knowable (matches
                     // System Settings); no cap known → the measured footprint
                     // alone rather than a fraction of an invented total.
-                    Text(Self.label(for: storage.footerFigure))
+                    Text(StorageCapLabel.footerText(storage.footerFigure, capIsEstimated: estimated))
                         .scaledFont(size: 11)
                         .foregroundStyle(Surface.fg3)
                         .monospacedDigit()
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("iCloud Storage")
+                .accessibilityValue(StorageCapLabel.footerAccessibilityValue(storage.footerFigure, capIsEstimated: estimated))
                 if let progress = storage.footerFigure.progress {
-                    MiniProgressBar(progress: progress, height: 3, label: "iCloud storage used")
+                    MiniProgressBar(progress: progress, height: 3,
+                                    label: estimated ? "iCloud storage used, estimated" : "iCloud storage used")
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .overlay(alignment: .top) { Divider().opacity(0.5) }
-        }
-    }
-
-    static func label(for figure: StorageFooterFigure) -> String {
-        switch figure {
-        case let .account(used, cap):
-            "\(Format.capacity(used)) / \(Format.capacity(cap))"
-        case let .local(used, cap):
-            "\(Format.gigabytes(used)) / \(Format.gigabytes(cap)) on this Mac"
-        case let .localOnly(used):
-            "\(Format.gigabytes(used)) on this Mac"
         }
     }
 }

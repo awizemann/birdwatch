@@ -71,6 +71,21 @@ final class SyncStore {
     private(set) var quotaRemainingBytes: Int64?
     private(set) var notifications: [AppNotification] = []
     private(set) var hasLoaded = false
+    // Scan evidence (see SyncSnapshot): lets a screen say "still scanning",
+    // "results from 12 min ago" or "couldn't tell" instead of an empty list.
+    private(set) var cloudKitScan: CloudKitScanState?
+    private(set) var folderScan: ScanFreshness?
+    private(set) var containerScan: ScanFreshness?
+    /// The conflict scan's item cap when the last scan stopped at it.
+    private(set) var conflictScanCap: Int?
+    /// Issue producers that have delivered a successful result (see
+    /// `SyncSnapshot.issueProducers`); nil for a fixture source, which
+    /// delivers everything at once.
+    private(set) var deliveredIssueProducers: Set<IssueProducer>?
+    // Per-snapshot indeterminate decisions, computed once in `apply` so a row
+    // is a set lookup instead of a scan over every transfer.
+    private var indeterminateAppIDs: Set<String> = []
+    private var indeterminateFolderNames: Set<String> = []
 
     /// Monitoring was paused before the first snapshot ever landed: nothing is
     /// loading and nothing will until monitoring resumes. Distinct from
@@ -123,7 +138,8 @@ final class SyncStore {
     private let notifier: (String, String, String) -> Void
     /// Injected so plan-cap tests use a throwaway suite instead of the user's.
     private let defaults: UserDefaults
-    private var lastRefresh: Date?
+    /// When the last snapshot landed — the age every "Updated … ago" shows.
+    private(set) var lastRefresh: Date?
     private var inFlightRefresh: Task<Void, Never>?
 
     /// Usage analytics sink (swift-stats behind `UsageTracking`). Injected:
@@ -208,8 +224,9 @@ final class SyncStore {
     // MARK: - Derived facts (single source of truth — never recomputed in views)
 
     var effectiveApps: [AppSyncState] {
-        apps.map { app in
-            var app = app
+        let date = self.now()
+        return apps.map { app in
+            var app = Self.agingCloudKitActivity(app, now: date)
             if isGloballyPaused {
                 // Honest overlay: monitoring stopped, so every app keeps its
                 // LAST KNOWN status — we never claim the app's sync is paused.
@@ -219,10 +236,32 @@ final class SyncStore {
         }
     }
 
+    /// A CloudKit `.active` row is evidence from a log scan that can be ~5 min
+    /// old, about activity up to 5 min before that. Once its last activity is
+    /// older than the parser's own activity window, "active" is no longer
+    /// what the evidence says — it reads as idle (with its real age shown
+    /// beside it), never as a stale "Transferring" for ten minutes (C1).
+    static func agingCloudKitActivity(_ app: AppSyncState, now: Date) -> AppSyncState {
+        guard app.backend == .cloudKit, app.status == .active else { return app }
+        if let last = app.lastActivity, now.timeIntervalSince(last) <= CloudKitLogParser.activeWindow { return app }
+        var aged = app
+        aged.status = .upToDate
+        aged.statusLine = CloudKitAppMapping.statusLine(state: .idle, lastActivity: app.lastActivity, now: now)
+        return aged
+    }
+
     /// Per-app mute: rows stay visible but muted; sync state is untouched.
     func isMuted(appID: String) -> Bool { pausedAppIDs.contains(appID) }
 
     var syncingApps: [AppSyncState] { effectiveApps.filter { $0.status.isSyncing } }
+    /// Every app doing work — with progress (`.syncing`) or without (`.active`).
+    /// What "Active apps", the transfers card and the popover list count.
+    var activeApps: [AppSyncState] { effectiveApps.filter { $0.status.isActive } }
+
+    /// Full Disk Access as the permissions probe last saw it (nil: not probed).
+    var fullDiskAccess: PermissionState? {
+        permissions.first { $0.name.localizedCaseInsensitiveContains("Full Disk") }?.state
+    }
     var issueCount: Int { issues.count }
     var unreadNotificationCount: Int { notifications.filter { !$0.isRead }.count }
 
@@ -247,24 +286,43 @@ final class SyncStore {
     /// truth for every ring/bar: ANY transfer with 0 < progress < 1 → determinate.
     var overallProgressIsIndeterminate: Bool {
         guard !isGloballyPaused else { return false }
-        let inFlight = inFlightTransfers
-        guard !inFlight.isEmpty else { return false }
-        return !inFlight.contains { $0.progress > 0 && $0.progress < 1 }
+        return TransferItem.progressIsIndeterminate(inFlightTransfers)
     }
 
-    /// Same rule scoped to one app's rows.
+    /// Same rule scoped to one app's rows (precomputed per snapshot).
     func progressIsIndeterminate(appID: String) -> Bool {
-        let inFlight = transfers.filter { $0.appID == appID && !$0.isDone }
-        guard !inFlight.isEmpty else { return false }
-        return !inFlight.contains { $0.progress > 0 && $0.progress < 1 }
+        indeterminateAppIDs.contains(appID)
     }
 
-    /// Overall condition for headers: paused / syncing / all synced.
-    enum OverallState { case paused, syncing(appCount: Int), allSynced }
+    /// Same rule scoped to one iCloud Drive folder's rows (the folder's
+    /// status comes from the same transfers, by the same location rule).
+    func progressIsIndeterminate(folderName: String) -> Bool {
+        indeterminateFolderNames.contains(folderName)
+    }
+
+    /// The per-app and per-folder indeterminate sets for one transfer list.
+    static func indeterminateGroups(_ transfers: [TransferItem]) -> (appIDs: Set<String>, folderNames: Set<String>) {
+        let inFlight = transfers.filter { !$0.isDone }
+        let byApp = Dictionary(grouping: inFlight, by: \.appID)
+        let byFolder = Dictionary(grouping: inFlight.compactMap { t in
+            DriveFolder.folderName(containing: t.location).map { ($0, t) }
+        }, by: \.0).mapValues { $0.map(\.1) }
+        return (
+            Set(byApp.filter { TransferItem.progressIsIndeterminate($0.value) }.keys),
+            Set(byFolder.filter { TransferItem.progressIsIndeterminate($0.value) }.keys)
+        )
+    }
+
+    /// Overall condition for headers. `.active`: no file is transferring, but
+    /// some apps report work without any progress (CloudKit). `.idle` is only
+    /// "nothing detected" — Birdwatch cannot prove every app is synced.
+    enum OverallState: Equatable { case paused, syncing(appCount: Int), active(appCount: Int), idle }
     var overallState: OverallState {
         if isGloballyPaused { return .paused }
         let count = syncingApps.count
-        return count > 0 ? .syncing(appCount: count) : .allSynced
+        if count > 0 { return .syncing(appCount: count) }
+        let active = effectiveApps.filter { $0.status == .active }.count
+        return active > 0 ? .active(appCount: active) : .idle
     }
 
     func transfers(for appID: String) -> [TransferItem] {
@@ -297,7 +355,7 @@ final class SyncStore {
             results.append(SearchResult(id: "file-\(t.id)", title: t.name, subtitle: t.location, symbolName: "doc", target: .app(id: t.appID)))
         }
         for f in driveFolders where f.name.localizedCaseInsensitiveContains(query) {
-            results.append(SearchResult(id: "folder-\(f.id)", title: f.name, subtitle: "\(f.itemCount) items", symbolName: "folder", target: .view(.drive)))
+            results.append(SearchResult(id: "folder-\(f.id)", title: f.name, subtitle: f.itemCountText, symbolName: "folder", target: .view(.drive)))
         }
         for e in activity where e.title.localizedCaseInsensitiveContains(query) || e.detail.localizedCaseInsensitiveContains(query) {
             results.append(SearchResult(id: "activity-\(e.id)", title: e.title, subtitle: e.detail, symbolName: "clock", target: .view(.activity)))
@@ -334,7 +392,7 @@ final class SyncStore {
         selectedView = view
     }
 
-    var pendingFileCount: Int { effectiveApps.reduce(0) { $0 + ($1.status.isSyncing ? $1.pendingItems : 0) } }
+    var pendingFileCount: Int { effectiveApps.reduce(0) { $0 + ($1.status.isSyncing ? ($1.pendingItems ?? 0) : 0) } }
 
     func app(withID id: String) -> AppSyncState? {
         // Resolve from the UNFILTERED source (§7) so detail never couples to search state.
@@ -394,7 +452,7 @@ final class SyncStore {
             issueCount: issues.count,
             daemonsMissing: daemons.filter { $0.pid == nil }.count,
             // Booleans by design: a permission the probe can't tell (`.unknown`) counts as false.
-            fdaGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Full Disk") }?.granted ?? false,
+            fdaGranted: fullDiskAccess == .granted,
             notificationsGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Notification") }?.granted ?? false
         ))
     }
@@ -448,6 +506,12 @@ final class SyncStore {
         rawStorage = s.storage
         storage = Self.applyPlanCap(planCapOverride, to: s.storage)
         quotaRemainingBytes = s.quotaRemainingBytes
+        cloudKitScan = s.cloudKitScan
+        folderScan = s.folderScan
+        containerScan = s.containerScan
+        conflictScanCap = s.conflictScanCap
+        deliveredIssueProducers = s.issueProducers.map { Set($0.keys) }
+        (indeterminateAppIDs, indeterminateFolderNames) = Self.indeterminateGroups(s.transfers)
     }
 
     // MARK: - iCloud plan cap (user preference beats the derived guess)

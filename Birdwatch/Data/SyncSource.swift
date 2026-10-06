@@ -35,6 +35,39 @@ struct SyncSnapshot: Sendable {
     /// nil (the default) means a fixture source: one producer that has
     /// delivered every issue in the snapshot.
     var issueProducers: [IssueProducer: Set<String>]? = nil
+    /// What the background scans could say this cycle, so an empty or old
+    /// list is labelled instead of passed off as current (C1). All default nil:
+    /// a fixture source has no scans and shows no scan notices.
+    var cloudKitScan: CloudKitScanState? = nil
+    var folderScan: ScanFreshness? = nil
+    var containerScan: ScanFreshness? = nil
+    /// Set when the conflict scan stopped at its item cap (the cap's value),
+    /// so "no conflicts" covers only the part of iCloud Drive it reached.
+    var conflictScanCap: Int? = nil
+}
+
+/// How fresh a background directory scan's result is (from
+/// `SingleFlightScan.Reading`).
+nonisolated struct ScanFreshness: Sendable, Hashable {
+    /// When the result's scan finished; nil while the FIRST scan is running.
+    let completedAt: Date?
+    /// A scan is running past its deadline and the result is the previous one.
+    let isOverdue: Bool
+    /// The last scan could not read the root at all — an empty list is
+    /// "couldn't look", not "nothing there".
+    var isUnreadable: Bool = false
+}
+
+/// The CloudKit section's evidence: nothing read yet, or the last scan's
+/// outcome without its rows (the rows travel in `apps`).
+nonisolated enum CloudKitScanState: Sendable, Hashable {
+    case scanning
+    case scanned(outcome: CloudKitScanOutcome, isStale: Bool, observedAt: Date?, isTruncated: Bool)
+
+    init(_ scan: CloudKitScan) {
+        self = .scanned(outcome: scan.outcome, isStale: scan.isStale,
+                        observedAt: scan.observedAt, isTruncated: scan.isTruncated)
+    }
 }
 
 /// The independent things that produce issues. Each one's first successful

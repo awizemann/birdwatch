@@ -90,22 +90,17 @@ private extension Color {
 
 // MARK: - Status → color, single source of truth (§12)
 
-extension AppSyncStatus {
-    var tint: Color {
+// A sync status's words AND colour come from `SyncStatusDisplay`: neither
+// can be honest without the backend and the store's indeterminate decision.
+extension SyncStatusDisplay.Tone {
+    /// Green only for a confirmed state; an unconfirmable idle is neutral.
+    var color: Color {
         switch self {
-        case .upToDate: Palette.success
-        case .syncing: Palette.accent
-        case .paused: Palette.warning
-        case .issue: Palette.error
-        }
-    }
-
-    var shortLabel: String {
-        switch self {
-        case .upToDate: "Up to date"
-        case .syncing(let p): "Syncing \(Int((p * 100).rounded()))%"
-        case .paused: "Paused"
-        case .issue: "Needs attention"
+        case .confirmed: Palette.success
+        case .working: Palette.accent
+        case .neutral: Surface.fg2
+        case .warning: Palette.warning
+        case .error: Palette.error
         }
     }
 }
