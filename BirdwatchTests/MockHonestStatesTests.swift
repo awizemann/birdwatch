@@ -44,7 +44,7 @@ struct MockHonestStatesTests {
         #expect(dd.needsFullDiskAccess)
         #expect(dd.status == .unknown)
         #expect(!Self.snapshot.transfers.contains { $0.appID == "desktop-documents" })
-        #expect(Self.snapshot.permissions.first { $0.name == "Full Disk Access" }?.state == .unknown, "not confirmed, so Desktop & Documents is not read")
+        #expect(Self.snapshot.permissions.state(of: .fullDiskAccess) == .unknown, "not confirmed, so Desktop & Documents is not read")
     }
 
     @Test("File Provider rows are .unknown and a container row reads \"No activity seen\"")

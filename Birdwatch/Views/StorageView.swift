@@ -197,9 +197,7 @@ struct StorageView: View {
     private var manageButton: some View {
         Button("Manage iCloud in System Settings…") {
             logger.info("Manage iCloud in System Settings requested")
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") {
-                NSWorkspace.shared.open(url)
-            }
+            AppleAccountSettings.open(from: .storage, store: store)
         }
         .buttonStyle(.borderedProminent)
         .tint(Palette.accent)

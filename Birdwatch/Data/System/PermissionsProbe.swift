@@ -155,8 +155,8 @@ enum PermissionsProbe {
         async let fda = fullDiskAccessState()
         async let notifications = notificationsPermission()
         return [
-            PermissionStatus(name: "Full Disk Access", state: await fda),
-            PermissionStatus(name: "Notifications", state: await notifications),
+            PermissionStatus(kind: .fullDiskAccess, state: await fda),
+            PermissionStatus(kind: .notifications, state: await notifications),
         ]
     }
 }

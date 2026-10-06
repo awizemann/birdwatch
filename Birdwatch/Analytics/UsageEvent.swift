@@ -13,17 +13,29 @@ import Foundation
 nonisolated enum UsageEvent: Sendable, Equatable {
     /// How the user got somewhere — the sidebar, a ⌘-digit shortcut, the
     /// search dropdown, the menu-bar popover, or a link inside another view.
-    enum NavigationSource: String, Sendable { case launch, sidebar, shortcut, search, menubar, link }
+    enum NavigationSource: String, Sendable, CaseIterable { case launch, sidebar, shortcut, search, menubar, link }
 
-    enum SearchResultKind: String, Sendable { case app, view }
+    enum SearchResultKind: String, Sendable, CaseIterable { case app, view }
 
     /// Which repair a Diagnostics maintenance row ran.
-    enum MaintenanceAction: String, Sendable { case restart_daemon, diagnose_copy_command, diagnose_open_terminal }
+    enum MaintenanceAction: String, Sendable, CaseIterable { case restart_daemon, diagnose_copy_command, diagnose_open_terminal }
 
-    enum Outcome: String, Sendable { case ok, failed }
+    /// `unconfirmed` is the honest middle a daemon restart can end in: the
+    /// signal landed but no new pid was seen inside the poll window (cloudd is
+    /// launched on demand). Counting it as `ok` would claim a restart nobody
+    /// witnessed — the UI already tints it as a caution.
+    enum Outcome: String, Sendable, CaseIterable { case ok, unconfirmed, failed }
+
+    /// Where a System Settings › Apple Account button was pressed. The issue
+    /// card's button is counted as `issue_action(manage_storage)` instead.
+    enum SettingsOrigin: String, Sendable, CaseIterable { case storage, devices }
+
+    /// Which primary button an issue card offered and the person pressed.
+    enum IssueActionKind: String, Sendable, CaseIterable { case review_versions, open_diagnostics, manage_storage }
 
     /// Which daemon a maintenance action targeted — the closed set
-    /// MaintenanceActions can restart, so no other string can travel.
+    /// MaintenanceActions can restart, so no other string can travel;
+    /// `init?(rawValue:)` is the gate at the boundary.
     enum Daemon: String, Sendable, CaseIterable { case bird, cloudd, fileproviderd }
 
     /// A maintenance failure's kind: a `MaintenanceError` case name, or
@@ -32,6 +44,8 @@ nonisolated enum UsageEvent: Sendable, Equatable {
         case unknownDaemon, daemonNotRunning, pathNotAllowed, other
     }
 
+    /// A first-run screen was shown (funnel; completion is the next case).
+    case onboardingStepShown(OnboardingStep)
     /// First-run setup finished.
     case onboardingCompleted(fdaGranted: Bool, notificationsRequested: Bool)
     /// A top-level monitor view became the selected one.
@@ -49,6 +63,9 @@ nonisolated enum UsageEvent: Sendable, Equatable {
     /// An app was muted/unmuted (popover quick action).
     case appMuted(SyncBackend, muted: Bool)
     case issueDismissed(severity: IssueSeverity)
+    /// An issue card's primary button was pressed — whether turning an issue
+    /// into a next step gets used. Severity only, never the issue's text.
+    case issueAction(IssueActionKind, severity: IssueSeverity)
     /// The one real "fix" feature.
     case conflictResolved(keptCurrent: Bool)
     /// Retry-queue row actions. Reveal has no observable outcome.
@@ -57,7 +74,11 @@ nonisolated enum UsageEvent: Sendable, Equatable {
     case maintenanceRun(MaintenanceAction, daemon: Daemon?, outcome: Outcome, errorKind: MaintenanceErrorKind?)
     case notificationsMarkedRead
     case planCapSet(cleared: Bool)
-    /// Once per session, after the first snapshot: what the world looks like.
+    /// A Storage or Devices button opened System Settings › Apple Account —
+    /// whether those views lead anyone to act.
+    case accountSettingsOpened(from: SettingsOrigin)
+    /// Once per launch, after the first snapshot and a person's first
+    /// activation (whichever is later): what the world looks like.
     case snapshotHealth(
         appsByBackend: [SyncBackend: Int], issueCount: Int, daemonsMissing: Int,
         fdaGranted: Bool, notificationsGranted: Bool
@@ -66,6 +87,7 @@ nonisolated enum UsageEvent: Sendable, Equatable {
     /// Wire name (schema §2.1).
     var name: String {
         switch self {
+        case .onboardingStepShown: "onboarding_step_shown"
         case .onboardingCompleted: "onboarding_completed"
         case .viewShown: "view_shown"
         case .appDetailShown: "app_detail_shown"
@@ -76,12 +98,14 @@ nonisolated enum UsageEvent: Sendable, Equatable {
         case .monitoringResumed: "monitoring_resumed"
         case .appMuted: "app_muted"
         case .issueDismissed: "issue_dismissed"
+        case .issueAction: "issue_action"
         case .conflictResolved: "conflict_resolved"
         case .retryItemRevealed: "retry_item_revealed"
         case .retryItemTrashed: "retry_item_trashed"
         case .maintenanceRun: "maintenance_run"
         case .notificationsMarkedRead: "notifications_marked_read"
         case .planCapSet: "plan_cap_set"
+        case .accountSettingsOpened: "account_settings_opened"
         case .snapshotHealth: "snapshot_health"
         }
     }
@@ -91,6 +115,8 @@ nonisolated enum UsageEvent: Sendable, Equatable {
     /// of the `Stats` import.
     var props: [String: UsageValue] {
         switch self {
+        case let .onboardingStepShown(step):
+            return ["step": .string(step.rawValue)]
         case let .onboardingCompleted(fda, notifications):
             return ["fda_granted": .bool(fda), "notifications_requested": .bool(notifications)]
         case let .viewShown(view, via):
@@ -107,6 +133,8 @@ nonisolated enum UsageEvent: Sendable, Equatable {
             return ["backend": .string(backend.rawValue), "muted": .bool(muted)]
         case let .issueDismissed(severity):
             return ["severity": .string(severity.rawValue)]
+        case let .issueAction(action, severity):
+            return ["action": .string(action.rawValue), "severity": .string(severity.rawValue)]
         case let .conflictResolved(keptCurrent):
             return ["kept": .string(keptCurrent ? "current" : "other")]
         case let .retryItemTrashed(outcome):
@@ -118,6 +146,8 @@ nonisolated enum UsageEvent: Sendable, Equatable {
             return p
         case let .planCapSet(cleared):
             return ["cleared": .bool(cleared)]
+        case let .accountSettingsOpened(origin):
+            return ["from": .string(origin.rawValue)]
         case let .snapshotHealth(byBackend, issues, missing, fda, notifications):
             return [
                 "apps_clouddocs_bucket": .string(Self.bucket(byBackend[.cloudDocs, default: 0])),

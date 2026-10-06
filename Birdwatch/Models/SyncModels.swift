@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Backend fidelity
 
 /// Which system service syncs an app's data, and therefore how much detail we can honestly show.
-enum SyncBackend: String, Sendable, Hashable, Codable {
+enum SyncBackend: String, Sendable, Hashable, Codable, CaseIterable {
     case cloudDocs      // `bird` — per-file in-flight flags (no percentage), engine state
     case cloudKit       // `cloudd` — activity seen in the system log only
     case fileProvider   // `fileproviderd` — listed from ~/Library/CloudStorage, no status
@@ -245,7 +245,7 @@ struct DeviceActivitySummary: Sendable, Hashable {
 
 // MARK: - Issues
 
-enum IssueSeverity: String, Sendable, Hashable {
+enum IssueSeverity: String, Sendable, Hashable, CaseIterable {
     case warning, conflict, error
 }
 
@@ -379,12 +379,35 @@ nonisolated enum PermissionState: Sendable, Hashable {
     case granted, denied, unknown
 }
 
+/// Which permission a row is about — exactly the two PermissionsProbe
+/// checks. Code looks permissions up by this, never by matching the display
+/// name — a renamed label must not silently change what analytics or logic
+/// reads.
+nonisolated enum PermissionKind: Sendable, Hashable {
+    case fullDiskAccess, notifications
+
+    var displayName: String {
+        switch self {
+        case .fullDiskAccess: "Full Disk Access"
+        case .notifications: "Notifications"
+        }
+    }
+}
+
 struct PermissionStatus: Sendable, Hashable, Identifiable {
-    var id: String { name }
-    let name: String
+    var id: PermissionKind { kind }
+    let kind: PermissionKind
+    var name: String { kind.displayName }
     var state: PermissionState
     /// True only for a confirmed grant; `.unknown` reads as false here.
     var granted: Bool { state == .granted }
+}
+
+nonisolated extension Array where Element == PermissionStatus {
+    /// The probe's answer for one permission; nil when it wasn't probed.
+    func state(of kind: PermissionKind) -> PermissionState? {
+        first { $0.kind == kind }?.state
+    }
 }
 
 // MARK: - Log

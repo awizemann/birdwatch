@@ -152,10 +152,15 @@ final class SyncStore {
     /// Usage analytics sink (swift-stats behind `UsageTracking`). Injected:
     /// tests record, `--mock` and keyless builds get a no-op.
     let usage: any UsageTracking
-    /// Mirror of the SDK's persisted master switch, for the Diagnostics
-    /// toggle. Loaded once in `loadUsagePreference()`; written through
+    /// Mirror of the SDK's persisted master switch, for the usage toggle
+    /// (Diagnostics and Settings). `nil` until `loadUsagePreference()` has read it — the toggle
+    /// shows a loading state rather than a guessed "on" (C1). Written through
     /// `setUsageSharing(_:)`.
-    private(set) var usageSharingEnabled = true
+    private(set) var usageSharingEnabled: Bool?
+    /// The last SDK write. Each write waits for the one before it, so rapid
+    /// toggles reach the SDK in the order they were made and the final SDK
+    /// state is always the last value shown.
+    private var usageSharingWrite: Task<Void, Never>?
 
     init(
         source: any SyncSource,
@@ -217,8 +222,20 @@ final class SyncStore {
         await reprobePermissions()
         await usage.applicationDidBecomeActive()
         hasActivated = true
+        let held = heldEvents
+        heldEvents.removeAll()
+        held.forEach(record)
         recordLaunchEventsIfDue()
     }
+
+    /// For events a screen records on its own appearance (no click): sent now
+    /// if a person has activated the app, otherwise held until they do — a
+    /// window that opens on an unattended login-item launch must not start a
+    /// session. Click handlers use `record(_:)`: a click is a person.
+    func recordWhenAttended(_ event: UsageEvent) {
+        if hasActivated { record(event) } else { heldEvents.append(event) }
+    }
+    private var heldEvents: [UsageEvent] = []
 
     /// The popover can open without the app ever becoming active, so opening
     /// it is itself the "a person is here" signal: activate first, then record
@@ -242,6 +259,17 @@ final class SyncStore {
         recordSnapshotHealth()
     }
 
+    /// Onboarding screens already counted this launch. The funnel counts a
+    /// step once per launch — Back/Get Started round trips and a window
+    /// rebuilt mid-setup would otherwise inflate it. Re-running setup in a
+    /// later launch does count again; read the funnel by unique installs.
+    private var onboardingStepsRecorded: Set<OnboardingStep> = []
+
+    func recordOnboardingStepShown(_ step: OnboardingStep) {
+        guard onboardingStepsRecorded.insert(step).inserted else { return }
+        recordWhenAttended(.onboardingStepShown(step))
+    }
+
     /// Navigation with a known origin, so `view_shown` carries `via`.
     func navigate(to view: MonitorView, via: UsageEvent.NavigationSource) {
         pendingNavigationSource = via
@@ -253,24 +281,39 @@ final class SyncStore {
     /// disabled rather than flipping and silently reverting.
     var usageSharingAvailable: Bool { usage.isConfigured }
 
-    /// Bumped by every user flip. A load that started before a flip must not
-    /// overwrite it with the value it read before the flip landed.
-    private var usagePreferenceGeneration = 0
-
+    /// Reads the SDK's stored switch ONCE. After that this store is the only
+    /// writer, so its own value is current. That one rule replaces the old
+    /// generation counter: no flip can happen while the value is still nil
+    /// (`setUsageSharing` refuses), and once it is known no later load
+    /// (Diagnostics and Settings each ask on appear) re-reads and lands an
+    /// old answer over a toggle made during the read. Two loads racing the
+    /// first read both read the same stored value; only the first assigns.
     func loadUsagePreference() async {
-        let generation = usagePreferenceGeneration
-        let enabled = await usage.isEnabled
-        guard generation == usagePreferenceGeneration else { return }
-        usageSharingEnabled = enabled
+        guard usageSharingEnabled == nil else { return }
+        let stored = await usage.isEnabled
+        if usageSharingEnabled == nil { usageSharingEnabled = stored }
     }
 
-    func setUsageSharing(_ enabled: Bool) {
-        guard usageSharingAvailable, enabled != usageSharingEnabled else { return }
-        usagePreferenceGeneration &+= 1
+    /// Returns the write so callers (tests) can await it; the toggle ignores
+    /// it. Refused while analytics is gated off (nothing to opt out of) and
+    /// while the stored value is still unknown (there is no switch to flip).
+    @discardableResult
+    func setUsageSharing(_ enabled: Bool) -> Task<Void, Never>? {
+        guard usageSharingAvailable, let current = usageSharingEnabled, enabled != current else { return nil }
         usageSharingEnabled = enabled
         // Deliberately not tracked: opting out clears the queue, so an
         // "opted out" event could never leave the machine anyway.
-        Task { [usage] in await usage.setEnabled(enabled) }
+        let previous = usageSharingWrite
+        let write = Task { [usage] in
+            await previous?.value
+            await usage.setEnabled(enabled)
+            // Opting out ended the SDK's session. The person is here (they
+            // just clicked), so re-open one now — otherwise the next event
+            // starts a session with no app_open until the next ⌘-tab back.
+            if enabled { await usage.applicationDidBecomeActive() }
+        }
+        usageSharingWrite = write
+        return write
     }
 
     // MARK: - Derived facts (single source of truth — never recomputed in views)
@@ -343,7 +386,7 @@ final class SyncStore {
 
     /// Full Disk Access as the permissions probe last saw it (nil: not probed).
     var fullDiskAccess: PermissionState? {
-        permissions.first { $0.name.localizedCaseInsensitiveContains("Full Disk") }?.state
+        permissions.state(of: .fullDiskAccess)
     }
     var issueCount: Int { issues.count }
     var unreadNotificationCount: Int { notifications.filter { !$0.isRead }.count }
@@ -560,7 +603,7 @@ final class SyncStore {
             daemonsMissing: daemons.filter { $0.pid == nil }.count,
             // Booleans by design: a permission the probe can't tell (`.unknown`) counts as false.
             fdaGranted: fullDiskAccess == .granted,
-            notificationsGranted: permissions.first { $0.name.localizedCaseInsensitiveContains("Notification") }?.granted ?? false
+            notificationsGranted: permissions.state(of: .notifications) == .granted
         ))
     }
 

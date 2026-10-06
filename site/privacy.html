@@ -56,35 +56,75 @@
     <li><strong>Sent automatically by swift-stats:</strong> the app opening
       (<code>app_open</code>), and the start and end of each session (<code>session_start</code>,
       <code>session_end</code> with the session's length in seconds).</li>
-    <li><strong>Birdwatch's own events</strong>, each with only the details listed:
+    <li><strong>Birdwatch's own events</strong>, each with only the details listed — the
+      event's name first, then each detail's name and every value it can take:
+      <!-- usage-events: every code in this list is an event name, a detail name or a detail
+           value from UsageEvent.swift, and the app's tests check the two match exactly. -->
       <ul>
-        <li>a screen opened — which screen, and how you got there (at launch, sidebar,
-          keyboard shortcut, search, menu bar, or a link);</li>
-        <li>an app's detail page opened — only its sync backend (CloudDocs, CloudKit or File
-          Provider), never the app;</li>
-        <li>the menu-bar popover opened — how many issues (as a range) and whether monitoring
-          was paused;</li>
-        <li>a search result chosen — whether it was an app or a screen, and how many results
-          (as a range), never the search text;</li>
-        <li>refresh, monitoring paused or resumed, and notifications marked read — no
-          details;</li>
-        <li>an app muted or unmuted — its sync backend and the new setting;</li>
-        <li>an issue dismissed — its severity (warning, conflict or error);</li>
-        <li>a conflict resolved — whether you kept the current version or another one;</li>
-        <li>a stuck item revealed in Finder or moved to the Trash — for the Trash, whether it
-          worked;</li>
-        <li>a maintenance action — which one (restart a daemon, or the <code>brctl
-          diagnose</code> copy / Open Terminal buttons), which daemon (<code>bird</code>,
-          <code>cloudd</code> or <code>fileproviderd</code>), whether it worked, and for a
-          failure only its kind (for example “daemon not running”);</li>
-        <li>your plan size set or cleared — only which of the two, never the size;</li>
-        <li>setup finished — whether Full Disk Access was granted and notifications
-          requested;</li>
-        <li>once per session, a health summary — how many apps use each sync backend and how
-          many issues are open (each as a range), how many of the three sync daemons weren't
-          running, and whether Full Disk Access and notifications are allowed.</li>
+        <li>a setup screen shown, once per screen per launch (<code>onboarding_step_shown</code>)
+          — which one (<code>step</code>: <code>welcome</code> or <code>grant_access</code>);</li>
+        <li>setup finished (<code>onboarding_completed</code>) — whether Full Disk Access was
+          granted (<code>fda_granted</code>) and notifications requested
+          (<code>notifications_requested</code>);</li>
+        <li>a screen opened (<code>view_shown</code>) — which screen (<code>view</code>:
+          <code>overview</code>, <code>applications</code>, <code>drive</code>,
+          <code>devices</code>, <code>issues</code>, <code>activity</code>,
+          <code>diagnostics</code>, <code>bandwidth</code> or <code>storage</code>) and how you
+          got there (<code>via</code>: at <code>launch</code>, the <code>sidebar</code>, a
+          keyboard <code>shortcut</code>, <code>search</code>, the <code>menubar</code>, or a
+          <code>link</code>);</li>
+        <li>an app's detail page opened (<code>app_detail_shown</code>) — only its sync backend
+          (<code>backend</code>: <code>cloudDocs</code>, <code>cloudKit</code> or
+          <code>fileProvider</code>), never the app;</li>
+        <li>the menu-bar popover opened (<code>menubar_opened</code>) — how many issues, as a
+          range (<code>issue_bucket</code>), and whether monitoring was paused
+          (<code>paused</code>);</li>
+        <li>a search result chosen (<code>search_used</code>) — whether it was an app or a
+          screen (<code>result_kind</code>: <code>app</code> or <code>view</code>) and how many
+          results, as a range (<code>result_bucket</code>), never the search text;</li>
+        <li>refresh (<code>refresh_forced</code>), monitoring paused or resumed
+          (<code>monitoring_paused</code>, <code>monitoring_resumed</code>), notifications
+          marked read (<code>notifications_marked_read</code>) and a stuck item revealed in
+          Finder (<code>retry_item_revealed</code>) — no details;</li>
+        <li>an app muted or unmuted (<code>app_muted</code>) — its sync backend
+          (<code>backend</code>) and the new setting (<code>muted</code>);</li>
+        <li>an issue dismissed (<code>issue_dismissed</code>) — its severity
+          (<code>severity</code>: <code>warning</code>, <code>conflict</code> or
+          <code>error</code>);</li>
+        <li>an issue's button pressed (<code>issue_action</code>) — which button
+          (<code>action</code>: <code>review_versions</code>, <code>open_diagnostics</code> or
+          <code>manage_storage</code>) and the issue's severity (<code>severity</code>), never
+          its text;</li>
+        <li>a conflict resolved (<code>conflict_resolved</code>) — whether you kept the
+          <code>current</code> version or an <code>other</code> one (<code>kept</code>);</li>
+        <li>a stuck item moved to the Trash (<code>retry_item_trashed</code>) — whether it
+          worked (<code>outcome</code>);</li>
+        <li>a maintenance action (<code>maintenance_run</code>) — which one
+          (<code>action</code>: <code>restart_daemon</code>, or the diagnose command's
+          <code>diagnose_copy_command</code> / <code>diagnose_open_terminal</code> buttons),
+          which daemon (<code>daemon</code>: <code>bird</code>, <code>cloudd</code> or
+          <code>fileproviderd</code>), whether it worked (<code>outcome</code>: <code>ok</code>;
+          <code>unconfirmed</code> when the restart signal was sent but no restart was seen; or
+          <code>failed</code>), and for a failure only its kind (<code>error_kind</code>:
+          <code>unknownDaemon</code>, <code>daemonNotRunning</code>, <code>pathNotAllowed</code>
+          or <code>other</code>);</li>
+        <li>your plan size set or cleared (<code>plan_cap_set</code>) — only which of the two
+          (<code>cleared</code>), never the size;</li>
+        <li>System Settings › Apple Account opened from Birdwatch
+          (<code>account_settings_opened</code>) — from which screen (<code>from</code>:
+          <code>storage</code> or <code>devices</code>), and only if it actually opened;</li>
+        <li>once per launch, a health summary (<code>snapshot_health</code>) — how many apps use
+          each sync backend (<code>apps_clouddocs_bucket</code>,
+          <code>apps_cloudkit_bucket</code>, <code>apps_fileprovider_bucket</code>) and how many
+          issues are open (<code>issue_bucket</code>), each as a range; how many of the three
+          sync daemons weren't running (<code>daemons_missing</code>); and whether Full Disk
+          Access and notifications are allowed (<code>fda_granted</code>,
+          <code>notifications_granted</code>).</li>
       </ul>
-      Ranges are 0, 1, 2–5, 6–20 and 20+. The source of truth is
+      Ranges are <code>0</code>, <code>1</code>, <code>2-5</code>, <code>6-20</code> and
+      <code>20+</code>.
+      <!-- /usage-events -->
+      The source of truth is
       <a href="https://github.com/awizemann/birdwatch/blob/main/Birdwatch/Analytics/UsageEvent.swift">UsageEvent.swift</a>:
       an event or detail that isn't in that file isn't sent.</li>
     <li><strong>With each batch of events:</strong> the swift-stats version; Birdwatch's
@@ -100,7 +140,7 @@
     only daily totals are kept longer.
   </p>
   <p>
-    Turn it off any time in <strong>Diagnostics → Share anonymous usage</strong>. The switch
+    Turn it off any time with <strong>Share anonymous usage</strong>, in Diagnostics or in Birdwatch's Settings (⌘,). The switch
     persists, and while it is off nothing is collected or sent.
   </p>
 

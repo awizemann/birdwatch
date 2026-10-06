@@ -46,37 +46,49 @@ struct SettingsView: View {
 
 /// The anonymous-usage opt-out (swift-stats consumer checklist §4). One
 /// control, shown in Diagnostics and in Settings; copy says exactly what is
-/// and isn't sent.
+/// and isn't sent. Until the SDK's stored value is read a spinner stands in
+/// for the switch — showing "on" first would be a guess (C1).
 struct UsageSharingToggle: View {
     @Environment(SyncStore.self) private var store
 
     var body: some View {
-        Toggle(isOn: usageSharingBinding) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Share anonymous usage")
-                    .scaledFont(size: 13, weight: .medium)
-                    .foregroundStyle(Surface.fg)
-                Text("Which screens and actions get used, plus app version, macOS version, Mac model, language and region, under a random install ID. Never file names, paths, app names or account details.")
-                    .scaledFont(size: 11.5)
-                    .foregroundStyle(Surface.fg3)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !store.usageSharingAvailable {
-                    // Gated off (no analytics key, a --mock run): nothing is
-                    // sent, so there is nothing for the switch to control.
-                    Text("Not available in this build — it sends no usage data.")
-                        .scaledFont(size: 11.5, weight: .medium)
-                        .foregroundStyle(Surface.fg2)
-                        .fixedSize(horizontal: false, vertical: true)
+        Group {
+            if let enabled = store.usageSharingEnabled {
+                Toggle(isOn: Binding(get: { enabled }, set: { store.setUsageSharing($0) })) {
+                    label
+                }
+                .toggleStyle(.switch)
+                .disabled(!store.usageSharingAvailable)
+            } else {
+                HStack(alignment: .top) {
+                    label
+                    Spacer(minLength: 12)
+                    ProgressView()
+                        .accessibilityLabel("Loading usage sharing setting")
                 }
             }
         }
-        .toggleStyle(.switch)
         .controlSize(.small)
-        .disabled(!store.usageSharingAvailable)
         .task { await store.loadUsagePreference() }
     }
 
-    private var usageSharingBinding: Binding<Bool> {
-        Binding(get: { store.usageSharingEnabled }, set: { store.setUsageSharing($0) })
+    private var label: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Share anonymous usage")
+                .scaledFont(size: 13, weight: .medium)
+                .foregroundStyle(Surface.fg)
+            Text("Which screens and actions get used, plus app version, macOS version, Mac model, language and region, under a random install ID. Never file names, paths, app names or account details.")
+                .scaledFont(size: 11.5)
+                .foregroundStyle(Surface.fg3)
+                .fixedSize(horizontal: false, vertical: true)
+            if !store.usageSharingAvailable {
+                // Gated off (no analytics key, a --mock run): nothing is
+                // sent, so there is nothing for the switch to control.
+                Text("Not available in this build — it sends no usage data.")
+                    .scaledFont(size: 11.5, weight: .medium)
+                    .foregroundStyle(Surface.fg2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

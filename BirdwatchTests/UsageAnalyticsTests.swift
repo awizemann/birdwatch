@@ -20,20 +20,9 @@ final class RecordingUsageTracker: UsageTracking, @unchecked Sendable {
     func record(_ event: UsageEvent) { lock.withLock { _events.append(event); _calls.append(event.name) } }
     func applicationDidBecomeActive() async { lock.withLock { _calls.append("didBecomeActive") } }
     func flush() async {}
-    func setEnabled(_ enabled: Bool) async {
-        lock.withLock { _enabled = enabled }
-        enabledChangesContinuation.yield(enabled)
-    }
+    // Tests await the write `setUsageSharing` returns, never poll this (C8).
+    func setEnabled(_ enabled: Bool) async { lock.withLock { _enabled = enabled } }
     var isEnabled: Bool { get async { lock.withLock { _enabled } } }
-
-    /// Every `setEnabled` value, in order, once it has landed — the signal a
-    /// test awaits instead of polling `isEnabled` against a clock (C8).
-    let enabledChanges: AsyncStream<Bool>
-    private let enabledChangesContinuation: AsyncStream<Bool>.Continuation
-
-    init() {
-        (enabledChanges, enabledChangesContinuation) = AsyncStream.makeStream(of: Bool.self)
-    }
 }
 
 private func throwawayDefaults() -> UserDefaults {
@@ -53,6 +42,7 @@ private func makeStore(
 
 /// Every event case, one instance each. The wire tests iterate this list.
 private let allEvents: [UsageEvent] = [
+    .onboardingStepShown(.grantAccess),
     .onboardingCompleted(fdaGranted: true, notificationsRequested: false),
     .viewShown(.storage, via: .shortcut),
     .appDetailShown(.cloudKit),
@@ -61,24 +51,48 @@ private let allEvents: [UsageEvent] = [
     .refreshForced, .monitoringPaused, .monitoringResumed,
     .appMuted(.fileProvider, muted: true),
     .issueDismissed(severity: .conflict),
+    .issueAction(.manage_storage, severity: .warning),
     .conflictResolved(keptCurrent: false),
     .retryItemRevealed,
     .retryItemTrashed(outcome: .failed),
     .maintenanceRun(.restart_daemon, daemon: .bird, outcome: .failed, errorKind: .daemonNotRunning),
+    .maintenanceRun(.restart_daemon, daemon: .cloudd, outcome: .unconfirmed, errorKind: nil),
     .notificationsMarkedRead,
     .planCapSet(cleared: true),
+    .accountSettingsOpened(from: .devices),
     .snapshotHealth(appsByBackend: [.cloudDocs: 2, .cloudKit: 40], issueCount: 0, daemonsMissing: 1, fdaGranted: true, notificationsGranted: false),
 ]
+
+/// Every case of every enum that becomes a string prop, built from `allCases`,
+/// so a value no single `allEvents` entry happens to use is still checked.
+private let everyPropValue: [UsageEvent] = {
+    var e: [UsageEvent] = []
+    e += MonitorView.allCases.map { .viewShown($0, via: .sidebar) }
+    e += UsageEvent.NavigationSource.allCases.map { .viewShown(.overview, via: $0) }
+    e += SyncBackend.allCases.map { .appDetailShown($0) }
+    e += UsageEvent.SearchResultKind.allCases.map { .searchUsed(resultKind: $0, resultCount: 0) }
+    e += IssueSeverity.allCases.map { .issueDismissed(severity: $0) }
+    e += UsageEvent.IssueActionKind.allCases.map { .issueAction($0, severity: .warning) }
+    e += UsageEvent.Outcome.allCases.map { .retryItemTrashed(outcome: $0) }
+    e += UsageEvent.MaintenanceAction.allCases.map { .maintenanceRun($0, daemon: nil, outcome: .ok, errorKind: nil) }
+    e += UsageEvent.Daemon.allCases.map { .maintenanceRun(.restart_daemon, daemon: $0, outcome: .ok, errorKind: nil) }
+    e += UsageEvent.MaintenanceErrorKind.allCases.map { .maintenanceRun(.restart_daemon, daemon: nil, outcome: .failed, errorKind: $0) }
+    e += UsageEvent.SettingsOrigin.allCases.map { .accountSettingsOpened(from: $0) }
+    e += OnboardingStep.allCases.map { .onboardingStepShown($0) }
+    e += [0, 1, 3, 10, 50].map { .menubarOpened(issueCount: $0, paused: false) }
+    e += [true, false].map { .conflictResolved(keptCurrent: $0) }
+    return e
+}()
 
 /// The compile-time guard: a `switch` with no `default`. Adding a case to
 /// `UsageEvent` fails to compile here until it is listed — and the author is
 /// then one line away from `allEvents`, which the wire tests iterate.
 private func isCovered(_ e: UsageEvent) -> Bool {
     switch e {
-    case .onboardingCompleted, .viewShown, .appDetailShown, .menubarOpened, .searchUsed,
-         .refreshForced, .monitoringPaused, .monitoringResumed, .appMuted, .issueDismissed,
+    case .onboardingStepShown, .onboardingCompleted, .viewShown, .appDetailShown, .menubarOpened, .searchUsed,
+         .refreshForced, .monitoringPaused, .monitoringResumed, .appMuted, .issueDismissed, .issueAction,
          .conflictResolved, .retryItemRevealed, .retryItemTrashed, .maintenanceRun,
-         .notificationsMarkedRead, .planCapSet, .snapshotHealth:
+         .notificationsMarkedRead, .planCapSet, .accountSettingsOpened, .snapshotHealth:
         return true
     }
 }
@@ -102,28 +116,65 @@ struct UsageEventWireTests {
     @Test("Prop keys are snake_case and values carry no free text")
     func props() {
         let legal = try! NSRegularExpression(pattern: "^[a-z][a-z0-9_]*$")
-        // The closed vocabulary every string prop must come from. A new value
-        // that is not an enum case, a bucket or a daemon name fails here.
+        // The closed vocabulary every string prop must come from, written out
+        // literally: a new value, or a renamed case in ANY file (views and
+        // models own some of these raw values), fails here.
         let vocabulary: Set<String> = Set(
-            MonitorView.allCases.map(\.rawValue)
+            ["overview", "applications", "drive", "devices", "issues", "activity", "diagnostics", "bandwidth", "storage"]
             + ["launch", "sidebar", "shortcut", "search", "menubar", "link"]
             + ["cloudDocs", "cloudKit", "fileProvider"]
             + ["0", "1", "2-5", "6-20", "20+"]
-            + ["app", "view", "current", "other", "ok", "failed"]
+            + ["app", "view", "current", "other", "ok", "unconfirmed", "failed"]
+            + ["unknownDaemon", "pathNotAllowed"]
             + ["restart_daemon", "diagnose_copy_command", "diagnose_open_terminal"]
             + ["warning", "conflict", "error"]
+            + ["review_versions", "open_diagnostics", "manage_storage"]
+            + ["welcome", "grant_access"]
             + ["bird", "cloudd", "fileproviderd", "daemonNotRunning"]
         )
         #expect(allEvents.allSatisfy(isCovered))
-        for e in allEvents {
+        var sent: Set<String> = []
+        for e in allEvents + everyPropValue {
             for (key, value) in e.props {
                 let range = NSRange(key.startIndex..., in: key)
                 #expect(legal.firstMatch(in: key, range: range) != nil, "bad key \(key) on \(e.name)")
                 if case .string(let s) = value {
                     #expect(vocabulary.contains(s), "free text '\(s)' in \(e.name).\(key)")
+                    sent.insert(s)
                 }
             }
         }
+        // Both ways: every listed value is still reachable, so the list
+        // cannot quietly go stale.
+        #expect(sent == vocabulary, "unreachable: \(vocabulary.subtracting(sent)), unlisted: \(sent.subtracting(vocabulary))")
+    }
+
+    // The public privacy page promises it is the complete list. Fails if an
+    // event, detail or value is added to (or renamed in) UsageEvent without
+    // the page, or if the page still names one that no longer exists.
+    @Test("The privacy page lists exactly the events, details and values UsageEvent sends")
+    func privacyPageMatchesContract() throws {
+        let page = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("site/privacy.html")
+        let html = try String(contentsOf: page, encoding: .utf8)
+        let start = try #require(html.range(of: "<!-- usage-events"))
+        let end = try #require(html.range(of: "<!-- /usage-events -->"))
+        let section = String(html[start.upperBound..<end.lowerBound])
+        let code = try NSRegularExpression(pattern: "<code>([^<]+)</code>")
+        let listed = Set(code.matches(in: section, range: NSRange(section.startIndex..., in: section)).map {
+            String(section[Range($0.range(at: 1), in: section)!])
+        })
+
+        var sent: Set<String> = []
+        for e in allEvents + everyPropValue {
+            sent.insert(e.name)
+            for (key, value) in e.props {
+                sent.insert(key)
+                if case .string(let s) = value { sent.insert(s) }
+            }
+        }
+        #expect(listed == sent, "not on the page: \(sent.subtracting(listed)), on the page but never sent: \(listed.subtracting(sent))")
     }
 
     @Test("Maintenance error kinds are case names, never the payload")
@@ -144,6 +195,29 @@ struct UsageEventWireTests {
         let props = UsageEvent.maintenanceRun(.restart_daemon, daemon: .cloudd, outcome: .failed, errorKind: .other).props
         #expect(props["daemon"] == .string("cloudd"))
         #expect(props["error_kind"] == .string("other"))
+    }
+
+    @Test("A restart the poll never witnessed is unconfirmed, not ok")
+    func restartOutcomes() {
+        #expect(DiagnosticsView.restartEvent(daemon: .bird, result: .success("Restarted (new pid 42)"))
+                == .maintenanceRun(.restart_daemon, daemon: .bird, outcome: .ok, errorKind: nil))
+        // Both unwitnessed endings: the poll ran and saw no new pid, and the
+        // poll itself failed. Neither is a confirmed restart.
+        #expect(DiagnosticsView.restartEvent(daemon: .cloudd, result: .success(MaintenanceActions.respawnNotObserved))
+                == .maintenanceRun(.restart_daemon, daemon: .cloudd, outcome: .unconfirmed, errorKind: nil))
+        #expect(DiagnosticsView.restartEvent(daemon: .bird, result: .success(MaintenanceActions.restartNotConfirmed))
+                == .maintenanceRun(.restart_daemon, daemon: .bird, outcome: .unconfirmed, errorKind: nil))
+        #expect(DiagnosticsView.restartEvent(daemon: .bird, result: .failure(MaintenanceError.daemonNotRunning("bird")))
+                == .maintenanceRun(.restart_daemon, daemon: .bird, outcome: .failed, errorKind: .daemonNotRunning))
+    }
+
+    @Test("A daemon name outside the closed set never reaches the props")
+    func unknownDaemonOmitted() {
+        let event = DiagnosticsView.restartEvent(
+            daemon: UsageEvent.Daemon(rawValue: "someprivated"),
+            result: .failure(MaintenanceError.unknownDaemon("someprivated")))
+        #expect(event.props["daemon"] == nil)
+        #expect(event.props["error_kind"] == .string("unknownDaemon"))
     }
 
     @Test("Bucketing is coarse and total")
@@ -255,6 +329,92 @@ struct UsageStoreHookTests {
         #expect(store.searchText.isEmpty)
     }
 
+    @Test("Appearance events wait for a person: held before activation, sent in order after")
+    func attendedEventsHeld() async {
+        let (store, tracker) = makeStore()
+        store.recordWhenAttended(.onboardingStepShown(.welcome))
+        store.recordWhenAttended(.onboardingStepShown(.grantAccess))
+        #expect(tracker.calls.isEmpty, "nothing may start a session before activation")
+        await store.applicationDidBecomeActive()
+        store.recordWhenAttended(.onboardingStepShown(.welcome))      // after activation: immediate
+        await store.applicationDidBecomeActive()                     // held list already drained
+        #expect(tracker.calls == [
+            "didBecomeActive", "onboarding_step_shown", "onboarding_step_shown",
+            "onboarding_step_shown", "didBecomeActive",
+        ], "got \(tracker.calls)")
+        #expect(tracker.events == [
+            .onboardingStepShown(.welcome), .onboardingStepShown(.grantAccess), .onboardingStepShown(.welcome),
+        ])
+    }
+
+    @Test("Each onboarding step counts once per launch, however often it is shown")
+    func onboardingStepDeduped() async {
+        let (store, tracker) = makeStore()
+        await store.applicationDidBecomeActive()
+        store.recordOnboardingStepShown(.welcome)
+        store.recordOnboardingStepShown(.grantAccess)
+        store.recordOnboardingStepShown(.welcome)          // Back
+        store.recordOnboardingStepShown(.grantAccess)      // Get Started again
+        #expect(tracker.events == [.onboardingStepShown(.welcome), .onboardingStepShown(.grantAccess)])
+    }
+
+    @Test("account_settings_opened is recorded only when the pane actually opened")
+    func accountSettingsOnlyWhenOpened() {
+        let (store, tracker) = makeStore()
+        AppleAccountSettings.open(from: .storage, store: store, opener: { _ in false })
+        AppleAccountSettings.open(from: .devices, store: store, opener: { _ in true })
+        #expect(tracker.events == [.accountSettingsOpened(from: .devices)])
+    }
+
+    @Test("Turning sharing back on reopens the session; turning it off does not")
+    func reenableReactivates() async {
+        let (store, tracker) = makeStore()
+        await store.loadUsagePreference()
+        await store.setUsageSharing(false)?.value
+        #expect(!tracker.calls.contains("didBecomeActive"))
+        await store.setUsageSharing(true)?.value
+        #expect(tracker.calls == ["didBecomeActive"])
+    }
+
+    @Test("Once known, the switch is never re-read over the store's own value")
+    func loadOnlyOnce() async {
+        let (store, tracker) = makeStore()
+        await store.loadUsagePreference()
+        await tracker.setEnabled(false)                    // a stale/other answer the SDK might give
+        await store.loadUsagePreference()                  // second Diagnostics visit
+        #expect(store.usageSharingEnabled == true)
+    }
+
+    @Test("An issue button records issue_action with its kind and the card's severity")
+    func issueAction() async {
+        let conflict = TestIssues.make(id: "c1", action: .reviewVersions, severity: .conflict)
+        let stuck = TestIssues.make(id: "s1", action: .openDiagnostics, severity: .error)
+        let (store, tracker) = makeStore(snapshot: .minimal(issues: [conflict, stuck]))
+        await store.refresh(force: true)
+        IssuePrimaryAction.reviewVersions.perform(on: store, issue: conflict)
+        IssuePrimaryAction.openDiagnostics.perform(on: store, issue: stuck)
+        #expect(tracker.events == [
+            .issueAction(.review_versions, severity: .conflict),
+            .issueAction(.open_diagnostics, severity: .error),
+            .viewShown(.diagnostics, via: .link),
+        ], "got \(tracker.events)")
+        #expect(IssuePrimaryAction.openAppleAccountSettings.usageKind == .manage_storage)
+    }
+
+    @Test("snapshot_health reports the right permission for each prop, and unknown counts as not granted")
+    func healthPermissionsByKind() async {
+        var snapshot = SyncSnapshot.minimal()
+        snapshot.permissions = [
+            PermissionStatus(kind: .notifications, state: .unknown),
+            PermissionStatus(kind: .fullDiskAccess, state: .granted),
+        ]
+        let (store, tracker) = makeStore(snapshot: snapshot)
+        await store.applicationDidBecomeActive()
+        await store.refresh(force: true)
+        #expect(tracker.events.last == .snapshotHealth(
+            appsByBackend: [:], issueCount: 0, daemonsMissing: 0, fdaGranted: true, notificationsGranted: false))
+    }
+
     @Test("snapshot_health and the launch view_shown fire once per launch, not per refresh")
     func healthOnce() async {
         let (store, tracker) = makeStore()
@@ -329,28 +489,54 @@ struct UsageStoreHookTests {
     @Test("Opt-out flows through to the tracker's master switch")
     func optOut() async {
         let (store, tracker) = makeStore()
+        #expect(store.usageSharingEnabled == nil, "unknown until loaded, never a guessed true")
+        #expect(store.setUsageSharing(false) == nil, "no write before the stored value is known")
         await store.loadUsagePreference()
-        #expect(store.usageSharingEnabled)
-        var changes = tracker.enabledChanges.makeAsyncIterator()
-        store.setUsageSharing(false)
-        #expect(await changes.next() == false, "the flip reaches the tracker's master switch")
+        #expect(store.usageSharingEnabled == true)
+        await store.setUsageSharing(false)?.value
         #expect(await tracker.isEnabled == false)
-        #expect(!store.usageSharingEnabled)
+        #expect(store.usageSharingEnabled == false)
     }
 
-    // Fails without the generation check: the load read `true` before the
-    // flip, finished after it, and put the switch back on.
-    @Test("A load already in flight cannot undo a flip made while it waited")
+    /// Pins the contract (call order, final SDK state = last value shown)
+    /// with a slow first write. It cannot force the old overtake: that race
+    /// depends on the scheduler, and C8 rules out provoking it. The ordering
+    /// itself is by construction — each write awaits the one before it.
+    @Test("Toggles made while a write is slow land in call order and end on the value shown", .timeLimit(.minutes(1)))
+    func togglesAreOrdered() async {
+        let tracker = SlowWriteUsageTracker()
+        let store = SyncStore(source: StubSyncSource(snapshot: .minimal()), notifier: noBanners, defaults: throwawayDefaults(), usage: tracker)
+        await store.loadUsagePreference()
+        store.setUsageSharing(false)
+        await tracker.firstWriteEntered()         // the first write is now parked
+        let last = store.setUsageSharing(true)
+        tracker.releaseFirstWrite()
+        await last?.value
+        #expect(tracker.writes == [false, true])
+        #expect(await tracker.isEnabled == true)
+        #expect(store.usageSharingEnabled == true)
+    }
+
+    // Fails if a flip is accepted while the first read is suspended (the read
+    // would then land its old answer over it), or if a later load re-reads
+    // the SDK and puts an old answer back over a flip.
+    @Test("No flip lands during the first read, and a later load never re-reads", .timeLimit(.minutes(1)))
     func loadDoesNotOverwriteFlip() async {
-        let tracker = GatedUsageTracker()
+        let tracker = GatedReadUsageTracker()
         let store = SyncStore(source: StubSyncSource(snapshot: .minimal()), notifier: noBanners,
                               defaults: throwawayDefaults(), usage: tracker)
         let load = Task { await store.loadUsagePreference() }
-        await tracker.waitUntilReadStarted()          // the load holds its old answer
-        store.setUsageSharing(false)
-        tracker.releaseRead(answer: true)              // …and returns it after the flip
+        await tracker.waitUntilReadStarted()          // the load holds its answer
+        #expect(store.setUsageSharing(false) == nil, "nothing to flip while the value is unknown")
+        #expect(store.usageSharingEnabled == nil)
+        tracker.releaseRead(answer: true)
         await load.value
-        #expect(!store.usageSharingEnabled)
+        #expect(store.usageSharingEnabled == true)
+
+        await store.setUsageSharing(false)?.value
+        await store.loadUsagePreference()             // e.g. Settings opened after the flip
+        #expect(store.usageSharingEnabled == false)
+        #expect(tracker.reads == 1, "the stored value is read once per launch")
     }
 
     @Test("With analytics gated off the switch is unavailable and does not move")
@@ -359,29 +545,83 @@ struct UsageStoreHookTests {
                               defaults: throwawayDefaults(), usage: NoopUsageTracker())
         #expect(!store.usageSharingAvailable)
         await store.loadUsagePreference()
-        let before = store.usageSharingEnabled
-        store.setUsageSharing(!before)
-        #expect(store.usageSharingEnabled == before)
+        #expect(store.usageSharingEnabled == false, "a no-op tracker reports sharing off")
+        #expect(store.setUsageSharing(true) == nil)
+        #expect(store.usageSharingEnabled == false)
         #expect(makeStore().0.usageSharingAvailable, "a configured tracker keeps the switch")
     }
 }
 
-/// A tracker whose `isEnabled` read waits until the test releases it, so a
-/// flip can land while a load is suspended — ordering by continuation, not by
-/// sleeping.
-final class GatedUsageTracker: UsageTracking, @unchecked Sendable {
+/// A tracker whose FIRST `setEnabled` parks until released — the slow write a
+/// rapid second toggle must not overtake.
+final class SlowWriteUsageTracker: UsageTracking, @unchecked Sendable {
+    private let lock = NSLock()
+    private var parked: CheckedContinuation<Void, Never>?
+    private var entered: CheckedContinuation<Void, Never>?
+    private var didEnter = false
+    private var isFirst = true
+    private var _writes: [Bool] = []
+    private var _enabled = true
+
+    var writes: [Bool] { lock.withLock { _writes } }
+    func record(_ event: UsageEvent) {}
+    func applicationDidBecomeActive() async {}
+    func flush() async {}
+    var isEnabled: Bool { get async { lock.withLock { _enabled } } }
+
+    func setEnabled(_ enabled: Bool) async {
+        let park = lock.withLock { defer { isFirst = false }; return isFirst }
+        if park {
+            await withCheckedContinuation { c in
+                let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                    parked = c; didEnter = true
+                    defer { entered = nil }
+                    return entered
+                }
+                waiter?.resume()
+            }
+        }
+        lock.withLock { _writes.append(enabled); _enabled = enabled }
+    }
+
+    /// Returns once the first write is parked.
+    func firstWriteEntered() async {
+        await withCheckedContinuation { c in
+            let already = lock.withLock { () -> Bool in
+                if didEnter { return true }
+                entered = c
+                return false
+            }
+            if already { c.resume() }
+        }
+    }
+
+    func releaseFirstWrite() {
+        lock.withLock { () -> CheckedContinuation<Void, Never>? in defer { parked = nil }; return parked }?.resume()
+    }
+}
+
+/// A tracker whose FIRST `isEnabled` read waits until the test releases it,
+/// so a flip can be attempted while a load is suspended — ordering by
+/// continuation, not by sleeping. Later reads answer `true` at once, so a
+/// regression that re-reads shows up as a wrong value, not a hang.
+final class GatedReadUsageTracker: UsageTracking, @unchecked Sendable {
     private let lock = NSLock()
     private var started: CheckedContinuation<Void, Never>?
     private var didStart = false
     private var pending: CheckedContinuation<Bool, Never>?
+    private var _reads = 0
 
+    var reads: Int { lock.withLock { _reads } }
     func record(_ event: UsageEvent) {}
     func applicationDidBecomeActive() async {}
     func flush() async {}
     func setEnabled(_ enabled: Bool) async {}
     var isEnabled: Bool {
         get async {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let first = lock.withLock { () -> Bool in _reads += 1; return _reads == 1 }
+            guard first else { return true }
+            return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
                     pending = continuation
                     didStart = true

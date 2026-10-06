@@ -136,7 +136,7 @@ struct DesktopDocumentsGateTests {
         let recorder = Recorder()
         let fda = OSAllocatedUnfairLock(initialState: PermissionState.denied)
         let readers = SystemSyncSource.DesktopDocumentsReaders(
-            permissions: { [PermissionStatus(name: "Full Disk Access", state: fda.withLock { $0 })] },
+            permissions: { [PermissionStatus(kind: .fullDiskAccess, state: fda.withLock { $0 })] },
             localSizes: { _, include in await recorder.size(include); return [:] },
             breakdown: { include in await recorder.breakdown(include); return ([:], false) }
         )
@@ -180,7 +180,7 @@ struct PermissionReprobeTests {
         let readers = SystemSyncSource.DesktopDocumentsReaders(
             permissions: {
                 probes.withLock { $0 += 1 }
-                return [PermissionStatus(name: "Full Disk Access", state: fda.withLock { $0 })]
+                return [PermissionStatus(kind: .fullDiskAccess, state: fda.withLock { $0 })]
             },
             localSizes: { _, _ in [:] },
             breakdown: { _ in ([:], false) }

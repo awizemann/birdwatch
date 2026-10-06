@@ -48,13 +48,13 @@ struct DevicesView: View {
 /// no device-management verb (its commands are diagnose/log/dump/status/
 /// accounts/quota/monitor, all read-only), and there is no public API for it.
 struct DeviceManagementFootnote: View {
+    @Environment(SyncStore.self) private var store
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             SourceFootnote(text: "Devices are managed in System Settings › Apple Account (removing one there also signs it out of iCloud); Birdwatch can only observe them.")
             Button("Open Apple Account settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") {
-                    NSWorkspace.shared.open(url)
-                }
+                AppleAccountSettings.open(from: .devices, store: store)
             }
             .buttonStyle(.link)
             .scaledFont(size: 11.5)

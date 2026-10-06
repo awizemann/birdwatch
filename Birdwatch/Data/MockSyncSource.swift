@@ -297,8 +297,8 @@ struct MockSyncSource: SyncSource {
 
     /// Exactly the two permissions PermissionsProbe checks.
     nonisolated private static let permissions: [PermissionStatus] = [
-        PermissionStatus(name: "Full Disk Access", state: fullDiskAccess),
-        PermissionStatus(name: "Notifications", state: .granted),
+        PermissionStatus(kind: .fullDiskAccess, state: fullDiskAccess),
+        PermissionStatus(kind: .notifications, state: .granted),
     ]
 
     /// Only the hours from launch through the current hour of today were

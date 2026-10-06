@@ -105,7 +105,7 @@ struct IssueActionEffectTests {
         #expect(store.issues.count == 2)
 
         let action = try! #require(IssuePrimaryAction(issue: store.issues[0]))
-        action.perform(on: store, issueID: store.issues[0].id)
+        action.perform(on: store, issue: store.issues[0])
 
         // The exact pair QA observed failing: the screen must change AND the
         // card must survive. Either half alone is not the fix.
@@ -121,7 +121,7 @@ struct IssueActionEffectTests {
             issue("issue-stuck-items", action: .openDiagnostics),
         ])
         for item in store.issues {
-            IssuePrimaryAction(issue: item)?.perform(on: store, issueID: item.id)
+            IssuePrimaryAction(issue: item)?.perform(on: store, issue: item)
         }
         #expect(store.selectedView == .diagnostics)
         #expect(store.issues.count == 2)
@@ -131,7 +131,7 @@ struct IssueActionEffectTests {
     func reviewVersionsDoesNotDismiss() async {
         let store = await storeWithIssues([issue("conflict-1", action: .reviewVersions, severity: .conflict)])
         let action = try! #require(IssuePrimaryAction(issue: store.issues[0]))
-        action.perform(on: store, issueID: "conflict-1")
+        action.perform(on: store, issue: store.issues[0])
         #expect(store.conflictIssueID == "conflict-1")
         #expect(store.issues.count == 1)
     }

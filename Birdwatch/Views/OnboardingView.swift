@@ -5,13 +5,20 @@ import UserNotifications
 
 private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", category: "onboarding")
 
+/// The two first-run screens. Raw values are the `onboarding_step_shown`
+/// wire values.
+nonisolated enum OnboardingStep: String, Sendable, CaseIterable {
+    case welcome
+    case grantAccess = "grant_access"
+}
+
 /// First-run setup (design: "First-run onboarding"). Completion persists in
 /// preferences; Phase 1 replaces the manual switch with real Full Disk Access
 /// detection + a deep link to Privacy & Security.
 struct OnboardingView: View {
     @Environment(SyncStore.self) private var store
     @Binding var isComplete: Bool
-    @State private var step = 0
+    @State private var step = OnboardingStep.welcome
     /// nil until the first probe answers — nothing about access is claimed
     /// (and the escape hatch stays hidden) while it is still checking.
     @State private var fdaState: PermissionState?
@@ -22,9 +29,17 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             Spacer()
             Group {
-                if step == 0 { welcome } else { grantAccess }
+                switch step {
+                case .welcome: welcome
+                case .grantAccess: grantAccess
+                }
             }
             .frame(maxWidth: 460)
+            // The funnel: which screen people reach, so drop-off between
+            // welcome, the Full Disk Access step and completion is visible.
+            .onChange(of: step, initial: true) { _, shown in
+                store.recordOnboardingStepShown(shown)
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -70,7 +85,7 @@ struct OnboardingView: View {
                 }
             }
 
-            Button("Get Started") { step = 1 }
+            Button("Get Started") { step = .grantAccess }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
@@ -148,7 +163,7 @@ struct OnboardingView: View {
             .scaledFont(size: 13)
 
             HStack {
-                Button("Back") { step = 0 }
+                Button("Back") { step = .welcome }
                     .buttonStyle(.bordered)
                 Button("Enter Birdwatch") { finish() }
                     .buttonStyle(.borderedProminent)

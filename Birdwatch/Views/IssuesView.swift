@@ -30,6 +30,15 @@ enum IssuePrimaryAction: String, Sendable, Hashable {
         }
     }
 
+    /// The analytics name for this button (`issue_action.action`).
+    var usageKind: UsageEvent.IssueActionKind {
+        switch self {
+        case .reviewVersions: .review_versions
+        case .openDiagnostics: .open_diagnostics
+        case .openAppleAccountSettings: .manage_storage
+        }
+    }
+
     var accessibilityHint: String {
         switch self {
         case .reviewVersions: "Compares the conflicting versions of this file"
@@ -43,27 +52,19 @@ enum IssuePrimaryAction: String, Sendable, Hashable {
     /// click does, including the thing QA caught the old placeholder doing:
     /// `.openDiagnostics` must NAVIGATE and must leave `store.issues` alone.
     /// Only "Dismiss" removes a card.
-    func perform(on store: SyncStore, issueID: String) {
+    func perform(on store: SyncStore, issue: IssueItem) {
+        let issueID = issue.id
+        // Recorded at the press: this counts the button being used, from the
+        // card the person actually clicked (even if a refresh just replaced it).
+        store.record(.issueAction(usageKind, severity: issue.severity))
         switch self {
         case .reviewVersions:
             store.conflictIssueID = issueID
         case .openDiagnostics:
             store.navigate(to: .diagnostics, via: .link)
         case .openAppleAccountSettings:
-            Self.openAppleAccountSettings()
-        }
-    }
-
-    /// Same pane Storage and Devices open — the one surface that can actually
-    /// change an iCloud plan. A refusal from the URL system is logged rather
-    /// than swallowed: the click then did nothing, and the log says so.
-    static func openAppleAccountSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") else {
-            logger.error("Apple Account settings URL is malformed; cannot open System Settings")
-            return
-        }
-        if !NSWorkspace.shared.open(url) {
-            logger.error("System Settings refused to open the Apple Account pane")
+            // Counted once, as issue_action(manage_storage) above.
+            AppleAccountSettings.open()
         }
     }
 
@@ -93,6 +94,35 @@ enum IssuePrimaryAction: String, Sendable, Hashable {
         case .manageStorage: self = .openAppleAccountSettings
         case .none: return nil
         }
+    }
+}
+
+/// System Settings › Apple Account — the one surface that can change an iCloud
+/// plan or remove a device. One opener for every button that goes there
+/// (issue card, Storage, Devices). A refusal from the URL system is logged
+/// rather than swallowed: the click then did nothing, and the log says so.
+enum AppleAccountSettings {
+    /// For buttons outside the issue cards: opens the pane and, only if it
+    /// actually opened, records where the person came from. `opener` is the
+    /// test seam; production opens through NSWorkspace.
+    static func open(
+        from origin: UsageEvent.SettingsOrigin, store: SyncStore,
+        opener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    ) {
+        if open(opener: opener) { store.record(.accountSettingsOpened(from: origin)) }
+    }
+
+    @discardableResult
+    static func open(opener: (URL) -> Bool = { NSWorkspace.shared.open($0) }) -> Bool {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") else {
+            logger.error("Apple Account settings URL is malformed; cannot open System Settings")
+            return false
+        }
+        guard opener(url) else {
+            logger.error("System Settings refused to open the Apple Account pane")
+            return false
+        }
+        return true
     }
 }
 
@@ -233,6 +263,6 @@ private struct IssueCard: View {
     private func perform(_ action: IssuePrimaryAction) {
         // The id can be a hashed file path (ConflictSource), so it stays private.
         logger.info("Issue action: \(action.label, privacy: .public) for \(issue.id, privacy: .private)")
-        action.perform(on: store, issueID: issue.id)
+        action.perform(on: store, issue: issue)
     }
 }

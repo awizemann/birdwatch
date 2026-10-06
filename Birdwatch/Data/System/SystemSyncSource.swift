@@ -538,7 +538,7 @@ final class SystemSyncSource: SyncSource {
             permissions = await readers.permissions()
             await MainActor.run { cachedPermissions = (permissions, now) }
         }
-        let fullDiskAccess = permissions.first { $0.name == "Full Disk Access" }?.state ?? .unknown
+        let fullDiskAccess = permissions.state(of: .fullDiskAccess) ?? .unknown
         let reads = TransferWatchPolicy.readsDesktopDocuments(featureOn: featureOn, fullDiskAccess: fullDiskAccess)
         await MainActor.run { transferWatcher?.setIncludesDesktopDocuments(reads) }
 

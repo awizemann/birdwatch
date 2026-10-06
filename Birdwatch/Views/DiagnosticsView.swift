@@ -163,20 +163,39 @@ struct DiagnosticsView: View {
                 let tone: ActionStatus.Tone =
                     MaintenanceActions.isUnconfirmed(result) ? .caution : .success
                 show(ActionStatus(text: "\(title): \(result)", tone: tone))
-                store.record(.maintenanceRun(.restart_daemon, daemon: daemon, outcome: .ok, errorKind: nil))
+                store.record(Self.restartEvent(daemon: daemon, result: .success(result)))
             } catch {
                 let reason = Self.shortReason(for: error)
                 logger.error("\(title, privacy: .public) failed: \(reason, privacy: .private)")
                 show(ActionStatus(text: "Failed: \(reason)", tone: .failure))
-                store.record(.maintenanceRun(.restart_daemon, daemon: daemon, outcome: .failed, errorKind: Self.errorKind(for: error)))
+                store.record(Self.restartEvent(daemon: daemon, result: .failure(error)))
             }
         }
     }
 
+    /// The `maintenance_run` event for a finished restart. A success the
+    /// poll never witnessed — `respawnNotObserved` or `restartNotConfirmed`,
+    /// both `MaintenanceActions.isUnconfirmed` — is `unconfirmed`, matching
+    /// the caution tint, not `ok`. The daemon is already the closed
+    /// `UsageEvent.Daemon` set (callers gate names with `init?(rawValue:)`),
+    /// so a name outside it arrives as nil and is omitted.
+    static func restartEvent(daemon: UsageEvent.Daemon?, result: Result<String, any Error>) -> UsageEvent {
+        let outcome: UsageEvent.Outcome
+        var kind: UsageEvent.MaintenanceErrorKind?
+        switch result {
+        case .success(let message):
+            outcome = MaintenanceActions.isUnconfirmed(message) ? .unconfirmed : .ok
+        case .failure(let error):
+            outcome = .failed
+            kind = errorKind(for: error)
+        }
+        return .maintenanceRun(.restart_daemon, daemon: daemon, outcome: outcome, errorKind: kind)
+    }
+
     /// The error's *kind* for analytics — a `MaintenanceError` case name or
-    /// "other". An explicit switch, never reflection or the message: every
+    /// `other`. An explicit switch, never reflection or the message: every
     /// payload is a path or daemon name and must not travel.
-    static func errorKind(for error: Error) -> UsageEvent.MaintenanceErrorKind {
+    static func errorKind(for error: any Error) -> UsageEvent.MaintenanceErrorKind {
         guard let m = error as? MaintenanceError else { return .other }
         switch m {
         case .unknownDaemon: return .unknownDaemon
