@@ -229,7 +229,7 @@ enum IssueSeverity: String, Sendable, Hashable {
 /// render either no button or one that did nothing. A case here is a promise
 /// Birdwatch can keep. The button's TITLE is the view layer's business
 /// (`IssuePrimaryAction`); no display copy lives in this model.
-nonisolated enum IssueAction: String, Sendable, Hashable, CaseIterable {
+nonisolated enum IssueAction: Sendable, Hashable, CaseIterable {
     case reviewVersions
     case openDiagnostics
     case manageStorage

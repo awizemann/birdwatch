@@ -7,16 +7,17 @@ private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", cat
 /// services. Honesty rules apply — data a backend cannot provide is absent or
 /// explicitly labeled, never invented (see the product-shape memory note).
 ///
-/// Isolation: the SyncSource requirements are nonisolated(nonsending), so they
-/// run on the caller (SyncStore's MainActor). That is fine HERE because this
-/// type only orchestrates — every expensive step hops to its owning actor
+/// Isolation: this class is nonisolated, and NonisolatedNonsendingByDefault
+/// (SE-0461) is not enabled, so its `async` SyncSource requirements run on the
+/// global concurrent executor, not on the caller's (SyncStore's) MainActor.
+/// The type only orchestrates — every expensive step hops to its owning actor
 /// (CloudDocsSource / DaemonStatsSource run brctl and ps on their executors;
-/// DriveFolderSource scans on a @concurrent function). Reading
-/// UbiquityTransferSource (MainActor) from here is exactly right.
+/// blocking scans go through SingleFlightScan / @concurrent functions) — and
+/// every read of its MainActor state (the caches below, UbiquityTransferSource,
+/// ActivityLog) is an explicit `await MainActor.run` hop.
 final class SystemSyncSource: SyncSource {
     private let cloudDocs: CloudDocsSource
     private let daemonStats = DaemonStatsSource()
-    private let logSource = LogStreamSource()
     // Blocking directory scans (see SingleFlightScan): one in flight each, on
     // their own queues, late results kept for the next cycle.
     private let folderScan = SingleFlightScan(label: "drive-folders") { DriveFolderSource.scanFolders() }
@@ -35,7 +36,7 @@ final class SystemSyncSource: SyncSource {
     @MainActor private var resolvedConflictIDs: Set<String> = []
     // The last successful conflict scan stopped at its item cap.
     @MainActor private(set) var conflictScanCapped = false
-    // Guarded by MainActor (currentSnapshot always runs on the caller's actor).
+    // Guarded by MainActor (read and written only inside MainActor.run hops).
     // Cached because the notifications probe races a 1.5s timeout — paying that
     // on every 15s refresh (or on first paint) is wasted latency. 5-minute TTL
     // so a grant made mid-session (e.g. FDA flipped in System Settings) shows
@@ -385,13 +386,8 @@ final class SystemSyncSource: SyncSource {
         )
     }
 
-    nonisolated func logStream(appID: String) -> AsyncStream<LogLine> {
-        let backend: SyncBackend = switch appID {
-        case "icloud-drive", "desktop-documents": .cloudDocs
-        case "photos", "notes", "messages", "safari": .cloudKit
-        default: .fileProvider
-        }
-        return logSource.stream(predicate: LogStreamSource.predicate(for: backend))
+    nonisolated func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> {
+        LogStreamSource.stream(backend: backend)
     }
 
     func conflictDetail(issueID: String) async -> ConflictDetail? {

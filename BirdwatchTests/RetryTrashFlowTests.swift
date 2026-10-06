@@ -318,6 +318,6 @@ final class RecordingSource: SyncSource, @unchecked Sendable {
         }
     }
 
-    func logStream(appID: String) -> AsyncStream<LogLine> { AsyncStream { $0.finish() } }
+    func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> { AsyncThrowingStream { $0.finish() } }
     func conflictDetail(issueID: String) async -> ConflictDetail? { nil }
 }

@@ -155,13 +155,38 @@ final class SyncStore {
         now: @escaping () -> Date = { Date() },
         notifier: @escaping (String, String, String) -> Void,
         defaults: UserDefaults = .standard,
-        usage: any UsageTracking = NoopUsageTracker()
+        usage: any UsageTracking = NoopUsageTracker(),
+        setTransferWatching: @escaping @MainActor (Bool) -> Void = { _ in },
+        isMainWindowVisible: @escaping @MainActor () -> Bool = { false }
     ) {
         self.source = source
         self.now = now
         self.notifier = notifier
         self.defaults = defaults
         self.usage = usage
+        self.setTransferWatching = setTransferWatching
+        self.isMainWindowVisible = isMainWindowVisible
+    }
+
+    /// Drives the FSEvents transfer watcher (true = watch). The app passes a
+    /// closure posting UbiquityTransferSource's pause/resume requests; the
+    /// default is inert so stores built in tests never signal app-wide.
+    private let setTransferWatching: @MainActor (Bool) -> Void
+    /// Whether the main window is on screen (the app checks NSApp.windows).
+    private let isMainWindowVisible: @MainActor () -> Bool
+    /// Set by the menu-bar popover while it is open — the other surface that
+    /// shows transfers. Not UI state, so not observed.
+    @ObservationIgnored var isMenuBarPopoverOpen = false
+
+    /// Runs or stops the transfer watcher per `TransferWatchPolicy.shouldWatch`.
+    /// Called on pause/resume, after every fetch, and by the surfaces when
+    /// they open, close, minimise or restore.
+    func syncTransferWatcher() {
+        setTransferWatching(TransferWatchPolicy.shouldWatch(
+            monitoringPaused: isGloballyPaused,
+            mainWindowOnScreen: isMainWindowVisible(),
+            popoverOpen: isMenuBarPopoverOpen
+        ))
     }
 
     // MARK: - Usage analytics
@@ -422,6 +447,11 @@ final class SyncStore {
             self.fetchGeneration += 1
             let generation = self.fetchGeneration
             let snapshot = await source.currentSnapshot()
+            // The source creates and STARTS the watcher on its first snapshot,
+            // whatever the policy says — and monitoring or a surface may have
+            // changed while this fetch was in flight. Re-apply the policy
+            // after every fetch (pause/resume are idempotent).
+            self.syncTransferWatcher()
             self.apply(snapshot, fetchedAt: generation)
             self.lastRefresh = self.now()
             if !self.hasLoaded {
@@ -669,6 +699,12 @@ final class SyncStore {
     func togglePauseAll() {
         isGloballyPaused.toggle()
         record(isGloballyPaused ? .monitoringPaused : .monitoringResumed)
+        // Pausing must stop the FSEvents watcher + probe ticker too, not just
+        // the refresh loop (the Overview footnote promises it). Resuming
+        // brings it back only if a surface is on screen; otherwise the next
+        // one to appear does. (The live log console stops on its own: it keys
+        // its task on `isGloballyPaused`.)
+        syncTransferWatcher()
         // Audit P3: monitoring paused BEFORE the first snapshot ever landed
         // leaves `hasLoaded` false, and nothing else fetches again — the
         // window's `.task` already ran, so resuming from the toolbar left the
@@ -842,8 +878,8 @@ final class SyncStore {
         }
     }
 
-    func logStream(appID: String) -> AsyncStream<LogLine> {
-        source.logStream(appID: appID)
+    func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> {
+        source.logStream(appID: appID, backend: backend)
     }
 
     func conflictDetail(issueID: String) async -> ConflictDetail? {

@@ -368,13 +368,27 @@ private struct InfoCallout: View {
 // MARK: - Live log console
 
 /// Always-dark console regardless of appearance. Streams from the store's
-/// per-app log stream while the detail is open; resets on app switch.
+/// per-app log stream while the detail is open; resets on app switch. Stops
+/// (keeping the lines it has) while monitoring is paused.
 private struct LiveLogConsole: View {
     let appID: String
     let backend: SyncBackend
     @Environment(SyncStore.self) private var store
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @State private var lines: [LogLine] = []
+    /// Which app `lines` belong to — a pause/resume keeps them, a switch drops them.
+    @State private var linesAppID: String?
+    /// Why the stream is not running (launch failure, non-zero exit, end), shown in place of "live".
+    @State private var problem: String?
+
+    /// Everything the stream depends on: a change to any restarts (or, for
+    /// `paused`, stops) it. The backend is in the key because the header is
+    /// derived from it — header and stream must always name the same daemon.
+    private struct StreamKey: Hashable {
+        let appID: String
+        let backend: SyncBackend
+        let paused: Bool
+    }
 
     private var dimText: Color {
         colorSchemeContrast == .increased ? Color(hex: "c4c4ca") : Color(hex: "9a9aa0")
@@ -399,10 +413,7 @@ private struct LiveLogConsole: View {
                     .monospaced()
                     .foregroundStyle(dimText)
                 Spacer()
-                StatusDot(color: Palette.success, pulses: true)
-                Text("live")
-                    .scaledFont(size: 10.5, weight: .bold)
-                    .foregroundStyle(Palette.success)
+                streamState
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -411,6 +422,12 @@ private struct LiveLogConsole: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
+                if let note = statusNote {
+                    Text(note)
+                        .scaledFont(size: 11.5)
+                        .monospaced()
+                        .foregroundStyle(dimText)
+                }
                 ForEach(lines) { line in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(logTimestampFormatter.string(from: line.date))
@@ -443,31 +460,99 @@ private struct LiveLogConsole: View {
         .background(Palette.console, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
         .environment(\.colorScheme, .dark)
-        .task(id: appID) {
+        .task(id: StreamKey(appID: appID, backend: backend, paused: store.isGloballyPaused)) {
+            await runStream()
+        }
+        // .contain first: a label on a plain container is otherwise applied to
+        // every child, so VoiceOver read "Live log for …" on each line.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Live log for \(command)")
+    }
+
+    @ViewBuilder
+    private var streamState: some View {
+        if store.isGloballyPaused {
+            Image(systemName: "pause.circle.fill")
+                .scaledFont(size: 10.5, weight: .bold)
+                .foregroundStyle(dimText)
+                .accessibilityHidden(true)
+            Text("paused")
+                .scaledFont(size: 10.5, weight: .bold)
+                .foregroundStyle(dimText)
+        } else if problem != nil {
+            StatusDot(color: Palette.warning)
+            Text("stopped")
+                .scaledFont(size: 10.5, weight: .bold)
+                .foregroundStyle(Palette.warning)
+        } else {
+            StatusDot(color: Palette.success, pulses: true)
+            Text("live")
+                .scaledFont(size: 10.5, weight: .bold)
+                .foregroundStyle(Palette.success)
+        }
+    }
+
+    private var statusNote: String? {
+        if store.isGloballyPaused { return "Monitoring is paused — the log stream is stopped." }
+        return problem
+    }
+
+    private func runStream() async {
+        if linesAppID != appID {
             lines = []
-            // Coalesce arrivals into a local buffer and flush to @State at
-            // most every 250ms, so a log storm doesn't drive a SwiftUI
-            // state write (and view diff) per line.
-            var buffer: [LogLine] = []
-            var flushTask: Task<Void, Never>?
-            for await line in store.logStream(appID: appID) {
-                buffer.insert(line, at: 0)
-                guard flushTask == nil else { continue }
-                flushTask = Task {
-                    try? await Task.sleep(for: .milliseconds(250))
-                    guard !Task.isCancelled else { return }
-                    // Keep newest at the TOP regardless of arrival order: the
-                    // seed burst arrives newest-first while live lines arrive
-                    // newest-last, so plain insert-at-0 would leave the seeds
-                    // inverted.
-                    lines.insert(contentsOf: buffer, at: 0)
-                    lines.sort { $0.date > $1.date }
-                    if lines.count > 25 { lines.removeLast(lines.count - 25) }
-                    buffer.removeAll()
-                    flushTask = nil
+            linesAppID = appID
+        }
+        problem = nil
+        guard !store.isGloballyPaused else { return }
+
+        // Coalesce arrivals into a local buffer and flush to @State at most
+        // every 250ms, so a log storm doesn't drive a SwiftUI state write (and
+        // view diff) per line.
+        var buffer: [LogLine] = []
+        var flushTask: Task<Void, Never>?
+        let streamAppID = appID
+        // The flush is a separate task, so `.task(id:)` cancelling THIS one
+        // does not reach it: without this, a flush pending at an app switch
+        // landed the previous app's lines in the next app's console.
+        defer { flushTask?.cancel() }
+
+        while !Task.isCancelled {
+            do {
+                for try await line in store.logStream(appID: appID, backend: backend) {
+                    buffer.insert(line, at: 0)
+                    guard flushTask == nil else { continue }
+                    flushTask = Task {
+                        try? await Task.sleep(for: .milliseconds(250))
+                        guard !Task.isCancelled else { return }
+                        // Belt and braces with the cancel above: never land
+                        // lines in a console that now belongs to another app.
+                        guard linesAppID == streamAppID else { return }
+                        // Keep newest at the TOP regardless of arrival order:
+                        // the seed burst arrives newest-first while live lines
+                        // arrive newest-last, so plain insert-at-0 would leave
+                        // the seeds inverted.
+                        lines.insert(contentsOf: buffer, at: 0)
+                        lines.sort { $0.date > $1.date }
+                        if lines.count > 25 { lines.removeLast(lines.count - 25) }
+                        buffer.removeAll()
+                        flushTask = nil
+                    }
                 }
+                // Cancelled (app switch, pause, view gone): nothing to report.
+                guard !Task.isCancelled else { return }
+                detailLogger.warning("log stream for \(backend.rawValue, privacy: .public) ended")
+                problem = "The log stream ended."
+                return
+            } catch RunnerError.timeout {
+                // The per-spawn lifetime cap (C5), not a failure: start a new one.
+                detailLogger.info("log stream for \(backend.rawValue, privacy: .public) reached its lifetime cap; restarting")
+                continue
+            } catch {
+                guard !Task.isCancelled else { return }
+                detailLogger.error("log stream for \(backend.rawValue, privacy: .public) failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
+                problem = "Couldn't read the log (\(RunnerError.publicSummary(of: error)))."
+                return
             }
         }
-        .accessibilityLabel("Live log for \(command)")
     }
 }

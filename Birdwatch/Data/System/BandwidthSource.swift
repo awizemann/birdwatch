@@ -77,7 +77,7 @@ actor BandwidthSource {
             )
             state = Self.advance(state: state, readings: readings, now: Date())
         } catch {
-            logger.error("nettop sample failed: \(String(describing: error), privacy: .public)")
+            logger.error("nettop sample failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
             state = Self.advance(state: state, readings: [:], now: Date(), measured: false)
         }
         return Self.summary(from: state)
@@ -97,7 +97,7 @@ actor BandwidthSource {
             let output = try await runner.run(toolPath: "/bin/ps", arguments: ["-axo", "pid,comm"], timeout: .seconds(10))
             return Self.extractDaemonPids(psOutput: output)
         } catch {
-            logger.error("ps pid discovery failed: \(String(describing: error), privacy: .public)")
+            logger.error("ps pid discovery failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
             return []
         }
     }

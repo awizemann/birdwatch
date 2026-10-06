@@ -4,17 +4,12 @@ import os
 private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", category: "maintenance")
 
 nonisolated enum MaintenanceError: Error, Equatable {
-    /// The action has no safe public command on macOS — deliberately unsupported.
-    case notSupported(String)
     case unknownDaemon(String)
     /// No process owned by this user matched the daemon, so there is nothing to signal.
     case daemonNotRunning(String)
     /// A delete was asked for outside the three folders Birdwatch is willing to
     /// touch. Refused before any file operation happens.
     case pathNotAllowed(String)
-    /// The command shells out to `sudo`, so it can only ever run in a terminal.
-    /// Not a failure mode — a fact about the command, known before we try.
-    case requiresTerminal(String)
 }
 
 /// Real maintenance commands behind the Diagnostics view, run via ProcessRunner
@@ -35,7 +30,19 @@ nonisolated enum MaintenanceError: Error, Equatable {
 /// So the restart is `/bin/kill -TERM <pid>`, followed by a bounded poll for a
 /// pid that differs from the one we signalled.
 actor MaintenanceActions {
-    private let runner = ProcessRunner()
+    private let runner: any ProcessRunning
+    private let respawnPollInterval: Duration
+
+    /// Cheap by design (C4): no spawn until an action runs. `runner` and the
+    /// poll interval are injectable so the signal path is testable with a fake
+    /// runner — tests must never send a real signal to a system daemon.
+    init(
+        runner: any ProcessRunning = ProcessRunner(),
+        respawnPollInterval: Duration = .milliseconds(250)
+    ) {
+        self.runner = runner
+        self.respawnPollInterval = respawnPollInterval
+    }
 
     /// Daemon display name → launchd service label (verified live). Kept as the
     /// allow-list for restartable daemons and for the labels shown in the UI —
@@ -55,7 +62,6 @@ actor MaintenanceActions {
     /// but a second restart soon after took ~7s, which a 5s poll reported as
     /// "respawn not observed" for a restart that had in fact worked.
     static let respawnWait: Duration = .seconds(12)
-    private static let respawnPollInterval: Duration = .milliseconds(250)
 
     /// Returned when the signal landed but no replacement process appeared
     /// inside `respawnWait`. NOT a failure and NOT a success: `cloudd` in
@@ -76,22 +82,28 @@ actor MaintenanceActions {
     /// Returns "Restarted (new pid N)" when a different pid is observed inside
     /// `respawnWait`, or "Signal sent, respawn not observed" when the poll
     /// expires — never a success claim we did not witness.
+    ///
+    /// A failing `ps` is thrown, not read as "no pids": before the signal that
+    /// would have reported a running daemon as not running, and after it a
+    /// restart as "respawn not observed". Cancellation ends the poll at once
+    /// (it used to make the sleep return immediately, spawning `ps`
+    /// back-to-back for the whole 12 s window).
     func restartDaemon(name: String) async throws -> String {
         guard Self.serviceLabels[name] != nil else {
             throw MaintenanceError.unknownDaemon(name)
         }
-        let before = await hostPIDs(name: name)
+        let before = try await hostPIDs(name: name)
         guard !before.isEmpty else { throw MaintenanceError.daemonNotRunning(name) }
 
         for pid in before {
-            _ = try await runner.run(toolPath: "/bin/kill", arguments: ["-TERM", String(pid)])
+            _ = try await runner.run(toolPath: "/bin/kill", arguments: ["-TERM", String(pid)], timeout: .seconds(5))
         }
         logger.info("Signalled \(name, privacy: .public) pid(s) \(before.map(String.init).joined(separator: ","), privacy: .public) with SIGTERM")
 
         let deadline = ContinuousClock.now + Self.respawnWait
         while ContinuousClock.now < deadline {
-            try? await Task.sleep(for: Self.respawnPollInterval)
-            let after = await hostPIDs(name: name)
+            try await Task.sleep(for: respawnPollInterval)   // throws on cancellation
+            let after = try await hostPIDs(name: name)
             if let fresh = after.first(where: { !before.contains($0) }) {
                 return "Restarted (new pid \(fresh))"
             }
@@ -104,10 +116,10 @@ actor MaintenanceActions {
     /// `DaemonStatsSource.psArguments`-shaped output with a uid column so a
     /// root-owned instance (there is a `cloudd --system` running as uid 0) is
     /// never signalled — we would only earn an EPERM.
-    private func hostPIDs(name: String) async -> [Int32] {
-        let output = (try? await runner.run(
-            toolPath: "/bin/ps", arguments: ["-axo", "pid,uid,comm"]
-        )) ?? ""
+    private func hostPIDs(name: String) async throws -> [Int32] {
+        let output = try await runner.run(
+            toolPath: "/bin/ps", arguments: ["-axo", "pid,uid,comm"], timeout: .seconds(10)
+        )
         return Self.hostPIDs(name: name, psOutput: output, uid: getuid())
     }
 
@@ -137,36 +149,14 @@ actor MaintenanceActions {
     }
 
     /// The command the UI tells the user to paste into Terminal.
+    ///
+    /// `brctl diagnose` CANNOT run from a GUI process, ever: it shells out to
+    /// `sudo` internally, and a process with no controlling terminal has
+    /// nowhere to prompt for the password. Measured live in the dev app
+    /// (2026-08-15) — a Run button failed every time with "sudo: a terminal is
+    /// required to read the password". So there is no button; the Diagnostics
+    /// card shows this command with Copy and Open Terminal instead.
     static let diagnoseCommand = "brctl diagnose --no-reveal"
-
-    /// `brctl diagnose` CANNOT run from a GUI process, ever.
-    ///
-    /// It shells out to `sudo` internally, and a process with no controlling
-    /// terminal has nowhere to prompt for the password. Measured live in the
-    /// dev app (2026-08-15) — the Run button failed every time with:
-    ///
-    ///     exit 1 — sudo: a terminal is required to read the password;
-    ///     either use the -S option to read from standard input or configure an
-    ///     askpass helper
-    ///
-    /// So there is no button. The Diagnostics card shows the command with Copy
-    /// and Open Terminal instead. This throw is kept (rather than deleting the
-    /// method) so any future caller finds out at the call site rather than by
-    /// shipping the dead button again.
-    func runDiagnose() throws -> Never {
-        throw MaintenanceError.requiresTerminal(Self.diagnoseCommand)
-    }
-
-    /// No safe public command exists — deliberately unsupported (see decisions).
-    func reindexMetadata() throws -> Never {
-        throw MaintenanceError.notSupported("Metadata re-indexing has no safe public command")
-    }
-
-    /// No safe public command exists — deliberately unsupported (see decisions).
-    func resetCloudDocs() throws -> Never {
-        throw MaintenanceError.notSupported("Destructive CloudDocs resets are deliberately not offered")
-    }
-
 }
 
 // MARK: - Trash

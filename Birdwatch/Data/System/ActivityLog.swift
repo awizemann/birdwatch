@@ -12,9 +12,11 @@ struct ActivityEventDescriptor: Sendable, Hashable {
 /// Derives the Activity feed from successive transfer snapshots.
 ///
 /// @MainActor deliberately: owned by SystemSyncSource next to
-/// UbiquityTransferSource and fed from `currentSnapshot()`, which runs on the
-/// caller's (SyncStore's) MainActor. The diff itself is a pure nonisolated
-/// static function; this class only stamps and buffers events.
+/// UbiquityTransferSource and fed from `currentSnapshot()` inside the same
+/// `MainActor.run` hop that reads the transfers (`currentSnapshot()` itself is
+/// nonisolated and runs on the global executor — SE-0461's
+/// nonisolated-nonsending default is not enabled). The diff itself is a pure
+/// nonisolated static function; this class only stamps and buffers events.
 @MainActor
 final class ActivityLog {
     nonisolated static let capacity = 200

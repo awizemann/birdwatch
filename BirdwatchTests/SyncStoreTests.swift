@@ -33,8 +33,12 @@ final class StubSyncSource: SyncSource, @unchecked Sendable {
         return resolveResult
     }
 
-    func logStream(appID: String) -> AsyncStream<LogLine> {
-        AsyncStream { $0.finish() }
+    /// Every log stream the store asked for, in order.
+    private(set) var logStreamRequests: [(appID: String, backend: SyncBackend)] = []
+
+    func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> {
+        logStreamRequests.append((appID, backend))
+        return AsyncThrowingStream { $0.finish() }
     }
 
     func conflictDetail(issueID: String) async -> ConflictDetail? { nil }
@@ -132,7 +136,7 @@ final class GatedSyncSource: SyncSource, @unchecked Sendable {
         for w in pending { w.resume() }
     }
 
-    func logStream(appID: String) -> AsyncStream<LogLine> { AsyncStream { $0.finish() } }
+    func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> { AsyncThrowingStream { $0.finish() } }
     func conflictDetail(issueID: String) async -> ConflictDetail? { nil }
 }
 
@@ -174,7 +178,7 @@ final class GatedResolveSource: SyncSource, @unchecked Sendable {
         }
         pending?.resume()
     }
-    func logStream(appID: String) -> AsyncStream<LogLine> { AsyncStream { $0.finish() } }
+    func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> { AsyncThrowingStream { $0.finish() } }
     func conflictDetail(issueID: String) async -> ConflictDetail? { nil }
 }
 
@@ -222,6 +226,16 @@ struct SyncStoreTests {
         #expect(store.overallProgress == 0, "paused shows an empty bar, not a full one")
         store.togglePauseAll()
         #expect(store.overallProgress == 0.5)
+    }
+
+    // Fails on the old id-keyed mapping, which sent every real app (ck-…,
+    // container-…) to fileproviderd while the console header said cloudd.
+    @Test("The log stream is chosen by the app's backend, which the header also shows")
+    func logStreamForwardsBackend() async {
+        let (store, source) = await makeStore(apps: [.stub(id: "a", status: .upToDate)])
+        _ = store.logStream(appID: "ck-iCloud.com.example", backend: .cloudKit)
+        #expect(source.logStreamRequests.map(\.backend) == [.cloudKit])
+        #expect(source.logStreamRequests.map(\.appID) == ["ck-iCloud.com.example"])
     }
 
     @Test("overallProgressIsIndeterminate: boolean-only transfers never render a fake mean")

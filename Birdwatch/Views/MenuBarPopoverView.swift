@@ -1,5 +1,8 @@
 import AppKit
+import os
 import SwiftUI
+
+private let popoverLogger = Logger(subsystem: "com.wizemann.birdwatch", category: "popover")
 
 struct MenuBarPopoverView: View {
     @Environment(SyncStore.self) private var store
@@ -31,26 +34,35 @@ struct MenuBarPopoverView: View {
         // this, closing the main window paused the FSEvents watcher + probe
         // ticker for good and the popover showed a frozen transfer list
         // forever — the window's onDisappear was the only resume/pause driver.
+        // Both go through the store's one rule (TransferWatchPolicy.shouldWatch):
+        // opening resumes the watcher unless monitoring is paused; closing
+        // pauses it unless the main window is still on screen showing live
+        // transfers (pausing then would freeze the window instead).
         .onAppear {
-            NotificationCenter.default.post(name: UbiquityTransferSource.resumeRequest, object: nil)
+            store.isMenuBarPopoverOpen = true
+            store.syncTransferWatcher()
             Task { await store.menuBarOpened() }
         }
         .onDisappear {
-            // Only pause when nothing else is on screen: the popover can be
-            // dismissed while the main window is still open and showing live
-            // transfers, and pausing then would freeze the window instead.
-            guard !Self.hasVisibleMainWindow else { return }
-            NotificationCenter.default.post(name: UbiquityTransferSource.pauseRequest, object: nil)
+            store.isMenuBarPopoverOpen = false
+            popoverLogger.debug("popover closed; main window on screen: \(Self.isMainWindowVisible(in: NSApp.windows), privacy: .public)")
+            store.syncTransferWatcher()
         }
         .background(Surface.card)
     }
 
-    /// A visible, non-panel app window — i.e. the main monitor window. The
-    /// popover and the menu-bar extra are hosted in NSPanels, so excluding
-    /// panels is what distinguishes "the window is up" from "only the popover".
+    /// Is the main monitor window on screen — open, not minimised, not fully
+    /// covered (the same test RootView's WindowVisibility applies)? See
+    /// `TransferWatchPolicy.isMainWindow` for why this matches the identifier.
     @MainActor
-    private static var hasVisibleMainWindow: Bool {
-        NSApp.windows.contains { $0.isVisible && !($0 is NSPanel) }
+    static func isMainWindowVisible(in windows: [NSWindow]) -> Bool {
+        windows.contains {
+            TransferWatchPolicy.isMainWindow(
+                identifier: $0.identifier?.rawValue,
+                isVisible: $0.isVisible && $0.occlusionState.contains(.visible),
+                isPanel: $0 is NSPanel
+            )
+        }
     }
 
     private var content: some View {

@@ -152,7 +152,7 @@ struct DiagnosticsView: View {
     /// Every operation routed here today is a daemon restart, which is why the
     /// usage event is `restart_daemon` with the daemon's name — a closed set
     /// (bird / cloudd / fileproviderd), not user data.
-    private func run(_ title: String, daemon: String, operation: @escaping () async throws -> String) {
+    private func run(_ title: String, daemon: UsageEvent.Daemon?, operation: @escaping () async throws -> String) {
         Task {
             do {
                 let result = try await operation()
@@ -176,14 +176,12 @@ struct DiagnosticsView: View {
     /// The error's *kind* for analytics — a `MaintenanceError` case name or
     /// "other". An explicit switch, never reflection or the message: every
     /// payload is a path or daemon name and must not travel.
-    static func errorKind(for error: Error) -> String {
-        guard let m = error as? MaintenanceError else { return "other" }
+    static func errorKind(for error: Error) -> UsageEvent.MaintenanceErrorKind {
+        guard let m = error as? MaintenanceError else { return .other }
         switch m {
-        case .notSupported: return "notSupported"
-        case .unknownDaemon: return "unknownDaemon"
-        case .daemonNotRunning: return "daemonNotRunning"
-        case .pathNotAllowed: return "pathNotAllowed"
-        case .requiresTerminal: return "requiresTerminal"
+        case .unknownDaemon: return .unknownDaemon
+        case .daemonNotRunning: return .daemonNotRunning
+        case .pathNotAllowed: return .pathNotAllowed
         }
     }
 
@@ -215,8 +213,9 @@ struct DiagnosticsView: View {
         case RunnerError.launchFailed(let detail): "could not launch (\(detail))"
         case RunnerError.nonZeroExit(let code, let stderr):
             "exit \(code)\(stderr.isEmpty ? "" : " — \(stderr.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))")"
-        case MaintenanceError.notSupported(let why): why
         case MaintenanceError.unknownDaemon(let name): "no launchd service for \(name)"
+        case MaintenanceError.daemonNotRunning(let name): "\(name) is not running"
+        case RunnerError.outputTruncated: "the process list was too large to read"
         default: String(describing: error)
         }
     }
@@ -283,7 +282,7 @@ struct DiagnosticsView: View {
                 confirmAction = ConfirmAction(
                     title: "Restart \(name)",
                     command: MaintenanceActions.restartCommand(name: name),
-                    perform: { run("Restart \(name)", daemon: name) { try await maintenance.restartDaemon(name: name) } }
+                    perform: { run("Restart \(name)", daemon: UsageEvent.Daemon(rawValue: name)) { try await maintenance.restartDaemon(name: name) } }
                 )
             }
             .buttonStyle(.bordered)
@@ -645,15 +644,15 @@ struct DiagnosticsView: View {
     // MARK: - Maintenance
 
     // Re-index metadata and Reset CloudDocs are deliberately absent: neither
-    // has a safe public command (MaintenanceActions throws notSupported), and
-    // dead buttons don't ship. The footnote below says so.
+    // has a safe public command, and dead buttons don't ship (MaintenanceActions
+    // has no method for either). The footnote below says so.
     private struct MaintenanceItem: Identifiable {
         let title: String
         let command: String
         let actionLabel: String
         var needsConfirm = false
         /// Which daemon the row acts on (analytics prop; closed set).
-        let daemon: String
+        let daemon: UsageEvent.Daemon
         let operation: @MainActor (MaintenanceActions) async throws -> String
         var id: String { title }
     }
@@ -664,7 +663,7 @@ struct DiagnosticsView: View {
             command: MaintenanceActions.restartCommand(name: "bird"),
             actionLabel: "Restart",
             needsConfirm: true,
-            daemon: "bird",
+            daemon: .bird,
             operation: { try await $0.restartDaemon(name: "bird") }
         ),
     ]

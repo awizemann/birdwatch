@@ -52,7 +52,7 @@ private let allEvents: [UsageEvent] = [
     .conflictResolved(keptCurrent: false),
     .retryItemRevealed,
     .retryItemTrashed(outcome: .failed),
-    .maintenanceRun(.restart_daemon, daemon: "bird", outcome: .failed, errorKind: "daemonNotRunning"),
+    .maintenanceRun(.restart_daemon, daemon: .bird, outcome: .failed, errorKind: .daemonNotRunning),
     .notificationsMarkedRead,
     .planCapSet(cleared: true),
     .snapshotHealth(appsByBackend: [.cloudDocs: 2, .cloudKit: 40], issueCount: 0, daemonsMissing: 1, fdaGranted: true, notificationsGranted: false),
@@ -116,10 +116,22 @@ struct UsageEventWireTests {
 
     @Test("Maintenance error kinds are case names, never the payload")
     func errorKinds() {
-        #expect(DiagnosticsView.errorKind(for: MaintenanceError.pathNotAllowed("/Users/x/Secret.pdf")) == "pathNotAllowed")
-        #expect(DiagnosticsView.errorKind(for: MaintenanceError.daemonNotRunning("bird")) == "daemonNotRunning")
-        #expect(DiagnosticsView.errorKind(for: CocoaError(.fileNoSuchFile)) == "other")
-        #expect(!DiagnosticsView.errorKind(for: MaintenanceError.pathNotAllowed("/Users/x/Secret.pdf")).contains("Secret"))
+        #expect(DiagnosticsView.errorKind(for: MaintenanceError.pathNotAllowed("/Users/x/Secret.pdf")) == .pathNotAllowed)
+        #expect(DiagnosticsView.errorKind(for: MaintenanceError.daemonNotRunning("bird")) == .daemonNotRunning)
+        #expect(DiagnosticsView.errorKind(for: CocoaError(.fileNoSuchFile)) == .other)
+        #expect(DiagnosticsView.errorKind(for: RunnerError.nonZeroExit(code: 1, stderr: "/Users/x/Secret.pdf")) == .other)
+    }
+
+    // The props are typed enums now; this pins their wire spelling so a rename
+    // of a case can't silently change what dashboards receive.
+    @Test("Maintenance daemon and error-kind props keep their wire values")
+    func maintenanceWireValues() {
+        #expect(UsageEvent.Daemon.allCases.map(\.rawValue) == ["bird", "cloudd", "fileproviderd"])
+        #expect(UsageEvent.MaintenanceErrorKind.allCases.map(\.rawValue)
+                == ["unknownDaemon", "daemonNotRunning", "pathNotAllowed", "other"])
+        let props = UsageEvent.maintenanceRun(.restart_daemon, daemon: .cloudd, outcome: .failed, errorKind: .other).props
+        #expect(props["daemon"] == .string("cloudd"))
+        #expect(props["error_kind"] == .string("other"))
     }
 
     @Test("Bucketing is coarse and total")

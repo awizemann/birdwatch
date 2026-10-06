@@ -99,12 +99,11 @@ final class UbiquityTransferSource {
     /// Store-agnostic signals so a view layer can retire the watcher when no
     /// surface is showing transfers, without reaching through the sync source.
     ///
-    /// Posted by BOTH transfer-showing surfaces on appear/disappear: RootView's
-    /// main window and MenuBarPopoverView. Each pauses only when no other
-    /// surface is still visible. Occlusion does NOT drive these — a merely
-    /// covered window keeps the watcher running (RootView's occlusion gating
-    /// only skips refresh work). Raw notification names are unchanged from the
-    /// NSMetadataQuery era.
+    /// Posted per `TransferWatchPolicy.shouldWatch` (via
+    /// `SyncStore.syncTransferWatcher`, plus RootView's appear/close): the
+    /// watcher runs only while monitoring is on and the main window is on
+    /// screen (not minimised or fully covered) or the popover is open. Raw
+    /// notification names are unchanged from the NSMetadataQuery era.
     nonisolated static let pauseRequest = Notification.Name("com.wizemann.birdwatch.metadataPause")
     nonisolated static let resumeRequest = Notification.Name("com.wizemann.birdwatch.metadataResume")
 
@@ -141,7 +140,18 @@ final class UbiquityTransferSource {
     /// can hold a sweep open; production always lists the directories.
     private let sweep: @Sendable ([String]) async -> [String]
 
-    init(sweep: @escaping @Sendable ([String]) async -> [String] = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) }) {
+    /// Fixed roots instead of `defaultRoots` — a test seam, so pause/resume
+    /// can be asserted on a real watcher over a temporary directory.
+    private let rootsOverride: [String]?
+
+    /// True while the FSEvents stream and probe ticker are running.
+    var isWatching: Bool { watchTask != nil || probeTask != nil }
+
+    init(
+        roots: [String]? = nil,
+        sweep: @escaping @Sendable ([String]) async -> [String] = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) }
+    ) {
+        rootsOverride = roots
         self.sweep = sweep
         // Self-wiring: the instance listens for the app-wide pause/resume
         // signals itself, so no owner has to forward them.
@@ -188,12 +198,14 @@ final class UbiquityTransferSource {
         guard isStarted, !isPaused else { return }
         endWatching()
         isPaused = true
+        logger.info("transfer watcher paused")
     }
 
     func resume() {
         guard isStarted, isPaused else { return }
         isPaused = false
         beginWatching()
+        logger.info("transfer watcher resumed")
     }
 
     // OWNERSHIP CONTRACT: whoever releases this object must call stop() first —
@@ -204,7 +216,7 @@ final class UbiquityTransferSource {
     // MARK: - Watching
 
     private func beginWatching() {
-        let roots = Self.defaultRoots(includeDesktopDocuments: includesDesktopDocuments)
+        let roots = rootsOverride ?? Self.defaultRoots(includeDesktopDocuments: includesDesktopDocuments)
         guard !roots.isEmpty else {
             logger.warning("no ubiquity roots present; transfer watching disabled")
             return

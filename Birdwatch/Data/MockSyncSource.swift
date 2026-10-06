@@ -30,10 +30,10 @@ struct MockSyncSource: SyncSource {
         )
     }
 
-    nonisolated func logStream(appID: String) -> AsyncStream<LogLine> {
+    nonisolated func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> {
         // bufferingNewest: the console shows 25 lines; never buffer unboundedly
         // while the consumer is busy. The real `log stream` wrapper keeps this.
-        AsyncStream(bufferingPolicy: .bufferingNewest(64)) { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(ProcessRunner.streamBufferLimit)) { continuation in
             let task = Task {
                 let seeds = Self.seedLogLines(appID: appID)
                 for line in seeds.reversed() { continuation.yield(line) }

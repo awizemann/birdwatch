@@ -114,12 +114,20 @@ struct RootView: View {
             }
         }
         .onAppear {
+            // Paused monitoring keeps the watcher off; togglePauseAll resumes it.
+            guard TransferWatchPolicy.shouldResumeOnAppear(monitoringPaused: store.isGloballyPaused) else { return }
             NotificationCenter.default.post(name: UbiquityTransferSource.resumeRequest, object: nil)
         }
         .onDisappear {
             // Window closed: retire the FSEvents watcher + probe ticker (they
             // otherwise run forever with only the menu-bar extra left).
             NotificationCenter.default.post(name: UbiquityTransferSource.pauseRequest, object: nil)
+        }
+        // Minimise/restore and full cover/uncover fire no onAppear: re-apply
+        // the watcher policy whenever the window goes on or off screen, or a
+        // restored window would sit with its watcher still paused.
+        .onChange(of: visibility.isVisible) {
+            store.syncTransferWatcher()
         }
         // Activation-driven refresh; the store's 60s debounce is the throttle,
         // so app-switcher peeks stay cheap (§6).

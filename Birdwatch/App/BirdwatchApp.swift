@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import OSLog
 import Sparkle
@@ -17,7 +18,7 @@ struct BirdwatchApp: App {
         startingUpdater: BirdwatchApp.updaterEnabled, updaterDelegate: nil, userDriverDelegate: nil
     )
 
-    /// Whether the Sparkle updater should run at all this launch. Three gates:
+    /// Whether the Sparkle updater should run at all this launch. Four gates:
     ///
     /// 1. **Not under XCTest** — the app is its own test host, so an unguarded
     ///    start fires a real feed check (and can raise Sparkle's first-run
@@ -30,18 +31,37 @@ struct BirdwatchApp: App {
     ///    ever fires on dev builds.)
     /// 3. **Not `--mock`** — demo/screenshot launches must stay quiet and
     ///    offline.
+    /// 4. **The exact release bundle id** — the dogfood copy
+    ///    (`com.wizemann.birdwatch.dev`, scripts/build-detached.sh) carries the
+    ///    real key, so without this it polled the release feed for updates it
+    ///    can never install (Sparkle refuses the bundle-id mismatch).
     private static let updaterEnabled: Bool = {
-        guard !isRunningTests else { return false }
-        guard !ProcessInfo.processInfo.arguments.contains("--mock") else { return false }
-
-        let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
-        guard let key, !key.isEmpty, key != "REPLACE_WITH_PUBLIC_ED_KEY" else {
+        let enabled = isUpdaterEnabled(
+            bundleID: Bundle.main.bundleIdentifier,
+            publicKey: Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
+            arguments: ProcessInfo.processInfo.arguments,
+            isRunningTests: isRunningTests
+        )
+        if !enabled {
             Logger(subsystem: "com.wizemann.birdwatch", category: "updates")
-                .info("Sparkle updater disabled: no public key configured")
-            return false
+                .info("Sparkle updater disabled for this build or launch")
         }
-        return true
+        return enabled
     }()
+
+    /// The bundle id release builds ship with; any other id is a dev copy.
+    nonisolated static let releaseBundleID = "com.wizemann.birdwatch"
+
+    /// The four gates above as a pure function, so each one is testable.
+    nonisolated static func isUpdaterEnabled(
+        bundleID: String?, publicKey: String?, arguments: [String], isRunningTests: Bool
+    ) -> Bool {
+        guard !isRunningTests else { return false }
+        guard !arguments.contains("--mock") else { return false }
+        guard bundleID == releaseBundleID else { return false }
+        guard let publicKey, !publicKey.isEmpty, publicKey != "REPLACE_WITH_PUBLIC_ED_KEY" else { return false }
+        return true
+    }
 
     // Constructing the store is cheap by design: no I/O happens until
     // RootView's .task calls refresh() (§6 — nothing heavy before first frame).
@@ -76,7 +96,14 @@ struct BirdwatchApp: App {
                 guard !inert else { return }
                 SystemNotifier.post(title: title, body: body, id: id)
             },
-            usage: usage
+            usage: usage,
+            setTransferWatching: { watching in
+                NotificationCenter.default.post(
+                    name: watching ? UbiquityTransferSource.resumeRequest : UbiquityTransferSource.pauseRequest,
+                    object: nil
+                )
+            },
+            isMainWindowVisible: { MenuBarPopoverView.isMainWindowVisible(in: NSApp.windows) }
         )
         _store = State(initialValue: store)
         usageLifecycle = UsageLifecycle(store: store)

@@ -721,7 +721,7 @@ actor CloudKitAppSource {
         do {
             (output, isTruncated) = try await readWindow()
         } catch {
-            logger.warning("log show (cloudkit) failed: \(String(describing: error), privacy: .public); keeping \(self.lastGood?.apps.count ?? 0, privacy: .public) last-good rows")
+            logger.warning("log show (cloudkit) failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private); keeping \(self.lastGood?.apps.count ?? 0, privacy: .public) last-good rows")
             return CloudKitScan(
                 apps: lastGood?.apps ?? [], outcome: .logUnavailable,
                 isStale: lastGood != nil, observedAt: lastGood?.at
@@ -770,14 +770,13 @@ actor CloudKitAppSource {
     /// the same way.
     private func readWindow() async throws -> (output: String, isTruncated: Bool) {
         do {
-            let output = try await readLog(window: Self.window, timeout: Self.primaryTimeout)
-            guard Self.isCapped(output) else { return (output, false) }
+            let (output, capped) = try await readLog(window: Self.window, timeout: Self.primaryTimeout)
+            guard capped else { return (output, false) }
             logger.warning("cloudkit log window \(Self.window, privacy: .public) hit the capture cap; retrying \(Self.fallbackWindow, privacy: .public)")
         } catch RunnerError.timeout {
             logger.warning("cloudkit log window \(Self.window, privacy: .public) timed out; retrying \(Self.fallbackWindow, privacy: .public)")
         }
-        let output = try await readLog(window: Self.fallbackWindow, timeout: Self.fallbackTimeout)
-        let capped = Self.isCapped(output)
+        let (output, capped) = try await readLog(window: Self.fallbackWindow, timeout: Self.fallbackTimeout)
         if capped {
             logger.warning("cloudkit fallback window \(Self.fallbackWindow, privacy: .public) also hit the capture cap; newest activity may be missing")
         }
@@ -788,8 +787,16 @@ actor CloudKitAppSource {
         output.utf8.count >= ProcessRunner.maxCapturedBytes
     }
 
-    private func readLog(window: String, timeout: Duration) async throws -> String {
-        try await runner.run(toolPath: Self.logPath, arguments: Self.arguments(window: window), timeout: timeout)
+    /// The runner reports an overrun as `RunnerError.outputTruncated`; this
+    /// read can use the kept prefix, so it takes it and flags it capped. A
+    /// cap-sized plain result (a stub runner) is flagged the same way.
+    private func readLog(window: String, timeout: Duration) async throws -> (output: String, capped: Bool) {
+        do {
+            let output = try await runner.run(toolPath: Self.logPath, arguments: Self.arguments(window: window), timeout: timeout)
+            return (output, Self.isCapped(output))
+        } catch RunnerError.outputTruncated(let partial) {
+            return (partial, true)
+        }
     }
 
     private func bundleID(forImage path: String) -> String? {

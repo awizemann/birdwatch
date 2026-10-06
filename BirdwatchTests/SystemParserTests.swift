@@ -20,18 +20,35 @@ import Testing
         #expect(LogStreamParser.parse(line: header) == nil)
     }
 
-    @Test func realNdjsonLineParsesExactly() throws {
-        let line = #"{"traceID":123,"eventMessage":"upload finished for item 42","eventType":"logEvent","timestamp":"2026-08-14 10:22:33.123456-0700","messageType":"Default","processImagePath":"/System/Library/PrivateFrameworks/iCloudDriveCore.framework/Versions/A/Support/bird","subsystem":"com.apple.clouddocs"}"#
-        let parsed = try #require(LogStreamParser.parse(line: line))
-        #expect(parsed.message == "upload finished for item 42")
-        #expect(parsed.level == .info)
+    /// Real `log stream --style ndjson --level info --predicate 'subsystem ==
+    /// "com.apple.clouddocs"'` output captured on macOS 27.0 (26A428),
+    /// 2026-10-05: the header, four bird events, and the
+    /// `{"count":N,"finished":1}` trailer `log` prints when a stream ends.
+    @Test func realNdjsonLinesParseExactly() throws {
+        let lines = try Self.fixture("logstream.ndjson").split(separator: "\n").map(String.init)
+        #expect(lines.count == 6)
+        let parsed = lines.compactMap(LogStreamParser.parse(line:))
+        #expect(parsed.count == 4, "header and trailer are not log events")
 
+        let first = try #require(parsed.first)
+        #expect(first.message == "[INFO] <private>: reply(<private>, (null))")
+        #expect(first.level == .info)
         var components = DateComponents()
-        components.year = 2026; components.month = 8; components.day = 14
-        components.hour = 10; components.minute = 22; components.second = 33
-        components.timeZone = TimeZone(secondsFromGMT: -7 * 3600)
+        components.year = 2026; components.month = 10; components.day = 5
+        components.hour = 22; components.minute = 21; components.second = 20
+        components.timeZone = TimeZone(secondsFromGMT: -4 * 3600)
         let expected = Calendar(identifier: .gregorian).date(from: components)!
-        #expect(abs(parsed.date.timeIntervalSince(expected) - 0.123456) < 0.001)
+        #expect(abs(first.date.timeIntervalSince(expected) - 0.379080) < 0.001)
+        #expect(parsed.map(\.date) == parsed.map(\.date).sorted(), "fixture lines are in stream order")
+    }
+
+    // Fails on the old parser, which turned the trailer into a blank row
+    // stamped with the time it was parsed (C1).
+    @Test func streamTrailerIsNotALogLine() throws {
+        let trailer = try Self.fixture("logstream.ndjson")
+            .split(separator: "\n").last.map(String.init) ?? ""
+        #expect(trailer.contains("\"finished\""))
+        #expect(LogStreamParser.parse(line: trailer) == nil)
     }
 
     @Test(arguments: [
@@ -52,11 +69,13 @@ import Testing
         }
     }
 
-    @Test func missingFieldsDegradeGracefully() {
-        let parsed = LogStreamParser.parse(line: "{}")
-        #expect(parsed != nil)
-        #expect(parsed?.message == "")
-        #expect(parsed?.level == .info)
+    // Fails on the old parser: `{}` became a blank row, and a missing or
+    // unparseable timestamp was replaced with Date() — a fabricated time (C1).
+    @Test func objectsWithoutAnEventOrTimestampAreSkipped() {
+        #expect(LogStreamParser.parse(line: "{}") == nil)
+        #expect(LogStreamParser.parse(line: #"{"eventMessage":"m","messageType":"Default"}"#) == nil)
+        #expect(LogStreamParser.parse(line: #"{"eventMessage":"m","timestamp":"yesterday"}"#) == nil)
+        #expect(LogStreamParser.parse(line: #"{"timestamp":"2026-08-14 10:22:33.000000-0700"}"#) == nil)
     }
 
     // MARK: - DaemonStatsSource.parse

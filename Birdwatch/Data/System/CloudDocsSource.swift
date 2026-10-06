@@ -14,6 +14,9 @@ nonisolated enum BrctlReadFailure: Error, Sendable, Equatable {
         case .timeout: self = .timedOut(seconds: Int(timeout.components.seconds))
         case .launchFailed: self = .failed("could not be launched")
         case .nonZeroExit(let code, _): self = .failed("exited with status \(code)")
+        // A partial status/dump is not parsed: its missing tail is exactly
+        // where the container line or Desktop & Documents flag may sit.
+        case .outputTruncated: self = .failed("output exceeded the capture limit")
         case nil: self = .failed("failed")
         }
     }
@@ -57,7 +60,7 @@ actor CloudDocsSource {
             logger.info("brctl status read in \(seconds, privacy: .public)s; Desktop & Documents synced: \(SystemSyncSource.desktopDocumentsSynced(status), privacy: .public)")
             return .success(status)
         } catch {
-            logger.warning("brctl status failed: \(String(describing: error), privacy: .public)")
+            logger.warning("brctl status failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
             return .failure(BrctlReadFailure(error, timeout: Self.statusTimeout))
         }
     }
@@ -71,7 +74,7 @@ actor CloudDocsSource {
             }
             return bytes
         } catch {
-            logger.warning("brctl quota failed: \(String(describing: error), privacy: .public)")
+            logger.warning("brctl quota failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
             return nil
         }
     }

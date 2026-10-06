@@ -49,7 +49,7 @@ actor BrctlDumpSource {
                 timeout: Self.timeout
             )
         } catch {
-            logger.warning("brctl dump -i failed: \(String(describing: error), privacy: .public)")
+            logger.warning("brctl dump -i failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
             return .failure(BrctlReadFailure(error, timeout: Self.timeout))
         }
         // Lossy on purpose: brctl's dump carries redacted file names and ANSI

@@ -22,6 +22,16 @@ nonisolated enum UsageEvent: Sendable, Equatable {
 
     enum Outcome: String, Sendable { case ok, failed }
 
+    /// Which daemon a maintenance action targeted — the closed set
+    /// MaintenanceActions can restart, so no other string can travel.
+    enum Daemon: String, Sendable, CaseIterable { case bird, cloudd, fileproviderd }
+
+    /// A maintenance failure's kind: a `MaintenanceError` case name, or
+    /// `other` for anything else. Never the error's message (paths, names).
+    enum MaintenanceErrorKind: String, Sendable, CaseIterable {
+        case unknownDaemon, daemonNotRunning, pathNotAllowed, other
+    }
+
     /// First-run setup finished.
     case onboardingCompleted(fdaGranted: Bool, notificationsRequested: Bool)
     /// A top-level monitor view became the selected one.
@@ -44,7 +54,7 @@ nonisolated enum UsageEvent: Sendable, Equatable {
     /// Retry-queue row actions. Reveal has no observable outcome.
     case retryItemRevealed
     case retryItemTrashed(outcome: Outcome)
-    case maintenanceRun(MaintenanceAction, daemon: String?, outcome: Outcome, errorKind: String?)
+    case maintenanceRun(MaintenanceAction, daemon: Daemon?, outcome: Outcome, errorKind: MaintenanceErrorKind?)
     case notificationsMarkedRead
     case planCapSet(cleared: Bool)
     /// Once per session, after the first snapshot: what the world looks like.
@@ -103,8 +113,8 @@ nonisolated enum UsageEvent: Sendable, Equatable {
             return ["outcome": .string(outcome.rawValue)]
         case let .maintenanceRun(action, daemon, outcome, errorKind):
             var p: [String: UsageValue] = ["action": .string(action.rawValue), "outcome": .string(outcome.rawValue)]
-            if let daemon { p["daemon"] = .string(daemon) }
-            if let errorKind { p["error_kind"] = .string(errorKind) }
+            if let daemon { p["daemon"] = .string(daemon.rawValue) }
+            if let errorKind { p["error_kind"] = .string(errorKind.rawValue) }
             return p
         case let .planCapSet(cleared):
             return ["cleared": .bool(cleared)]

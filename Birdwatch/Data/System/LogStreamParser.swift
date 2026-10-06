@@ -14,18 +14,19 @@ nonisolated enum LogStreamParser {
 
     /// Returns nil for the plain-text "Filtering the log data using …" header
     /// and any other non-JSON garbage — the stream must survive anything `log` emits.
+    ///
+    /// Also nil for JSON objects that are not log events: `log stream` ends
+    /// with a `{"count":N,"finished":1}` trailer (captured in the fixture),
+    /// and an object with no parseable `timestamp` would otherwise need a
+    /// made-up time (C1). Every real event carries both fields.
     static func parse(line: String) -> LogLine? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else { return nil }
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
 
-        let message = object["eventMessage"] as? String ?? ""
-        let date: Date
-        if let stamp = object["timestamp"] as? String, let parsed = dateFormatter.date(from: stamp) {
-            date = parsed
-        } else {
-            date = Date()
-        }
+        guard let message = object["eventMessage"] as? String,
+              let stamp = object["timestamp"] as? String,
+              let date = dateFormatter.date(from: stamp) else { return nil }
         return LogLine(id: UUID(), date: date, level: level(from: object["messageType"] as? String), message: message)
     }
 

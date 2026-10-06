@@ -106,17 +106,22 @@ nonisolated enum ConflictResolveResult: Sendable, Equatable {
 
 /// `nonisolated` so actor-backed real sources (and actor test fakes) can conform.
 ///
-/// EXECUTION CONTEXT (SE-0461, load-bearing for Phase 1): `nonisolated` async
-/// requirements run on the CALLER's actor — which is SyncStore's MainActor.
-/// A real implementation that spawns brctl / samples ps in a plain
-/// `nonisolated func … async` would block the UI. Implementations doing real
-/// work MUST either mark the method `@concurrent` or implement it
-/// actor-isolated (no `nonisolated` on the conformance) so calls hop to the
-/// source actor.
+/// EXECUTION CONTEXT: this project does NOT enable NonisolatedNonsendingByDefault
+/// (SE-0461), so a `nonisolated async` implementation runs on the global
+/// concurrent executor, not on the caller's (SyncStore's) MainActor — and
+/// anything it reads from MainActor state needs an explicit hop
+/// (`MainActor.run`), as SystemSyncSource does. Marking heavy work
+/// `@concurrent`, or isolating it to an actor, keeps it off-main even if that
+/// upcoming feature is ever turned on, at which point plain `nonisolated async`
+/// would start running on the caller's actor.
 nonisolated protocol SyncSource: Sendable {
     func currentSnapshot() async -> SyncSnapshot
-    /// Streams log lines for one app's backing daemon while a detail view is open.
-    func logStream(appID: String) -> AsyncStream<LogLine>
+    /// Streams log lines for one app's backing daemon while a detail view is
+    /// open. `backend` picks the daemon, so the console's header (also derived
+    /// from the backend) and its stream always name the same thing. The
+    /// stream ends with an error when the tool cannot run (launch failure,
+    /// non-zero exit) or reaches its lifetime cap (`RunnerError.timeout`).
+    func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error>
     /// Latest conflict detail for a conflict issue (nil if already resolved).
     func conflictDetail(issueID: String) async -> ConflictDetail?
     /// Resolves a file conflict, keeping the version identified by

@@ -34,7 +34,7 @@ actor DaemonStatsSource {
         do {
             return try await runner.run(toolPath: "/bin/ps", arguments: Self.psArguments, timeout: .seconds(10))
         } catch {
-            logger.error("ps sample failed: \(String(describing: error), privacy: .public)")
+            logger.error("ps sample failed: \(RunnerError.publicSummary(of: error), privacy: .public) \(RunnerError.privateDetail(of: error), privacy: .private)")
             return ""
         }
     }
