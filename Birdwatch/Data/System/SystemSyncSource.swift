@@ -17,13 +17,16 @@ private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", cat
 /// ActivityLog) is an explicit `await MainActor.run` hop.
 final class SystemSyncSource: SyncSource {
     private let cloudDocs: CloudDocsSource
-    private let daemonStats = DaemonStatsSource()
+    private let daemonStats: DaemonStatsSource
     // Blocking directory scans (see SingleFlightScan): one in flight each, on
     // their own queues, late results kept for the next cycle.
-    private let folderScan = SingleFlightScan(label: "drive-folders") { DriveFolderSource.scanFolders() }
-    private let containerScan = SingleFlightScan(label: "app-containers") { AppContainerSource.scanContainers() }
-    private let bandwidthSource = BandwidthSource()
+    private let folderScan: SingleFlightScan<[DriveFolder]?>
+    private let containerScan: SingleFlightScan<[AppContainerSource.Container]>
+    private let bandwidthSource: BandwidthSource
     @MainActor private var transferWatcher: UbiquityTransferSource?
+    /// The last Full Disk Access decision (see `fullDiskAccessGate`). Read by
+    /// the conflict entry points, which touch iCloud Drive files directly.
+    @MainActor private var lastAccess: ICloudDriveAccess = .notProbed
     @MainActor private var activityLog: ActivityLog?
     // Conflict scan cache: enumerating CloudDocs + NSFileVersion probing is
     // too heavy for every 15s refresh. 5-minute TTL like cachedPermissions.
@@ -64,7 +67,7 @@ final class SystemSyncSource: SyncSource {
     // Observed CloudKit apps (from cloudd's unified log). `log show` costs ~2s,
     // so it follows the same rule as the size/conflict scans: 5-minute TTL,
     // single-flight, never on the paint path — rows appear on a later cycle.
-    private let cloudKitApps = CloudKitAppSource()
+    private let cloudKitApps: CloudKitAppSource
     @MainActor private var cachedCloudKitApps: (scan: CloudKitScan, at: Date)?
     @MainActor private var cloudKitScanInFlight = false
     // `brctl dump -i` is a ~2s spawn plus a multi-megabyte parse — far too
@@ -147,45 +150,85 @@ final class SystemSyncSource: SyncSource {
     }
 
     /// Cheap by design — no I/O before first snapshot (§6). `brctlRunner`
-    /// is the spawn seam for every brctl call (status, quota, dump); tests
-    /// pass a recording stub.
+    /// is the spawn seam for every brctl call (status, quota, dump);
+    /// `systemRunner` for ps, nettop and log. Tests pass recording stubs.
     nonisolated init(
         brctlRunner: any ProcessRunning = ProcessRunner(),
+        systemRunner: any ProcessRunning = ProcessRunner(),
         pathCandidates: @escaping @Sendable () -> [PathCandidate] = { RedactedPathResolver.candidates() },
-        desktopDocumentsReaders: DesktopDocumentsReaders = .live
+        readers: Readers = .live
     ) {
         cloudDocs = CloudDocsSource(runner: brctlRunner)
         dumpSource = BrctlDumpSource(runner: brctlRunner)
+        daemonStats = DaemonStatsSource(runner: systemRunner)
+        bandwidthSource = BandwidthSource(runner: systemRunner)
+        cloudKitApps = CloudKitAppSource(runner: systemRunner)
+        folderScan = SingleFlightScan(label: "drive-folders", scan: readers.folders)
+        containerScan = SingleFlightScan(label: "app-containers", scan: readers.containers)
         self.pathCandidates = pathCandidates
-        self.readers = desktopDocumentsReaders
+        self.readers = readers
     }
 
-    /// Everything on the snapshot path that can read ~/Desktop or ~/Documents
-    /// (plus the permissions probe that gates it), injectable so a test can
-    /// prove the Full Disk Access gate reaches every one of them.
-    nonisolated struct DesktopDocumentsReaders: Sendable {
+    /// Every snapshot-path reader that touches iCloud Drive, ~/Desktop or
+    /// ~/Documents, plus the permissions probe that gates them — injectable
+    /// so a test can prove the Full Disk Access gate reaches every one.
+    /// (brctl goes through `brctlRunner` and the redacted-path walk through
+    /// `pathCandidates`; both are gated the same way.) `fileProviderDomains`
+    /// lists ~/Library/CloudStorage, which is not iCloud Drive and is read
+    /// whatever the gate says; it is here only so tests touch no real home.
+    nonisolated struct Readers: Sendable {
         var permissions: @Sendable () async -> [PermissionStatus]
         var localSizes: @Sendable ([AppContainerSource.Container], Bool) async -> [String: LocalSize]
         var breakdown: @Sendable (Bool) async -> (totals: [StorageCategory: Int64], isPartial: Bool)
+        var folders: @Sendable () -> [DriveFolder]?
+        var containers: @Sendable () -> [AppContainerSource.Container]
+        var conflicts: @Sendable () async -> (found: [ConflictSource.FoundConflict], isCapped: Bool)?
+        var makeTransferWatcher: @MainActor @Sendable () -> UbiquityTransferSource
+        var fileProviderDomains: @Sendable () async -> [String]
 
-        static let live = DesktopDocumentsReaders(
+        static let live = Readers(
             permissions: { await PermissionsProbe.currentPermissions() },
             localSizes: { await AppContainerSource.localSizes(containers: $0, includeDesktopDocuments: $1) },
-            breakdown: { await StorageBreakdownSource.currentTotals(includeDesktopDocuments: $0) }
+            breakdown: { await StorageBreakdownSource.currentTotals(includeDesktopDocuments: $0) },
+            folders: { DriveFolderSource.scanFolders() },
+            containers: { AppContainerSource.scanContainers() },
+            conflicts: { await ConflictSource.scanConflicts() },
+            makeTransferWatcher: { UbiquityTransferSource() },
+            fileProviderDomains: { await SystemSyncSource.fileProviderDomains() }
         )
     }
-    private let readers: DesktopDocumentsReaders
+    private let readers: Readers
 
     /// Test seam: the transfer watcher the gate drives (normally created
     /// lazily by the first snapshot).
     @MainActor func installTransferWatcherForTesting(_ watcher: UbiquityTransferSource) { transferWatcher = watcher }
+    @MainActor var transferWatcherForTesting: UbiquityTransferSource? { transferWatcher }
 
     func currentSnapshot() async -> SyncSnapshot {
+        // ps / nettop never touch iCloud Drive: sampled whatever the gate
+        // says, alongside the permissions probe.
+        // One ps spawn per cycle, shared by daemon stats and bandwidth (audit:
+        // the two independent spawns walked the whole process table twice).
+        // Both consumers go through `sampleProcessStats` — the single place
+        // that owns that guarantee, and the one a test can pin.
+        async let processStatsTask = Self.sampleProcessStats(
+            daemonStats: daemonStats, bandwidth: bandwidthSource
+        )
+        // FIRST, before anything reads iCloud Drive: the Full Disk Access
+        // decision. Without it every read below would raise macOS 27's
+        // iCloud Drive prompt and stall until answered.
+        let fda = await fullDiskAccessGate(now: Date())
+        guard fda.access.readsICloudDrive else {
+            let processStats = await processStatsTask
+            return await snapshotWithoutICloudDrive(fda, processStats: processStats)
+        }
+
         // Lazily start the transfer watcher (FSEvents + ubiquity resource
         // values) on first use; it needs the main runloop.
+        let makeTransferWatcher = readers.makeTransferWatcher
         let (transfers, activity, watchReady) = await MainActor.run { () -> ([TransferItem], [ActivityEvent], Bool) in
             if transferWatcher == nil {
-                let m = UbiquityTransferSource()
+                let m = makeTransferWatcher()
                 m.start()
                 transferWatcher = m
             }
@@ -208,13 +251,6 @@ final class SystemSyncSource: SyncSource {
         // dump; the Desktop & Documents flag from `statusCache`, which the
         // background dump refresh keeps current.
         async let quotaTask = cloudDocs.quotaRemaining()
-        // One ps spawn per cycle, shared by daemon stats and bandwidth (audit:
-        // the two independent spawns walked the whole process table twice).
-        // Both consumers go through `sampleProcessStats` — the single place
-        // that owns that guarantee, and the one a test can pin.
-        async let processStatsTask = Self.sampleProcessStats(
-            daemonStats: daemonStats, bandwidth: bandwidthSource
-        )
         // §6: time-box system scans — a cold-metadata CloudDocs enumeration
         // (getattrlistbulk on placeholders) blocked first paint for tens of
         // seconds. Single-flight on its own queue: a slow scan serves the last
@@ -249,9 +285,9 @@ final class SystemSyncSource: SyncSource {
         let containerReading = await containerScan.reading(within: 5)
         let containers = containerReading.value ?? []
         let gate = await applyDesktopDocumentsGate(
-            featureOn: desktopDocumentsSynced, containers: containers, now: Date())
-        let permissions = gate.permissions
-        let fullDiskAccess = gate.fullDiskAccess
+            featureOn: desktopDocumentsSynced, fda: fda, containers: containers, now: Date())
+        let permissions = fda.permissions
+        let fullDiskAccess = fda.fullDiskAccess
         let readsDesktopDocuments = gate.readsDesktopDocuments
         let localSizes = gate.localSizes
         let breakdownCache = gate.breakdownCache
@@ -270,8 +306,9 @@ final class SystemSyncSource: SyncSource {
             // concurrent snapshots both observe `false` and both launch the
             // scan — the guard did not actually guard.
             if let resolvedBeforeScan = await MainActor.run(body: { claimConflictScan(now: Date()) }) {
+                let scanConflicts = readers.conflicts
                 Task { [weak self] in
-                    let scanned = await ConflictSource.scanConflicts()
+                    let scanned = await scanConflicts()
                     guard let self else { return }
                     await MainActor.run {
                         self.completeConflictScan(scanned?.found, resolvedBeforeScan: resolvedBeforeScan,
@@ -281,30 +318,8 @@ final class SystemSyncSource: SyncSource {
             }
         }
 
-        // Observed CloudKit apps: same stale-or-empty, single-flight, 5-minute
-        // discipline as the size pass — `log show` is a ~2s spawn and must
-        // never gate first paint. Empty on the first cycle; real rows next.
-        let ckCache = await MainActor.run(body: { cachedCloudKitApps })
+        let ckCache = await observedCloudKitApps()
         let observedCloudKit = ckCache?.scan.apps ?? []
-        if ckCache == nil || Date().timeIntervalSince(ckCache!.at) >= 300 {
-            let claimed = await MainActor.run { () -> Bool in
-                guard !cloudKitScanInFlight else { return false }
-                cloudKitScanInFlight = true
-                return true
-            }
-            if claimed {
-                Task { [weak self] in
-                    // The whole scan, not just its rows: the outcome is what
-                    // tells "nothing syncs" from "couldn't tell" (C1).
-                    guard let observed = await self?.cloudKitApps.scan() else { return }
-                    guard let self else { return }
-                    await MainActor.run {
-                        self.cachedCloudKitApps = (observed, Date())
-                        self.cloudKitScanInFlight = false
-                    }
-                }
-            }
-        }
 
         // brctl dump (+ status when due): stale-or-nil now (`mapped`, read
         // above), refreshed in the background at most once a minute. Retry
@@ -317,7 +332,7 @@ final class SystemSyncSource: SyncSource {
         let apps = Self.buildApps(
             status: status,
             transfers: transfers,
-            fileProviderDomains: await Self.fileProviderDomains(),
+            fileProviderDomains: await readers.fileProviderDomains(),
             containers: containers,
             localSizes: localSizes,
             cloudKitApps: observedCloudKit,
@@ -387,16 +402,109 @@ final class SystemSyncSource: SyncSource {
         )
     }
 
+    /// Observed CloudKit apps: same stale-or-empty, single-flight, 5-minute
+    /// discipline as the size pass — `log show` is a ~2s spawn and must
+    /// never gate first paint. Empty on the first cycle; real rows next. The
+    /// system log is not iCloud Drive, so this runs whatever the Full Disk
+    /// Access gate says.
+    private func observedCloudKitApps() async -> (scan: CloudKitScan, at: Date)? {
+        let ckCache = await MainActor.run(body: { cachedCloudKitApps })
+        if ckCache == nil || Date().timeIntervalSince(ckCache!.at) >= 300 {
+            let claimed = await MainActor.run { () -> Bool in
+                guard !cloudKitScanInFlight else { return false }
+                cloudKitScanInFlight = true
+                return true
+            }
+            if claimed {
+                Task { [weak self] in
+                    // The whole scan, not just its rows: the outcome is what
+                    // tells "nothing syncs" from "couldn't tell" (C1).
+                    guard let observed = await self?.cloudKitApps.scan() else { return }
+                    guard let self else { return }
+                    await MainActor.run {
+                        self.cachedCloudKitApps = (observed, Date())
+                        self.cloudKitScanInFlight = false
+                    }
+                }
+            }
+        }
+        return ckCache
+    }
+
+    /// The snapshot while iCloud Drive may not be read (Full Disk Access
+    /// denied, or not probed yet). Only what never touches iCloud Drive is
+    /// gathered — ps / nettop, CloudKit activity from the system log, the
+    /// ~/Library/CloudStorage listing. Nothing iCloud-derived from before is
+    /// served either: no brctl state, quota, transfers, folders, containers,
+    /// conflicts or dump issues, and no issue producer delivers (so each
+    /// takes a fresh launch baseline once access returns). The iCloud Drive
+    /// row says why it is empty instead of reading as "unknown".
+    private func snapshotWithoutICloudDrive(
+        _ fda: FullDiskAccessGate, processStats: ([DaemonStat], BandwidthSummary)
+    ) async -> SyncSnapshot {
+        let activity = await MainActor.run { () -> [ActivityEvent] in
+            activityLog?.pause()
+            return activityLog?.events ?? []
+        }
+        let ckCache = await observedCloudKitApps()
+        var apps = Self.buildApps(
+            status: nil, transfers: [],
+            fileProviderDomains: await readers.fileProviderDomains(),
+            cloudKitApps: ckCache?.scan.apps ?? [],
+            desktopDocuments: .unknown("not read without Full Disk Access"),
+            desktopDocumentsReadable: false
+        )
+        if let index = apps.firstIndex(where: { $0.id == "icloud-drive" }) {
+            Self.markICloudDriveNeedsFullDiskAccess(&apps[index])
+        }
+        var engine = Self.engine(
+            reading: CloudDocsReading(), mapped: nil, dumpFailure: nil, fullDiskAccess: fda.fullDiskAccess)
+        engine.metadataIndex = "Not read — iCloud Drive is read only with Full Disk Access"
+        return SyncSnapshot(
+            apps: apps, transfers: [], driveFolders: [], devices: [], issues: [],
+            activity: activity, daemons: processStats.0, retryQueue: [], engine: engine,
+            permissions: fda.permissions, bandwidth: processStats.1, storage: nil,
+            quotaRemainingBytes: nil, notifications: [], issueProducers: [:],
+            cloudKitScan: ckCache.map { CloudKitScanState($0.scan) } ?? .scanning,
+            folderScan: ScanFreshness(completedAt: nil, isOverdue: false, isUnreadable: true),
+            containerScan: ScanFreshness(completedAt: nil, isOverdue: false, isUnreadable: true),
+            transferWatchReady: true
+        )
+    }
+
+    /// The iCloud Drive row while Birdwatch reads nothing in iCloud Drive (no
+    /// Full Disk Access): no status, pending count or size may be claimed
+    /// (C1) — the row says why.
+    nonisolated static func markICloudDriveNeedsFullDiskAccess(_ row: inout AppSyncState) {
+        row.status = .unknown
+        row.statusLine = "Needs Full Disk Access"
+        row.lastActivity = nil
+        row.pendingItems = nil
+        row.localSize = LocalSize(bytes: 0, isUnreadable: true)
+        row.needsFullDiskAccess = true
+        row.infoCallout = "Birdwatch reads nothing in iCloud Drive until it has Full Disk Access. Without it, macOS asks for permission to iCloud Drive and holds every read until someone answers."
+    }
+
     nonisolated func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> {
         LogStreamSource.stream(backend: backend)
     }
 
     func conflictDetail(issueID: String) async -> ConflictDetail? {
+        // From the scan's cache only (no file is opened here).
         await MainActor.run { usableConflictCache(now: Date())?.found.first { $0.issue.id == issueID }?.detail }
     }
 
     func resolveConflict(issueID: String, keepVersionID: String, shownVersionIDs: Set<String>) async -> ConflictResolveResult {
-        let detail = await MainActor.run { usableConflictCache(now: Date())?.found.first { $0.issue.id == issueID }?.detail }
+        let detail = await MainActor.run { () -> ConflictDetail? in
+            // Resolving opens the file's versions in iCloud Drive: never
+            // without access (the last gate decision; not-probed counts as
+            // no). The issue is not in the current snapshot then.
+            guard lastAccess.readsICloudDrive else {
+                logger.info("resolveConflict: iCloud Drive access is \(String(describing: self.lastAccess), privacy: .public); not opening the file")
+                return nil
+            }
+            return usableConflictCache(now: Date())?.found.first { $0.issue.id == issueID }?.detail
+        }
         guard let fileURL = detail?.fileURL else {
             // Not "failed": the scan no longer lists it, so a retry can never
             // succeed and the UI must not suggest one (C1).
@@ -424,8 +532,8 @@ final class SystemSyncSource: SyncSource {
     }
 
     /// Only nils the cache (one MainActor hop, no I/O); the re-probe runs on
-    /// the next snapshot, off the main actor, inside the Desktop & Documents
-    /// gate.
+    /// the next snapshot, off the main actor, in `fullDiskAccessGate` —
+    /// before anything reads iCloud Drive.
     func invalidatePermissions() async {
         await MainActor.run { cachedPermissions = nil }
     }
@@ -509,27 +617,24 @@ final class SystemSyncSource: SyncSource {
         await MainActor.run { dumpScanInFlight = false }
     }
 
-    // MARK: - Desktop & Documents gate (the only path that may read them)
+    // MARK: - Full Disk Access gate (the only path that may read iCloud Drive)
 
-    struct DesktopDocumentsGate {
+    struct FullDiskAccessGate {
         let permissions: [PermissionStatus]
+        /// The probe's answer; `.unknown` also when it returned no FDA row.
         let fullDiskAccess: PermissionState
-        let readsDesktopDocuments: Bool
-        let localSizes: [String: LocalSize]
-        let breakdownCache: (totals: [StorageCategory: Int64], isPartial: Bool, at: Date, includedDesktopDocuments: Bool)?
+        /// `TransferWatchPolicy.iCloudDriveAccess` — the one decision.
+        let access: ICloudDriveAccess
     }
 
-    /// Probes permissions (5-minute cache), decides whether ~/Desktop and
-    /// ~/Documents may be read (`TransferWatchPolicy.readsDesktopDocuments`:
-    /// the feature on AND Full Disk Access granted — without it, touching
-    /// them raises a surprise TCC prompt), and hands that ONE decision to all
-    /// three readers: the transfer watcher's roots, the local size walk and
-    /// the Storage breakdown walk. The walks are single-flight background
-    /// Tasks served stale-or-empty; their caches are stamped with the
-    /// decision, so a grant (or revocation) re-walks on the next cycle.
-    func applyDesktopDocumentsGate(
-        featureOn: Bool, containers: [AppContainerSource.Container], now: Date
-    ) async -> DesktopDocumentsGate {
+    /// Step one of every snapshot, before anything touches iCloud Drive:
+    /// probes permissions (5-minute cache, dropped early by
+    /// `invalidatePermissions`) and makes the ONE decision,
+    /// `TransferWatchPolicy.iCloudDriveAccess`. When access is lost the
+    /// transfer watcher is stopped and released here, so its FSEvents stream
+    /// and 1 Hz probe of Mobile Documents end on this cycle; a later grant
+    /// creates a fresh one.
+    func fullDiskAccessGate(now: Date) async -> FullDiskAccessGate {
         let permissions: [PermissionStatus]
         let cached = await MainActor.run(body: { cachedPermissions })
         if let cached, now.timeIntervalSince(cached.at) < 300 {
@@ -538,8 +643,44 @@ final class SystemSyncSource: SyncSource {
             permissions = await readers.permissions()
             await MainActor.run { cachedPermissions = (permissions, now) }
         }
-        let fullDiskAccess = permissions.state(of: .fullDiskAccess) ?? .unknown
-        let reads = TransferWatchPolicy.readsDesktopDocuments(featureOn: featureOn, fullDiskAccess: fullDiskAccess)
+        let probed = permissions.state(of: .fullDiskAccess)
+        let access = TransferWatchPolicy.iCloudDriveAccess(fullDiskAccess: probed)
+        await MainActor.run {
+            if lastAccess != access {
+                logger.info("iCloud Drive access: \(String(describing: access), privacy: .public)")
+            }
+            lastAccess = access
+            if !access.readsICloudDrive, let watcher = transferWatcher {
+                watcher.stop()          // ownership contract: stop before release
+                transferWatcher = nil
+            }
+        }
+        return FullDiskAccessGate(permissions: permissions, fullDiskAccess: probed ?? .unknown, access: access)
+    }
+
+    struct DesktopDocumentsGate {
+        let readsDesktopDocuments: Bool
+        let localSizes: [String: LocalSize]
+        let breakdownCache: (totals: [StorageCategory: Int64], isPartial: Bool, at: Date, includedDesktopDocuments: Bool)?
+    }
+
+    /// Step two, only once `fda` allows iCloud Drive at all: decides whether
+    /// ~/Desktop and ~/Documents may be read too
+    /// (`TransferWatchPolicy.readsDesktopDocuments`: the feature on AND Full
+    /// Disk Access confirmed — without it, touching them raises a surprise
+    /// TCC prompt), and hands that decision to all three readers: the
+    /// transfer watcher's roots, the local size walk and the Storage
+    /// breakdown walk. The walks (which cover the iCloud containers too) are
+    /// single-flight background Tasks served stale-or-empty; their caches are
+    /// stamped with the decision, so a grant (or revocation) re-walks on the
+    /// next cycle. Without iCloud Drive access nothing is walked at all.
+    func applyDesktopDocumentsGate(
+        featureOn: Bool, fda: FullDiskAccessGate, containers: [AppContainerSource.Container], now: Date
+    ) async -> DesktopDocumentsGate {
+        guard fda.access.readsICloudDrive else {
+            return DesktopDocumentsGate(readsDesktopDocuments: false, localSizes: [:], breakdownCache: nil)
+        }
+        let reads = TransferWatchPolicy.readsDesktopDocuments(featureOn: featureOn, fullDiskAccess: fda.fullDiskAccess)
         await MainActor.run { transferWatcher?.setIncludesDesktopDocuments(reads) }
 
         // Local footprint: served stale-or-empty, refreshed in the background at
@@ -585,8 +726,7 @@ final class SystemSyncSource: SyncSource {
             }
         }
         return DesktopDocumentsGate(
-            permissions: permissions, fullDiskAccess: fullDiskAccess, readsDesktopDocuments: reads,
-            localSizes: sizesCache?.values ?? [:], breakdownCache: breakdownCache)
+            readsDesktopDocuments: reads, localSizes: sizesCache?.values ?? [:], breakdownCache: breakdownCache)
     }
 
     // MARK: - Conflict scan bookkeeping (MainActor; split out for tests)
@@ -771,7 +911,7 @@ final class SystemSyncSource: SyncSource {
         retry: RetryAttribution? = nil
     ) -> [AppSyncState] {
         var apps: [AppSyncState] = []
-        let home = NSHomeDirectory()
+        let home = UserHome.path
         let flag = desktopDocuments ?? status.map {
             desktopDocumentsSynced($0) ? .on(lastKnown: nil) : .off(lastKnown: nil)
         } ?? .unknown("brctl status has not been read")
@@ -1071,7 +1211,7 @@ final class SystemSyncSource: SyncSource {
 
 
     @concurrent nonisolated static func fileProviderDomains() async -> [String] {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/CloudStorage")
+        let url = URL(fileURLWithPath: UserHome.path).appending(path: "Library/CloudStorage")
         do {
             return try FileManager.default
                 .contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)

@@ -15,16 +15,49 @@ nonisolated enum TransferWatchPolicy {
         !monitoringPaused && (mainWindowOnScreen || popoverOpen)
     }
 
+    /// What Birdwatch may touch in iCloud Drive, decided from the Full Disk
+    /// Access probe. This is THE decision: every iCloud Drive reader in
+    /// SystemSyncSource (brctl, the transfer watcher, the folder, container,
+    /// conflict, size and breakdown walks, the redacted-path walk), the main
+    /// window's blocking screen and onboarding's "Enter Birdwatch" all follow
+    /// it, and `readsDesktopDocuments` narrows it further.
+    ///
+    /// Why it exists (macOS 27): an app WITHOUT Full Disk Access that reads
+    /// ~/Library/Mobile Documents — or has bird serve brctl for it — raises
+    /// tccd's iCloud Drive (FileProviderDomain) prompt, and the read stalls
+    /// until someone answers it (3.5 min observed). Full Disk Access is
+    /// therefore required (Alan, 2026-10-06).
+    ///
+    /// - nil (not probed yet) → `.notProbed`: touch nothing until it answers.
+    /// - `.granted` → read.
+    /// - `.denied` → touch nothing.
+    /// - `.unknown` → `.unconfirmed`: read, and say macOS may ask. The probe
+    ///   answers unknown only when NONE of its probe files exists (a fresh
+    ///   account on a Mac without TCC.db on disk), so it can never confirm a
+    ///   grant there. Gating on it would lock that person out for good,
+    ///   whatever they grant; letting them in with the warning costs at
+    ///   worst the prompt this gate exists to avoid, which they were told
+    ///   to expect.
+    static func iCloudDriveAccess(fullDiskAccess: PermissionState?) -> ICloudDriveAccess {
+        switch fullDiskAccess {
+        case nil: .notProbed
+        case .granted: .granted
+        case .denied: .denied
+        case .unknown: .unconfirmed
+        }
+    }
+
     /// Whether Birdwatch may read ~/Desktop and ~/Documents at all — the
     /// transfer watcher's roots, the local size walk and the Storage
     /// breakdown walk all follow this one rule. Only when the sync feature is
     /// on AND Full Disk Access is confirmed: without FDA, touching those
     /// folders raises a surprise TCC prompt ("Birdwatch would like to access
-    /// files in your Desktop folder"). `.unknown` FDA (not probed yet, or
-    /// the probe couldn't tell) counts as not granted. The permissions probe
-    /// re-runs on its TTL, so a later grant starts them on that cycle.
+    /// files in your Desktop folder"). Unlike iCloud Drive, an unconfirmed
+    /// grant does NOT open these (Alan's earlier rule: no Desktop/Documents
+    /// prompt without a confirmed grant). The permissions probe re-runs on
+    /// its TTL, so a later grant starts them on that cycle.
     static func readsDesktopDocuments(featureOn: Bool, fullDiskAccess: PermissionState?) -> Bool {
-        featureOn && fullDiskAccess == .granted
+        featureOn && iCloudDriveAccess(fullDiskAccess: fullDiskAccess) == .granted
     }
 
     /// SwiftUI uses the scene id as the NSWindow identifier: the
@@ -41,4 +74,25 @@ nonisolated enum TransferWatchPolicy {
     static func isMainWindow(identifier: String?, isVisible: Bool, isPanel: Bool) -> Bool {
         isVisible && !isPanel && identifier == mainWindowIdentifier
     }
+}
+
+/// The outcome of `TransferWatchPolicy.iCloudDriveAccess(fullDiskAccess:)`.
+nonisolated enum ICloudDriveAccess: Sendable, Equatable {
+    /// The Full Disk Access probe has not answered yet.
+    case notProbed
+    /// Full Disk Access is confirmed.
+    case granted
+    /// The probe cannot tell (no probe file on this Mac). Reads go ahead;
+    /// the person was told macOS may ask first.
+    case unconfirmed
+    /// Full Disk Access is not granted.
+    case denied
+
+    /// Whether anything may read iCloud Drive (brctl included).
+    var readsICloudDrive: Bool { self == .granted || self == .unconfirmed }
+
+    /// Setup is complete but access is gone: the main window shows the Full
+    /// Disk Access screen instead of data it may no longer read. Not while
+    /// the probe is still out — that is the ordinary first-load state.
+    var blocksMainWindow: Bool { self == .denied }
 }

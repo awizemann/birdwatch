@@ -165,7 +165,7 @@ struct MenuBarPopoverView: View {
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 7) {
                 StatusDot(color: tint, pulses: overall.tone == .working)
-                Text(PopoverSummary.headerTitle(state))
+                Text(PopoverSummary.headerTitle(state, iCloudDriveBlocked: store.iCloudDriveAccess == .denied))
                     .scaledFont(size: 14, weight: .bold)
                     .foregroundStyle(Surface.fg)
                     .monospacedDigit()

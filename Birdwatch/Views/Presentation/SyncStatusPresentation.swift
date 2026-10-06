@@ -225,8 +225,12 @@ struct OverviewHeroDisplay: Equatable {
 
 /// The popover's summary lines.
 enum PopoverSummary {
-    static func headerTitle(_ state: SyncStore.OverallState) -> String {
+    /// `iCloudDriveBlocked`: Full Disk Access is denied, so nothing in
+    /// iCloud Drive is read — "No sync activity" would claim a look that
+    /// never happened (C1).
+    static func headerTitle(_ state: SyncStore.OverallState, iCloudDriveBlocked: Bool = false) -> String {
         switch state {
+        case .idle where iCloudDriveBlocked: "iCloud Drive not watched"
         case .paused: "Monitoring paused"
         case .syncing(let appCount, let alsoActive):
             "Syncing \(Plural.count(appCount, "app"))" + (alsoActive > 0 ? " · activity in \(alsoActive) more" : "")

@@ -46,7 +46,9 @@ nonisolated enum UsageEvent: Sendable, Equatable {
 
     /// A first-run screen was shown (funnel; completion is the next case).
     case onboardingStepShown(OnboardingStep)
-    /// First-run setup finished.
+    /// First-run setup finished. Setup cannot finish without Full Disk
+    /// Access unless the probe cannot tell, so `fdaGranted` is false only for
+    /// an unconfirmed (`.unknown`) grant.
     case onboardingCompleted(fdaGranted: Bool, notificationsRequested: Bool)
     /// A top-level monitor view became the selected one.
     case viewShown(MonitorView, via: NavigationSource)

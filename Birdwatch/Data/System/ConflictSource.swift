@@ -46,7 +46,7 @@ enum ConflictSource {
     /// Single-flight, backoff and staleness stay with the caller
     /// (`SystemSyncSource.claimConflictScan` / `completeConflictScan`).
     nonisolated static func findConflicts(
-        root: URL = URL(fileURLWithPath: NSHomeDirectory())
+        root: URL = URL(fileURLWithPath: UserHome.path)
             .appending(path: "Library/Mobile Documents/com~apple~CloudDocs")
     ) async -> [FoundConflict]? {
         await scanConflicts(root: root)?.found
@@ -57,7 +57,7 @@ enum ConflictSource {
     /// result must not read as "no conflicts" (C1). The walk runs on
     /// `scanQueue` via `BlockingWork` (see `findConflicts`).
     nonisolated static func scanConflicts(
-        root: URL = URL(fileURLWithPath: NSHomeDirectory())
+        root: URL = URL(fileURLWithPath: UserHome.path)
             .appending(path: "Library/Mobile Documents/com~apple~CloudDocs"),
         maxItems: Int = maxItemsVisited
     ) async -> (found: [FoundConflict], isCapped: Bool)? {

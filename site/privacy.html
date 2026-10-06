@@ -64,7 +64,8 @@
         <li>a setup screen shown, once per screen per launch (<code>onboarding_step_shown</code>)
           — which one (<code>step</code>: <code>welcome</code> or <code>grant_access</code>);</li>
         <li>setup finished (<code>onboarding_completed</code>) — whether Full Disk Access was
-          granted (<code>fda_granted</code>) and notifications requested
+          confirmed (<code>fda_granted</code>; setup can't finish without it, so this is false
+          only when Birdwatch couldn't tell) and whether notifications were requested
           (<code>notifications_requested</code>);</li>
         <li>a screen opened (<code>view_shown</code>) — which screen (<code>view</code>:
           <code>overview</code>, <code>applications</code>, <code>drive</code>,
@@ -189,9 +190,11 @@
       read.</li>
   </ul>
   <p>
-    None of this leaves your Mac. Birdwatch asks for Full Disk Access on first launch so it
-    can also watch your Desktop and Documents folders, which macOS protects; without it,
-    Birdwatch doesn't watch or measure those two folders.
+    None of this leaves your Mac. Birdwatch needs Full Disk Access, and asks for it on first
+    launch: without it, reading iCloud Drive makes macOS ask for permission and hold the read
+    until someone answers, so until access is granted Birdwatch reads nothing in iCloud Drive
+    (no <code>brctl</code>, no file events, no folder or size scans). With it, Birdwatch can
+    also watch your Desktop and Documents folders, which macOS protects as well.
   </p>
 
   <h2>Questions</h2>

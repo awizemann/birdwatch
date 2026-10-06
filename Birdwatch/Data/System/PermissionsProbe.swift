@@ -36,7 +36,8 @@ enum PermissionsProbe {
     ///   macOS 27's release notes say apps can no longer access it directly,
     ///   but on 27.0 (26A428) a process with FDA still opens it read-only. If a
     ///   later build closes it, an account with none of the other files reads
-    ///   as not granted — the onboarding escape hatch covers that.
+    ///   as not granted — and, since Full Disk Access is required, cannot
+    ///   get past setup (see `fullDiskAccessState`).
     ///
     /// Deliberately NOT probed: Safari's macOS 27 container copy of
     /// CloudTabs.db. That container carries a data-container personality, and
@@ -45,7 +46,7 @@ enum PermissionsProbe {
     /// and a false grant if the user allows it. Without FDA every probe file
     /// is tried, so ordering cannot avoid that; the files above already cover
     /// a typical account.
-    nonisolated static func fdaProbeFiles(home: String = NSHomeDirectory()) -> [FDAProbeFile] {
+    nonisolated static func fdaProbeFiles(home: String = UserHome.path) -> [FDAProbeFile] {
         [
             FDAProbeFile(label: "safari-cloudtabs", path: home + "/Library/Safari/CloudTabs.db"),
             FDAProbeFile(label: "safari-bookmarks", path: home + "/Library/Safari/Bookmarks.plist"),
@@ -100,8 +101,10 @@ enum PermissionsProbe {
     /// - `.unknown`: no probe file exists at all (not expected while TCC.db is
     ///   on disk).
     /// - False negative: a future macOS that moves or re-protects every probe
-    ///   file reports `.denied` with FDA on. Onboarding therefore lets the user
-    ///   continue without it, and Diagnostics keeps showing this answer.
+    ///   file reports `.denied` with FDA on. Full Disk Access is required
+    ///   (TransferWatchPolicy.iCloudDriveAccess), so such a person would be
+    ///   held at the Full Disk Access step — there is no "continue without"
+    ///   any more. Re-check the probe files on every macOS release.
     @concurrent
     static func fullDiskAccessState() async -> PermissionState {
         let outcome = evaluateFullDiskAccess(

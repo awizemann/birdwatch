@@ -128,27 +128,30 @@ struct DesktopDocumentsGateTests {
 
 
     // Reverting the gate in any one reader fails this: each must be told
-    // false while Full Disk Access is missing, and true once it is granted.
-    @Test("No FDA: watcher, size walk and breakdown walk all exclude Desktop & Documents")
+    // false while Full Disk Access is unconfirmed, true once it is granted,
+    // and nothing at all once it is denied (iCloud Drive itself is then off
+    // limits — see FullDiskAccessGateTests).
+    @Test("Unconfirmed FDA: watcher, size walk and breakdown walk all exclude Desktop & Documents")
     func gateReachesEveryReader() async throws {
         let home = try Self.tempHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
         let recorder = Recorder()
-        let fda = OSAllocatedUnfairLock(initialState: PermissionState.denied)
-        let readers = SystemSyncSource.DesktopDocumentsReaders(
+        let fda = OSAllocatedUnfairLock(initialState: PermissionState.unknown)
+        let readers = SystemSyncSource.Readers.testing(
             permissions: { [PermissionStatus(kind: .fullDiskAccess, state: fda.withLock { $0 })] },
             localSizes: { _, include in await recorder.size(include); return [:] },
             breakdown: { include in await recorder.breakdown(include); return ([:], false) }
         )
-        let source = SystemSyncSource(pathCandidates: { [] }, desktopDocumentsReaders: readers)
+        let source = SystemSyncSource(pathCandidates: { [] }, readers: readers)
         let watcher = UbiquityTransferSource(homeDirectory: home, sweep: { _ in [] })
         watcher.start()
         defer { watcher.stop() }
         source.installTransferWatcherForTesting(watcher)
 
         let t0 = Date()
-        let denied = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0)
-        #expect(!denied.readsDesktopDocuments)
+        let unconfirmed = await source.applyDesktopDocumentsGate(
+            featureOn: true, fda: await source.fullDiskAccessGate(now: t0), containers: [], now: t0)
+        #expect(!unconfirmed.readsDesktopDocuments)
         #expect(!watcher.includesDesktopDocuments)
         await recorder.waitFor(total: 2)
         #expect(await recorder.sizeWalks == [false])
@@ -156,12 +159,43 @@ struct DesktopDocumentsGateTests {
 
         // Granted, seen on the next permissions re-probe (5-minute cache).
         fda.withLock { $0 = .granted }
-        let granted = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0 + 301)
+        let granted = await source.applyDesktopDocumentsGate(
+            featureOn: true, fda: await source.fullDiskAccessGate(now: t0 + 301), containers: [], now: t0 + 301)
         #expect(granted.readsDesktopDocuments)
         #expect(watcher.includesDesktopDocuments)
         await recorder.waitFor(total: 4)
         #expect(await recorder.sizeWalks == [false, true])
         #expect(await recorder.breakdownWalks == [false, true])
+
+        // Denied: the watcher is stopped and released, and nothing walks.
+        fda.withLock { $0 = .denied }
+        let deniedFDA = await source.fullDiskAccessGate(now: t0 + 602)
+        #expect(deniedFDA.access == .denied)
+        #expect(!watcher.isStarted)
+        #expect(source.transferWatcherForTesting == nil)
+        let denied = await source.applyDesktopDocumentsGate(featureOn: true, fda: deniedFDA, containers: [], now: t0 + 602)
+        #expect(!denied.readsDesktopDocuments)
+        #expect(await recorder.sizeWalks == [false, true], "no walk is even started without access")
+    }
+}
+
+extension SystemSyncSource.Readers {
+    /// Readers that touch nothing real: every scan answers empty at once and
+    /// the transfer watcher (if one is made) watches an empty temp home.
+    static func testing(
+        permissions: @escaping @Sendable () async -> [PermissionStatus],
+        localSizes: @escaping @Sendable ([AppContainerSource.Container], Bool) async -> [String: LocalSize] = { _, _ in [:] },
+        breakdown: @escaping @Sendable (Bool) async -> (totals: [StorageCategory: Int64], isPartial: Bool) = { _ in ([:], false) },
+        folders: @escaping @Sendable () -> [DriveFolder]? = { [] },
+        containers: @escaping @Sendable () -> [AppContainerSource.Container] = { [] },
+        conflicts: @escaping @Sendable () async -> (found: [ConflictSource.FoundConflict], isCapped: Bool)? = { ([], false) },
+        makeTransferWatcher: @escaping @MainActor @Sendable () -> UbiquityTransferSource = {
+            UbiquityTransferSource(roots: [], sweep: { _ in [] })
+        }
+    ) -> Self {
+        Self(permissions: permissions, localSizes: localSizes, breakdown: breakdown, folders: folders,
+             containers: containers, conflicts: conflicts, makeTransferWatcher: makeTransferWatcher,
+             fileProviderDomains: { [] })
     }
 }
 
@@ -177,7 +211,7 @@ struct PermissionReprobeTests {
     func invalidationForcesReprobe() async {
         let probes = OSAllocatedUnfairLock(initialState: 0)
         let fda = OSAllocatedUnfairLock(initialState: PermissionState.denied)
-        let readers = SystemSyncSource.DesktopDocumentsReaders(
+        let readers = SystemSyncSource.Readers.testing(
             permissions: {
                 probes.withLock { $0 += 1 }
                 return [PermissionStatus(kind: .fullDiskAccess, state: fda.withLock { $0 })]
@@ -185,21 +219,22 @@ struct PermissionReprobeTests {
             localSizes: { _, _ in [:] },
             breakdown: { _ in ([:], false) }
         )
-        let source = SystemSyncSource(pathCandidates: { [] }, desktopDocumentsReaders: readers)
+        let source = SystemSyncSource(pathCandidates: { [] }, readers: readers)
         let t0 = Date()
 
-        let first = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0)
+        let first = await source.fullDiskAccessGate(now: t0)
         #expect(first.fullDiskAccess == .denied)
         fda.withLock { $0 = .granted }
-        let cached = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0 + 15)
+        let cached = await source.fullDiskAccessGate(now: t0 + 15)
         #expect(cached.fullDiskAccess == .denied, "a plain 15 s cycle keeps the cache")
         #expect(probes.withLock { $0 } == 1)
 
         await source.invalidatePermissions()
-        let reprobed = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0 + 30)
+        let reprobed = await source.fullDiskAccessGate(now: t0 + 30)
         #expect(probes.withLock { $0 } == 2)
         #expect(reprobed.fullDiskAccess == .granted)
-        #expect(reprobed.readsDesktopDocuments, "the grant opens the gate on the next snapshot")
+        let gate = await source.applyDesktopDocumentsGate(featureOn: true, fda: reprobed, containers: [], now: t0 + 30)
+        #expect(gate.readsDesktopDocuments, "the grant opens the gate on the next snapshot")
     }
 
     // `force` alone must NOT re-probe: the window's 15 s tick forces every

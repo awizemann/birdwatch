@@ -210,7 +210,7 @@ nonisolated enum BrctlDumpMapper {
     /// path pins it to a top-level folder. Anything else stays unplaced and
     /// is never guessed into a row.
     static func retryAttribution(
-        from dump: BrctlDump, candidates: [PathCandidate], homeDirectory: String = NSHomeDirectory()
+        from dump: BrctlDump, candidates: [PathCandidate], homeDirectory: String = UserHome.path
     ) -> RetryAttribution {
         let items = pendingItems(dump)
         let placed = Array(items.prefix(attributionCap))

@@ -390,3 +390,34 @@ private actor SweepGate {
         held.removeAll()
     }
 }
+
+@Suite("Seed sweep listing")
+struct SeedSweepListingTests {
+
+    // Fails on the old `.skipsHiddenFiles` listing: macOS sets the hidden
+    // flag on most iCloud container folders in ~/Library/Mobile Documents,
+    // and that option dropped them as seed roots.
+    @Test("Hidden-flagged children are listed; dot-files are not")
+    func hiddenFlaggedChildrenListed() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "bw-seed-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var flagged = root.appending(path: "iCloud~com~example~notes")
+        let plain = root.appending(path: "com~apple~CloudDocs")
+        let dotFile = root.appending(path: ".DS_Store")
+        try FileManager.default.createDirectory(at: flagged, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        try Data().write(to: dotFile)
+        var values = URLResourceValues()
+        values.isHidden = true
+        try flagged.setResourceValues(values)
+        #expect(try flagged.resourceValues(forKeys: [.isHiddenKey]).isHidden == true, "fixture: the flag is set")
+
+        let listed = Set(UbiquityTransferSource.listChildren(of: [root.path]).map { ($0 as NSString).lastPathComponent })
+        #expect(listed == ["iCloud~com~example~notes", "com~apple~CloudDocs"])
+    }
+
+    @Test("An unreadable root is skipped, not fatal")
+    func missingRootSkipped() {
+        #expect(UbiquityTransferSource.listChildren(of: ["/nonexistent-\(UUID().uuidString)"]).isEmpty)
+    }
+}

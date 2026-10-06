@@ -102,6 +102,9 @@ actor SingleFlightScan<Value: Sendable> {
         _ = await inFlight?.value
     }
 
+    /// Test hook: a scan has been started and has not landed yet.
+    var isScanInFlightForTesting: Bool { inFlight != nil }
+
     private func start() -> Task<Value, Never> {
         let queue = queue
         let scan = scan

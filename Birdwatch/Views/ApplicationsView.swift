@@ -130,15 +130,38 @@ private struct AppRow: View {
                 }
             }
             .contentShape(Rectangle())
+            // One element per row: the texts, badge and progress bar inside
+            // the button became its AX children, and the row exposed no
+            // title (found in a live AX dump). It speaks the one combined
+            // label instead.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(AppRowAccessibility.label(app: app, display: display))
         }
         .buttonStyle(.plain)
         .focused($focused)
         .focusEffectDisabled(false)
         .onHover { hovering = $0 }
-        .accessibilityLabel(
-            "\(app.name), \(app.backend.badgeLabel), \(display.label), \(app.statusLine)"
-            + (app.localSize.map { $0.bytes > 0 ? ", \(LocalSizeText.text($0)) on this Mac" : "" } ?? "")
-        )
+        .accessibilityLabel(AppRowAccessibility.label(app: app, display: display))
         .accessibilityHint("Shows sync details")
+        .accessibilityIdentifier(AppRowAccessibility.identifier(app))
     }
+}
+
+/// What an Applications row says to VoiceOver and how UI automation finds
+/// it. Pulled out of the view so the wording is testable.
+enum AppRowAccessibility {
+    /// Name, backend, status, the status line when it adds anything, and the
+    /// row's figure — its measured local size, exactly as the row shows it.
+    static func label(app: AppSyncState, display: SyncStatusDisplay) -> String {
+        var parts = [app.name, app.backend.badgeLabel, display.label]
+        if !app.statusLine.isEmpty, app.statusLine != display.label { parts.append(app.statusLine) }
+        if let size = app.localSize, size.bytes > 0 {
+            parts.append("\(LocalSizeText.text(size)) on this Mac")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    /// Stable across refreshes and re-sorts: the row's id (a built-in or
+    /// container id, never a path), not its position.
+    static func identifier(_ app: AppSyncState) -> String { "app-row-\(app.id)" }
 }

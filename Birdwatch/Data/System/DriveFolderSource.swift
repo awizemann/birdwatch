@@ -13,7 +13,7 @@ enum DriveFolderSource {
     nonisolated static let itemCountCap = 500
 
     nonisolated static var cloudDocsURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory())
+        URL(fileURLWithPath: UserHome.path)
             .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
     }
 

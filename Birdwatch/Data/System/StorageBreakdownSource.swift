@@ -142,7 +142,7 @@ enum StorageBreakdownSource {
     /// (brctl status reports it); touching them otherwise earns a TCC prompt
     /// for folders the app has no business reading.
     nonisolated static func scanRoots(
-        homeDirectory: String = NSHomeDirectory(),
+        homeDirectory: String = UserHome.path,
         includeDesktopDocuments: Bool
     ) -> [URL] {
         let home = URL(fileURLWithPath: homeDirectory)
@@ -161,7 +161,7 @@ enum StorageBreakdownSource {
     /// blocking walk runs on its own queue so a hung read never holds a
     /// cooperative-pool thread.
     nonisolated static func currentTotals(
-        homeDirectory: String = NSHomeDirectory(),
+        homeDirectory: String = UserHome.path,
         includeDesktopDocuments: Bool
     ) async -> (totals: [StorageCategory: Int64], isPartial: Bool) {
         let roots = scanRoots(homeDirectory: homeDirectory, includeDesktopDocuments: includeDesktopDocuments)

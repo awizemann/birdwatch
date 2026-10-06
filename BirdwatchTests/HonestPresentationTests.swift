@@ -185,6 +185,9 @@ struct OverallStateTests {
         #expect(hero.ring == .idle)
         #expect(!hero.showsBar)
         #expect(PopoverSummary.headerTitle(.idle) == "No sync activity")
+        // Without Full Disk Access nothing in iCloud Drive was looked at.
+        #expect(PopoverSummary.headerTitle(.idle, iCloudDriveBlocked: true) == "iCloud Drive not watched")
+        #expect(PopoverSummary.headerTitle(.paused, iCloudDriveBlocked: true) == "Monitoring paused")
     }
 
     @Test("Paused shows a paused ring, never \"0% SYNCED\"")

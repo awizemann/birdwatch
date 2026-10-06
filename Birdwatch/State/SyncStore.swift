@@ -388,6 +388,38 @@ final class SyncStore {
     var fullDiskAccess: PermissionState? {
         permissions.state(of: .fullDiskAccess)
     }
+    /// The one Full Disk Access decision (`TransferWatchPolicy.iCloudDriveAccess`)
+    /// as of the last snapshot — the same answer the source gated its reads on.
+    var iCloudDriveAccess: ICloudDriveAccess {
+        TransferWatchPolicy.iCloudDriveAccess(fullDiskAccess: fullDiskAccess)
+    }
+
+    /// FullDiskAccessRequiredView's own probe answered. Checking a
+    /// permission is not monitoring, so this works while monitoring is
+    /// paused too: an answer that allows iCloud Drive again is recorded at
+    /// once (the blocking screen goes away), and the source's cached answer
+    /// is dropped so the next snapshot — now, or on resume when paused —
+    /// re-probes instead of serving the old denial. A denial changes nothing.
+    func fullDiskAccessProbed(_ state: PermissionState) async {
+        guard TransferWatchPolicy.iCloudDriveAccess(fullDiskAccess: state).readsICloudDrive else { return }
+        permissions = Self.permissions(permissions, settingFullDiskAccess: state)
+        // No fetch while paused (refresh refuses); the cache drop still happens.
+        await refresh(force: true, reprobePermissions: true)
+    }
+
+    /// `permissions` with the Full Disk Access row set to `state` (added if
+    /// the list has none). Pure, for the test.
+    nonisolated static func permissions(
+        _ permissions: [PermissionStatus], settingFullDiskAccess state: PermissionState
+    ) -> [PermissionStatus] {
+        var result = permissions
+        if let index = result.firstIndex(where: { $0.kind == .fullDiskAccess }) {
+            result[index].state = state
+        } else {
+            result.append(PermissionStatus(kind: .fullDiskAccess, state: state))
+        }
+        return result
+    }
     var issueCount: Int { issues.count }
     var unreadNotificationCount: Int { notifications.filter { !$0.isRead }.count }
 

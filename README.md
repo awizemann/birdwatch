@@ -39,7 +39,7 @@ The `operations/` notes under `.memory/` (if you use Memophant) and the code com
 - macOS 15 or later
 - Xcode 16 / Swift 6.2 toolchain (built with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, strict concurrency)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) — the `.xcodeproj` is generated from `project.yml`
-- Birdwatch runs **outside the App Sandbox**, which is what lets it read the sync daemons' state, and asks for **Full Disk Access** so it can also watch Desktop & Documents. Without the grant it doesn't watch or measure those two folders (so macOS doesn't prompt for them); most of the app keeps working. Your files and sync data never leave your Mac; anonymous usage counts do (see [Privacy](site/privacy.html)), and Diagnostics has the switch to turn that off.
+- Birdwatch runs **outside the App Sandbox**, which is what lets it read the sync daemons' state, and requires **Full Disk Access**: on macOS 27, an app without it that reads iCloud Drive (or has `bird` serve `brctl` for it) gets an iCloud Drive privacy prompt and stalls until it is answered. So Birdwatch reads nothing in iCloud Drive until the grant is there — setup can't be finished without it (unless the access check can't tell, in which case it says macOS may ask), and if it is revoked later the app stops reading and shows the Full Disk Access screen. The grant also lets it watch Desktop & Documents. Your files and sync data never leave your Mac; anonymous usage counts do (see [Privacy](site/privacy.html)), and Diagnostics has the switch to turn that off.
 
 ## Build
 

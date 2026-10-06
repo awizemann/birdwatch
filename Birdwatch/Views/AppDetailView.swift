@@ -112,7 +112,7 @@ struct AppDetailView: View {
     }
 
     private func revealInFinder(_ locationPath: String) {
-        let expanded = NSString(string: locationPath).expandingTildeInPath
+        let expanded = locationPath.hasPrefix("~/") ? UserHome.path + locationPath.dropFirst() : locationPath
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: expanded)])
     }
 

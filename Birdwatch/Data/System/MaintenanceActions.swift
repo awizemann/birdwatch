@@ -202,7 +202,7 @@ nonisolated enum FileTrasher {
 
     /// Trailing-slash-free absolute roots, resolved through symlinks so the
     /// containment test compares like with like.
-    static func allowedRoots(home: String = NSHomeDirectory()) -> [String] {
+    static func allowedRoots(home: String = UserHome.path) -> [String] {
         ["Library/Mobile Documents", "Desktop", "Documents"].map {
             URL(fileURLWithPath: home).appending(path: $0).standardizedFileURL
                 .resolvingSymlinksInPath().path
@@ -215,7 +215,7 @@ nonisolated enum FileTrasher {
     /// a symlink inside iCloud Drive pointing at `~/.ssh` must not become a
     /// licence to trash `~/.ssh`, and a `..` escape must not survive either.
     /// Equality with a root is refused too — nobody trashes iCloud Drive itself.
-    static func isAllowed(path: String, home: String = NSHomeDirectory()) -> Bool {
+    static func isAllowed(path: String, home: String = UserHome.path) -> Bool {
         let roots = allowedRoots(home: home)
         let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
         let resolved = URL(fileURLWithPath: standardized).resolvingSymlinksInPath().path
@@ -245,7 +245,7 @@ nonisolated enum FileTrasher {
     /// answered and the folder stayed put.
     ///
     /// So the button is not offered for these. Dead buttons don't ship.
-    static func isUbiquityDocumentRoot(path: String, home: String = NSHomeDirectory()) -> Bool {
+    static func isUbiquityDocumentRoot(path: String, home: String = UserHome.path) -> Bool {
         let mobileDocuments = URL(fileURLWithPath: home)
             .appending(path: "Library/Mobile Documents").standardizedFileURL.path
         let url = URL(fileURLWithPath: path).standardizedFileURL
@@ -271,7 +271,7 @@ nonisolated enum FileTrasher {
     /// FileManager trasher and asserts the file is still on disk.
     static func trash(
         path: String,
-        home: String = NSHomeDirectory(),
+        home: String = UserHome.path,
         trasher: (URL) throws -> URL? = { url in
             var resulting: NSURL?
             try FileManager.default.trashItem(at: url, resultingItemURL: &resulting)

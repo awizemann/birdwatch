@@ -202,7 +202,7 @@ struct RedactedPathResolverTests {
     }
 
     @Test func abbreviationHidesTheAccountShortName() {
-        let home = NSHomeDirectory()
+        let home = UserHome.path
         #expect(RedactedPathResolver.abbreviate(home + "/Library/Mobile Documents") == "~/Library/Mobile Documents")
         #expect(RedactedPathResolver.abbreviate("/private/tmp/x") == "/private/tmp/x")
     }

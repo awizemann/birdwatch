@@ -111,7 +111,7 @@ final class UbiquityTransferSource {
     /// mirrors, which sync through the same engine but live outside the
     /// container.
     nonisolated static func defaultRoots(
-        homeDirectory: String = NSHomeDirectory(),
+        homeDirectory: String = UserHome.path,
         includeDesktopDocuments: Bool
     ) -> [String] {
         var roots = [homeDirectory + "/Library/Mobile Documents"]
@@ -182,7 +182,7 @@ final class UbiquityTransferSource {
 
     init(
         roots: [String]? = nil,
-        homeDirectory: String = NSHomeDirectory(),
+        homeDirectory: String = UserHome.path,
         sweep: @escaping @Sendable ([String]) async -> [String] = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) }
     ) {
         rootsOverride = roots
@@ -539,7 +539,7 @@ final class UbiquityTransferSource {
     /// path) so equality checks and the activity diff are stable.
     nonisolated static func transferItems(
         from results: [UbiquityProbeResult],
-        homeDirectory: String = NSHomeDirectory()
+        homeDirectory: String = UserHome.path
     ) -> [TransferItem] {
         results
             .filter(\.isInFlight)
@@ -562,7 +562,7 @@ final class UbiquityTransferSource {
         name: String,
         sizeBytes: Int64,
         isUploading: Bool,
-        homeDirectory: String = NSHomeDirectory()
+        homeDirectory: String = UserHome.path
     ) -> TransferItem {
         return TransferItem(
             id: path,
@@ -581,7 +581,7 @@ final class UbiquityTransferSource {
     }
 
     /// Desktop & Documents sync is a distinct user-facing feature from iCloud Drive.
-    nonisolated static func appID(forPath path: String, homeDirectory: String = NSHomeDirectory()) -> String {
+    nonisolated static func appID(forPath path: String, homeDirectory: String = UserHome.path) -> String {
         if path.hasPrefix(homeDirectory + "/Desktop/") || path.hasPrefix(homeDirectory + "/Documents/") {
             return "desktop-documents"
         }
@@ -593,7 +593,7 @@ final class UbiquityTransferSource {
     }
 
     /// Home-relative, "~"-abbreviated display path of the item's parent folder.
-    nonisolated static func displayLocation(forPath path: String, homeDirectory: String = NSHomeDirectory()) -> String {
+    nonisolated static func displayLocation(forPath path: String, homeDirectory: String = UserHome.path) -> String {
         let parent = (path as NSString).deletingLastPathComponent
         if parent == homeDirectory { return "~" }
         if parent.hasPrefix(homeDirectory + "/") {
@@ -648,17 +648,26 @@ final class UbiquityTransferSource {
 
     nonisolated static let seedQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.ubiquity-seed", qos: .utility)
 
-    private nonisolated static func listChildren(of roots: [String]) -> [String] {
+    /// The immediate children of each root, minus dot-files.
+    ///
+    /// WHY NOT `.skipsHiddenFiles`: macOS sets the hidden flag on most iCloud
+    /// container directories under ~/Library/Mobile Documents, so that option
+    /// dropped most of the seed roots — a transfer already running in such a
+    /// container at launch stayed invisible until its next event. Dot-files
+    /// are filtered by name instead, as AppContainerSource does.
+    nonisolated static func listChildren(of roots: [String]) -> [String] {
         var out: [String] = []
         for root in roots {
             let url = URL(fileURLWithPath: root)
-            guard let children = try? FileManager.default.contentsOfDirectory(
-                at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-            ) else {
-                logger.debug("seed sweep skipped a root")
+            let children: [URL]
+            do {
+                children = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])
+            } catch {
+                let ns = error as NSError
+                logger.debug("seed sweep skipped a root: \(ns.domain, privacy: .public) \(ns.code, privacy: .public) at \(root, privacy: .private)")
                 continue
             }
-            out.append(contentsOf: children.map(\.path))
+            out.append(contentsOf: children.filter { !$0.lastPathComponent.hasPrefix(".") }.map(\.path))
         }
         return out
     }

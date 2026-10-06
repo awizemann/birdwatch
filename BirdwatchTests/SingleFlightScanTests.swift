@@ -20,27 +20,42 @@ struct SingleFlightScanTests {
     // (a scan slower than the deadline would read empty forever).
     @Test("One scan in flight at a time; a late result is served on the next cycle")
     func singleFlightAndLateResult() async {
+        // Every "has scan N started?" question is answered by the scan itself
+        // announcing its entry, never by how long a deadline happened to
+        // take: the scan body runs on its own GCD queue, so a short deadline
+        // can return before the body has even begun (the old flake: calls
+        // read 1 when the second scan had been started but not yet entered).
         let calls = OSAllocatedUnfairLock(initialState: 0)
+        let (entries, entered) = AsyncStream.makeStream(of: Int.self)
         let firstGate = DispatchSemaphore(value: 0)
         let secondGate = DispatchSemaphore(value: 0)
         let scan = SingleFlightScan(label: "test.late") { () -> Int in
             let n = calls.withLock { count -> Int in count += 1; return count }
-            (n == 1 ? firstGate : secondGate).wait()
+            entered.yield(n)
+            (n == 1 ? firstGate : secondGate).wait()   // blocks a GCD thread, never the pool
             return n
         }
+        var started = entries.makeAsyncIterator()
 
+        // The scans block until released, so these deadlines can only expire:
+        // their length decides nothing.
         #expect(await scan.value(within: 0.05) == nil, "nothing has ever finished")
+        #expect(await started.next() == 1)
         #expect(await scan.value(within: 0.05) == nil)
-        #expect(calls.withLock { $0 } == 1, "the second cycle waited on the first scan")
+        #expect(await scan.isScanInFlightForTesting, "the first scan is still the one in flight")
 
         firstGate.signal()
         await scan.waitForInFlight()
+        #expect(!(await scan.isScanInFlightForTesting))
+        #expect(calls.withLock { $0 } == 1, "the second cycle waited on the first scan instead of starting one")
 
         // Next cycle: a new scan starts and blocks, so the late first result
         // is what comes back.
         #expect(await scan.value(within: 0.05) == 1)
-        #expect(calls.withLock { $0 } == 2)
+        #expect(await started.next() == 2, "the next cycle started exactly one new scan")
         secondGate.signal()
+        await scan.waitForInFlight()
+        #expect(calls.withLock { $0 } == 2)
     }
 
     // Fails if every refresh parks another waiter on a hung scan (one leaked

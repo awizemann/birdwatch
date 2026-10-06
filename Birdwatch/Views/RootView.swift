@@ -77,6 +77,11 @@ struct RootView: View {
     var body: some View {
         if !setupComplete {
             OnboardingView(isComplete: $setupComplete)
+        } else if store.iCloudDriveAccess.blocksMainWindow {
+            // Full Disk Access was turned off after setup. The source has
+            // already stopped reading iCloud Drive; this screen says so and
+            // comes back to the app on its own once access returns.
+            FullDiskAccessRequiredView()
         } else {
             mainWindow
         }

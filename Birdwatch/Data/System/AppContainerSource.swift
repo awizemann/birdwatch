@@ -15,7 +15,7 @@ enum AppContainerSource {
 
     /// Root of the ubiquity containers.
     nonisolated static var containersRoot: URL {
-        URL(fileURLWithPath: NSHomeDirectory())
+        URL(fileURLWithPath: UserHome.path)
             .appendingPathComponent("Library/Mobile Documents", isDirectory: true)
     }
 
@@ -198,7 +198,7 @@ enum AppContainerSource {
     /// Directory name of the ubiquity container a path belongs to, if any.
     /// `~/Library/Mobile Documents/<dir>/…` → `<dir>`.
     nonisolated static func containerDirectory(
-        forPath path: String, homeDirectory: String = NSHomeDirectory()
+        forPath path: String, homeDirectory: String = UserHome.path
     ) -> String? {
         let prefix = homeDirectory + "/Library/Mobile Documents/"
         guard path.hasPrefix(prefix) else { return nil }
@@ -210,7 +210,7 @@ enum AppContainerSource {
 
     /// App id a transfer path attributes to, or nil when the caller should fall
     /// back to its own defaults (iCloud Drive / Desktop & Documents).
-    nonisolated static func appID(forPath path: String, homeDirectory: String = NSHomeDirectory()) -> String? {
+    nonisolated static func appID(forPath path: String, homeDirectory: String = UserHome.path) -> String? {
         guard let dir = containerDirectory(forPath: path, homeDirectory: homeDirectory) else { return nil }
         if dir == "com~apple~CloudDocs" { return "icloud-drive" }
         guard let container = makeContainer(directoryName: dir) else { return nil }
@@ -282,7 +282,7 @@ enum AppContainerSource {
     /// 5-minute, single-flight container-size cache), and the blocking walk
     /// runs on its own queue so a hung read never holds a pool thread.
     nonisolated static func localSizes(
-        containers: [Container], homeDirectory: String = NSHomeDirectory(),
+        containers: [Container], homeDirectory: String = UserHome.path,
         includeDesktopDocuments: Bool = false
     ) async -> [String: LocalSize] {
         await BlockingWork.run(on: sizeWalkQueue) {

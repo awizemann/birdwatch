@@ -61,7 +61,7 @@ nonisolated enum RedactedPathResolver {
     static let entryCap = 50_000
 
     static var ubiquityRoot: URL {
-        URL(fileURLWithPath: NSHomeDirectory())
+        URL(fileURLWithPath: UserHome.path)
             .appending(path: "Library/Mobile Documents", directoryHint: .isDirectory)
     }
 
@@ -173,7 +173,7 @@ nonisolated enum RedactedPathResolver {
 
     /// `/Users/x/Library/…` → `~/Library/…`. Never shows the account's short name.
     static func abbreviate(_ path: String) -> String {
-        let home = NSHomeDirectory()
+        let home = UserHome.path
         guard path == home || path.hasPrefix(home + "/") else { return path }
         return "~" + path.dropFirst(home.count)
     }

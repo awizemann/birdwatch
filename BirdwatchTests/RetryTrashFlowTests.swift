@@ -244,7 +244,7 @@ struct RetryTrashFlowTests {
     @Test("A row nothing can move says why, instead of showing a button")
     @MainActor
     func managedRootExplainsItself() {
-        let home = NSHomeDirectory()
+        let home = UserHome.path
         var managed = row(id: "A", path: "\(home)/Library/Mobile Documents/iCloud~com~acme~app/Documents")
         managed.sizeBytes = 0
         managed.itemCount = 0
