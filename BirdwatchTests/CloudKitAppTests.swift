@@ -125,19 +125,27 @@ struct CloudKitLogParserTests {
 struct ProcessRunnerThroughputTests {
 
     /// `log show` emits ~2 MB for a 30-minute CloudKit window. A byte-at-a-time
-    /// drain moved ~73 KB/s and blew the 30s timeout on the real machine, so
-    /// this fails if the chunked drain ever regresses.
-    @Test("A multi-megabyte stdout drains in well under a second")
-    func bulkOutputIsFast() async throws {
-        let runner = ProcessRunner()
-        let start = Date()
-        let out = try await runner.run(
-            toolPath: "/bin/dd",
-            arguments: ["if=/dev/zero", "bs=1048576", "count=4"],
-            timeout: .seconds(10)
-        )
-        #expect(out.utf8.count >= 3 * 1024 * 1024)
-        #expect(Date().timeIntervalSince(start) < 5)
+    /// drain moved ~73 KB/s and blew the 30s timeout on the real machine.
+    ///
+    /// Structural, not timed (C8): the regression is "one byte per delivery",
+    /// so the test counts deliveries. No process is spawned — a writer thread
+    /// fills a pipe and the production drain empties it. A pipe hands over up
+    /// to a whole kernel buffer (KBs) per readability callback; the 512-byte
+    /// average floor sits far below that and far above the regression's 1.
+    @Test("The pipe drain delivers multi-megabyte output in buffer-sized chunks, not bytes")
+    func drainIsChunked() async {
+        let payload = Data(repeating: 0x61, count: 2 * 1024 * 1024)
+        let pipe = Pipe()
+        let writer = pipe.fileHandleForWriting
+        Thread.detachNewThread {
+            writer.write(payload)       // blocks until drained; off the test's executor
+            try? writer.close()
+        }
+        let result = await ProcessRunner.drain(pipe.fileHandleForReading)
+        #expect(result.data == payload, "every byte arrives, in order")
+        #expect(result.chunks > 0)
+        #expect(result.chunks * 512 <= payload.count,
+                "\(result.chunks) deliveries for \(payload.count) bytes — byte-at-a-time drain is back")
     }
 }
 

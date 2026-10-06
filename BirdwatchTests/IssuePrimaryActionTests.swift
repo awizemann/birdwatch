@@ -84,7 +84,7 @@ struct IssuePrimaryActionTests {
 @MainActor
 struct IssueActionEffectTests {
     private func storeWithIssues(_ issues: [IssueItem]) async -> SyncStore {
-        let store = SyncStore(source: StubSyncSource(snapshot: .minimal(issues: issues)))
+        let store = SyncStore(source: StubSyncSource(snapshot: .minimal(issues: issues)), notifier: noBanners)
         await store.refresh(force: true)
         return store
     }

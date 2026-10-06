@@ -9,7 +9,7 @@ import Foundation
 @MainActor
 struct ContentRouteTests {
     private func store(paused: Bool, loaded: Bool) async -> SyncStore {
-        let store = SyncStore(source: StubSyncSource(snapshot: .minimal()))
+        let store = SyncStore(source: StubSyncSource(snapshot: .minimal()), notifier: noBanners)
         if loaded { await store.refresh(force: true) }
         if paused { store.togglePauseAll() }
         return store

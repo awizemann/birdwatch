@@ -28,11 +28,25 @@ enum ConflictSource {
 
     // MARK: - Detection
 
+    /// nil when the scan could not look at all (the root is missing or
+    /// unreadable — e.g. no Full Disk Access). That is NOT "no conflicts":
+    /// callers must not treat it as a successful, empty result. Per-item
+    /// failures are tolerated and still count as a scan.
+    ///
+    /// The coordinated read deliberately omits `.immediatelyAvailableMetadataOnly`:
+    /// NSFileCoordinator.h says that option grants the read "instead of
+    /// waiting for … additional metadata like conflicting versions" — the
+    /// exact metadata this scan exists to read.
     @concurrent nonisolated static func findConflicts(
         root: URL = URL(fileURLWithPath: NSHomeDirectory())
             .appending(path: "Library/Mobile Documents/com~apple~CloudDocs")
-    ) async -> [FoundConflict] {
+    ) async -> [FoundConflict]? {
         let fm = FileManager.default
+        guard (try? root.checkResourceIsReachable()) == true else {
+            logger.warning("conflict scan: root is not reachable \(root.path, privacy: .private)")
+            return nil
+        }
+        var rootUnreadable = false
         guard let enumerator = fm.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -40,11 +54,13 @@ enum ConflictSource {
             errorHandler: { url, error in
                 let ns = error as NSError
                 logger.warning("conflict scan: cannot read \(url.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
+                // Runs synchronously inside nextObject() on this thread.
+                if url.standardizedFileURL == root.standardizedFileURL { rootUnreadable = true }
                 return true   // one bad URL never aborts the scan
             }
         ) else {
             logger.warning("conflict scan: cannot enumerate \(root.path, privacy: .private)")
-            return []
+            return nil
         }
 
         var visited = 0
@@ -70,7 +86,7 @@ enum ConflictSource {
                 continue
             }
         }
-        return found
+        return rootUnreadable ? nil : found
     }
 
     /// `NSFileVersion.unresolvedConflictVersionsOfItem` inside a coordinated
@@ -204,43 +220,67 @@ enum ConflictSource {
     /// - a conflict version id: that version replaces the on-disk file first,
     ///   then other versions are removed and all are marked resolved.
     /// - `keepBothVersionID`: each conflict version is duplicated alongside as
-    ///   "<name> (conflicted copy)" before removal, so no bytes are lost. A
-    ///   copy that fails is logged and skipped — one unreadable version never
-    ///   aborts preservation of the others.
+    ///   "<name> (conflicted copy)" before removal, so no bytes are lost. If ANY
+    ///   copy fails, resolution stops and reports failure before anything is
+    ///   removed or marked resolved — a version that was not preserved is never
+    ///   deleted. Copies already made stay (they are the user's bytes too), so
+    ///   a retry can leave an extra copy, never a missing version.
     ///
     /// Every mutation runs inside an `NSFileCoordinator` coordinated write
     /// (`.forReplacing` when a version replaces the file, `.forMerging` for the
     /// keep-current / keep-both dances) so `bird` cannot be mid-write on the
     /// file we are rewriting.
-    @discardableResult
     ///
-    /// `root` is a pure test seam only: it defaults to the real CloudDocs
-    /// container, so every production call behaves exactly as before.
+    /// `shownVersionIDs` are the versions the user saw when they chose (the
+    /// detail can be minutes old). `root` is a pure test seam only: it
+    /// defaults to the real CloudDocs container.
     @concurrent nonisolated static func resolve(
         fileURL: URL,
         keepVersionID: String,
+        shownVersionIDs: Set<String>,
         root: URL = DriveFolderSource.cloudDocsURL
-    ) async -> Bool {
+    ) async -> ConflictResolveResult {
         // Defense in depth: never mutate anything outside the CloudDocs root.
         guard isUnderCloudDocsRoot(fileURL, root: root) else {
             logger.error("resolve: refusing to mutate a path outside CloudDocs: \(fileURL.path, privacy: .private)")
-            return false
+            return .failed
         }
         do {
             guard let unresolved = try coordinatedUnresolvedVersions(of: fileURL),
                   !unresolved.isEmpty else {
+                // Birdwatch did nothing here, so it must not say "Kept …".
                 logger.info("resolve: no unresolved versions for \(fileURL.path, privacy: .private) — already resolved")
-                return true
+                return .notFound
             }
             return applyResolution(
-                fileURL: fileURL, keepVersionID: keepVersionID, unresolved: unresolved, root: root
+                fileURL: fileURL, keepVersionID: keepVersionID, unresolved: unresolved,
+                shownVersionIDs: shownVersionIDs, root: root
             )
         } catch {
             let ns = error as NSError
             logger.error("resolve failed for \(fileURL.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
-            return false
+            return .failed
         }
     }
+
+    /// Re-probes ONE file and rebuilds its issue + detail — used after
+    /// `.changed`, so the screen can show the versions that exist now
+    /// instead of the scan's minutes-old list. nil when the file has no
+    /// unresolved versions any more (or cannot be read).
+    @concurrent nonisolated static func rescan(fileURL: URL) async -> FoundConflict? {
+        do {
+            guard let conflicts = try coordinatedUnresolvedVersions(of: fileURL), !conflicts.isEmpty else { return nil }
+            return makeFound(fileURL: fileURL, conflicts: conflicts)
+        } catch {
+            let ns = error as NSError
+            logger.warning("conflict rescan: cannot read \(fileURL.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
+    }
+
+    /// Thrown inside the removal write when the re-read finds a version the
+    /// resolution did not cover.
+    private struct UnseenVersionArrived: Error {}
 
     /// The mutating half of `resolve`, split out from the *discovery* of the
     /// unresolved versions so it can be exercised against REAL `NSFileVersion`
@@ -251,54 +291,88 @@ enum ConflictSource {
     ///
     /// Synchronous and `nonisolated`: `NSFileVersion` is not `Sendable`, so
     /// the version list must never cross an isolation boundary.
+    ///
+    /// `claimCopy` is a test seam for the keep-both copy step (so a copy
+    /// failure can be injected); production always uses `claimConflictedCopy`.
+    /// `unresolvedIDsNow` likewise stands in for the last-moment re-read of
+    /// the unresolved versions (nil = could not read them), because only
+    /// iCloud can create a real conflict version.
+    ///
+    /// The SHOWN set is the contract for keep-current / keep-version: those
+    /// choices remove every other version, so every version removed must be
+    /// one the user saw. A version in `unresolved` that is not in
+    /// `shownVersionIDs` (it arrived after the screen loaded) yields
+    /// `.changed` before anything is touched. Keep-both removes nothing it
+    /// has not copied, so it copies whatever is unresolved now.
     nonisolated static func applyResolution(
         fileURL: URL,
         keepVersionID: String,
         unresolved: [NSFileVersion],
-        root: URL = DriveFolderSource.cloudDocsURL
-    ) -> Bool {
+        shownVersionIDs: Set<String>,
+        root: URL = DriveFolderSource.cloudDocsURL,
+        claimCopy: (_ source: URL, _ nextTo: URL) throws -> URL = { try claimConflictedCopy(of: $0, nextTo: $1) },
+        unresolvedIDsNow: (URL) -> Set<String>? = { url in
+            NSFileVersion.unresolvedConflictVersionsOfItem(at: url).map { Set($0.map(versionID(for:))) }
+        }
+    ) -> ConflictResolveResult {
         // Repeated on this path too: it is the one that actually writes, and
         // it is reachable without going through `resolve`.
         guard isUnderCloudDocsRoot(fileURL, root: root) else {
             logger.error("applyResolution: refusing to mutate a path outside CloudDocs: \(fileURL.path, privacy: .private)")
-            return false
+            return .failed
+        }
+        let handled = Set(unresolved.map(versionID(for:)))
+        if keepVersionID != keepBothVersionID, !handled.isSubset(of: shownVersionIDs) {
+            logger.info("resolve: \(fileURL.path, privacy: .private) has a conflict version the user was not shown — not resolving")
+            return .changed
         }
         do {
             switch keepVersionID {
             case currentVersionID:
                 break   // the on-disk file already is the kept version
             case keepBothVersionID:
+                // A failed copy THROWS out to the catch below on purpose: the
+                // removal after this switch deletes every other version,
+                // including one we failed to copy. Leaving the conflict open
+                // loses nothing; "keep going" here used to lose that version.
                 for version in unresolved {
-                    do {
-                        try coordinate(.write(fileURL, options: [.forMerging])) {
-                            let dest = try claimConflictedCopy(of: version.url, nextTo: fileURL)
-                            logger.info("resolve: preserved conflict version as \(dest.lastPathComponent, privacy: .private)")
-                        }
-                    } catch {
-                        // Keep going: preserving the remaining versions is
-                        // strictly better than aborting with some lost.
-                        let ns = error as NSError
-                        logger.error("resolve: could not preserve one conflict version of \(fileURL.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
+                    try coordinate(.write(fileURL, options: [.forMerging])) {
+                        let dest = try claimCopy(version.url, fileURL)
+                        logger.info("resolve: preserved conflict version as \(dest.lastPathComponent, privacy: .private)")
                     }
                 }
             default:
                 guard let winner = unresolved.first(where: { versionID(for: $0) == keepVersionID }) else {
                     logger.error("resolve: no version matching id \(keepVersionID, privacy: .public) for \(fileURL.path, privacy: .private)")
-                    return false
+                    return .failed
                 }
                 try coordinate(.write(fileURL, options: [.forReplacing])) {
                     try winner.replaceItem(at: fileURL)
                 }
             }
             try coordinate(.write(fileURL, options: [.forMerging])) {
+                // Re-read INSIDE the write that removes: a conflict version
+                // that arrived after `unresolved` was read was never shown,
+                // copied or chosen, and removeOtherVersionsOfItem would delete
+                // it. `handled` ⊆ shown for every choice but keep-both, so this
+                // also holds the shown-set contract. A failed re-read aborts too.
+                guard let current = unresolvedIDsNow(fileURL) else {
+                    throw CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "could not re-read the unresolved versions"
+                    ])
+                }
+                guard current.isSubset(of: handled) else { throw UnseenVersionArrived() }
                 try NSFileVersion.removeOtherVersionsOfItem(at: fileURL)
                 for version in unresolved { version.isResolved = true }
             }
-            return true
+            return .resolved
+        } catch is UnseenVersionArrived {
+            logger.info("resolve: a new conflict version of \(fileURL.path, privacy: .private) arrived mid-resolution — stopped before removing any")
+            return .changed
         } catch {
             let ns = error as NSError
             logger.error("resolve failed for \(fileURL.path, privacy: .private): \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
-            return false
+            return .failed
         }
     }
 

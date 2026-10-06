@@ -27,9 +27,11 @@ final class SystemSyncSource: SyncSource {
     // Conflict scan cache: enumerating CloudDocs + NSFileVersion probing is
     // too heavy for every 15s refresh. 5-minute TTL like cachedPermissions.
     @MainActor private var cachedConflicts: (found: [ConflictSource.FoundConflict], at: Date)?
-    // Issue ids the user has already resolved this session. A scan that was
-    // in flight during the resolve would otherwise resurrect the issue when it
-    // lands, so completed scans are filtered against this set before caching.
+    // Issue ids the user resolved while a scan may have been in flight. A scan
+    // that started before the resolve would otherwise resurrect the issue when
+    // it lands, so completed scans are filtered against this set before
+    // caching — and then PRUNED (see `stillSuppressedConflictIDs`), or a new
+    // conflict on the same file (same id) would stay hidden until relaunch.
     @MainActor private var resolvedConflictIDs: Set<String> = []
     // Guarded by MainActor (currentSnapshot always runs on the caller's actor).
     // Cached because the notifications probe races a 1.5s timeout — paying that
@@ -38,6 +40,7 @@ final class SystemSyncSource: SyncSource {
     // up without a relaunch.
     @MainActor private var cachedPermissions: (values: [PermissionStatus], at: Date)?
     @MainActor private var conflictScanInFlight = false
+    @MainActor private var lastConflictScanAttempt: Date?
     // Per-app local footprint (allocated bytes). A deep walk over every
     // container is far too heavy for the 15s cycle, so it NEVER runs on the
     // snapshot path: 5-minute TTL, single-flight, results served from cache and
@@ -153,8 +156,8 @@ final class SystemSyncSource: SyncSource {
         }
 
         let conflicts: [ConflictSource.FoundConflict]
-        let cachedC = await MainActor.run(body: { cachedConflicts })
-        if let cachedC, Date().timeIntervalSince(cachedC.at) < 300 {
+        let cachedC = await MainActor.run(body: { usableConflictCache(now: Date()) })
+        if let cachedC, Date().timeIntervalSince(cachedC.at) < Self.conflictTTL {
             conflicts = cachedC.found
         } else {
             // Never gate paint on the scan (it probes NSFileVersion per file —
@@ -165,19 +168,12 @@ final class SystemSyncSource: SyncSource {
             // two-hop form (read the flag, await, then set it) let two
             // concurrent snapshots both observe `false` and both launch the
             // scan — the guard did not actually guard.
-            let claimed = await MainActor.run { () -> Bool in
-                guard !conflictScanInFlight else { return false }
-                conflictScanInFlight = true
-                return true
-            }
-            if claimed {
+            if let resolvedBeforeScan = await MainActor.run(body: { claimConflictScan(now: Date()) }) {
                 Task { [weak self] in
                     let scanned = await ConflictSource.findConflicts()
                     guard let self else { return }
                     await MainActor.run {
-                        let kept = scanned.filter { !self.resolvedConflictIDs.contains($0.issue.id) }
-                        self.cachedConflicts = (kept, Date())
-                        self.conflictScanInFlight = false
+                        self.completeConflictScan(scanned, resolvedBeforeScan: resolvedBeforeScan)
                     }
                 }
             }
@@ -308,13 +304,24 @@ final class SystemSyncSource: SyncSource {
             cloudKitApps: observedCloudKit
         )
 
+        // Per-producer delivery (see SyncSnapshot.issueProducers). Only a
+        // SUCCESSFUL result counts: quota read, a conflict scan that could
+        // look (failed scans never reach the cache), a dump that parsed
+        // (failed dumps never reach the cache). Each is judged on its own, so
+        // a stalled conflict scan cannot hold back quota or dump alerts.
+        let quotaIssues = Self.deriveIssues(quotaRemaining: quota)
+        var producers: [IssueProducer: Set<String>] = [:]
+        if quota != nil { producers[.quota] = Set(quotaIssues.map(\.id)) }
+        if cachedC != nil { producers[.conflicts] = Set(conflicts.map(\.issue.id)) }
+        if let mapped { producers[.dump] = Set(mapped.issues.map(\.id)) }
+
         return SyncSnapshot(
             apps: apps,
             transfers: transfers,
             driveFolders: folders,
             devices: [],                          // names are permanently redacted by bird
             deviceActivity: mapped?.deviceSummary,
-            issues: Self.deriveIssues(quotaRemaining: quota)
+            issues: quotaIssues
                 + conflicts.map(\.issue)
                 + (mapped?.issues ?? []),
             activity: activity,
@@ -337,7 +344,8 @@ final class SystemSyncSource: SyncSource {
                 )
             },
             quotaRemainingBytes: quota,           // brctl quota — remaining only
-            notifications: []
+            notifications: [],
+            issueProducers: producers
         )
     }
 
@@ -351,24 +359,128 @@ final class SystemSyncSource: SyncSource {
     }
 
     func conflictDetail(issueID: String) async -> ConflictDetail? {
-        await MainActor.run { cachedConflicts?.found.first { $0.issue.id == issueID }?.detail }
+        await MainActor.run { usableConflictCache(now: Date())?.found.first { $0.issue.id == issueID }?.detail }
     }
 
-    func resolveConflict(issueID: String, keepVersionID: String) async {
-        let detail = await MainActor.run { cachedConflicts?.found.first { $0.issue.id == issueID }?.detail }
+    func resolveConflict(issueID: String, keepVersionID: String, shownVersionIDs: Set<String>) async -> ConflictResolveResult {
+        let detail = await MainActor.run { usableConflictCache(now: Date())?.found.first { $0.issue.id == issueID }?.detail }
         guard let fileURL = detail?.fileURL else {
-            logger.error("resolveConflict: no cached conflict for issue \(issueID, privacy: .public)")
-            return
+            // Not "failed": the scan no longer lists it, so a retry can never
+            // succeed and the UI must not suggest one (C1).
+            logger.info("resolveConflict: no cached conflict for issue \(issueID, privacy: .public)")
+            return .notFound
         }
-        if await ConflictSource.resolve(fileURL: fileURL, keepVersionID: keepVersionID) {
-            // Drop it from the cache so the next snapshot stops reporting it
-            // without waiting out the 5-minute scan TTL, and remember the id so
-            // an already-running scan can't put it back.
-            await MainActor.run {
-                resolvedConflictIDs.insert(issueID)
-                cachedConflicts?.found.removeAll { $0.issue.id == issueID }
-            }
+        let result = await ConflictSource.resolve(
+            fileURL: fileURL, keepVersionID: keepVersionID, shownVersionIDs: shownVersionIDs
+        )
+        switch result {
+        case .resolved, .notFound:
+            // notFound here = the file has no unresolved versions left; either
+            // way the cached listing is wrong now.
+            await MainActor.run { markConflictResolved(issueID) }
+        case .changed:
+            // The cached detail is what the user was shown, and it is out of
+            // date. Re-probe this one file so the reloaded screen shows the
+            // versions that exist NOW.
+            let fresh = await ConflictSource.rescan(fileURL: fileURL)
+            await MainActor.run { replaceCachedConflict(issueID, with: fresh) }
+        case .failed, .busy:
+            break   // ConflictSource logged the cause; the conflict stays open
         }
+        return result
+    }
+
+    // MARK: - Conflict scan bookkeeping (MainActor; split out for tests)
+
+    /// A successful scan is trusted for `conflictTTL`; after that a rescan is
+    /// claimed (stale-while-revalidate).
+    static let conflictTTL: TimeInterval = 300
+    /// A failed scan is retried no sooner than this (same idea as `dumpTTL`
+    /// gating on the last ATTEMPT): an unreadable CloudDocs must not be
+    /// re-walked every 15s.
+    static let conflictRetryInterval: TimeInterval = 60
+    /// How long a successful scan may keep being served while rescans fail.
+    /// Past this the list is dropped rather than shown as if current (C1).
+    /// Time-based rather than failure-counted: one comparison, and it bounds
+    /// staleness in the unit the user experiences, whatever the retry pace.
+    static let conflictMaxStaleness: TimeInterval = 900
+
+    /// The conflict cache, or nil — and dropped — once it is older than
+    /// `conflictMaxStaleness`. Every reader goes through here.
+    @MainActor func usableConflictCache(now: Date) -> (found: [ConflictSource.FoundConflict], at: Date)? {
+        if let cached = cachedConflicts, now.timeIntervalSince(cached.at) >= Self.conflictMaxStaleness {
+            logger.info("conflict scan: last good result is \(Int(now.timeIntervalSince(cached.at)), privacy: .public)s old — dropping it")
+            cachedConflicts = nil
+        }
+        return cachedConflicts
+    }
+
+    /// Single-flight claim, test-and-set in ONE MainActor hop (the old two-hop
+    /// form let two snapshots both launch a scan), gated on the last ATTEMPT
+    /// so a failing scan backs off. Returns the ids resolved BEFORE this scan
+    /// starts — the scan sees the file after those, so it is authoritative for
+    /// them — or nil when a scan is running or was attempted too recently.
+    @MainActor func claimConflictScan(now: Date) -> Set<String>? {
+        guard !conflictScanInFlight else { return nil }
+        if let last = lastConflictScanAttempt, now.timeIntervalSince(last) < Self.conflictRetryInterval { return nil }
+        conflictScanInFlight = true
+        lastConflictScanAttempt = now
+        return resolvedConflictIDs
+    }
+
+    /// Lands a finished scan. A FAILED scan (nil) keeps the previous cache
+    /// (bounded by `conflictMaxStaleness`) — "could not look" is not "no
+    /// conflicts", and caching [] would count as the producer's delivery.
+    @MainActor func completeConflictScan(
+        _ scanned: [ConflictSource.FoundConflict]?, resolvedBeforeScan: Set<String>, now: Date = Date()
+    ) {
+        conflictScanInFlight = false
+        guard let scanned else { return }
+        resolvedConflictIDs = Self.stillSuppressedConflictIDs(
+            resolved: resolvedConflictIDs,
+            resolvedBeforeScan: resolvedBeforeScan,
+            listedByScan: Set(scanned.map(\.issue.id))
+        )
+        cachedConflicts = (scanned.filter { !resolvedConflictIDs.contains($0.issue.id) }, now)
+    }
+
+    /// After `.changed`: swap in the single-file rescan (or drop the entry
+    /// when the file has no unresolved versions left).
+    @MainActor func replaceCachedConflict(_ issueID: String, with fresh: ConflictSource.FoundConflict?) {
+        guard var cached = cachedConflicts else { return }
+        if let fresh, let index = cached.found.firstIndex(where: { $0.issue.id == issueID }) {
+            cached.found[index] = fresh
+        } else {
+            cached.found.removeAll { $0.issue.id == issueID }
+        }
+        cachedConflicts = cached
+    }
+
+    /// After a successful resolve: drop it from the cache so the next snapshot
+    /// stops reporting it without waiting out the 5-minute TTL, and remember
+    /// the id so an already-running scan can't put it back.
+    @MainActor func markConflictResolved(_ issueID: String) {
+        resolvedConflictIDs.insert(issueID)
+        cachedConflicts?.found.removeAll { $0.issue.id == issueID }
+    }
+
+    /// Which resolved ids must stay hidden after a scan lands. Pure and static
+    /// so the rule is testable without a scan.
+    ///
+    /// An id stays suppressed only when BOTH hold:
+    /// - it was resolved while this scan was running (not in
+    ///   `resolvedBeforeScan`) — the scan may have probed the file before the
+    ///   resolve, so its listing can be stale; and
+    /// - the scan still lists it — otherwise there is nothing to hide.
+    ///
+    /// Everything else is dropped. In particular an id resolved BEFORE the scan
+    /// started is dropped even when the scan lists it: that scan saw the file
+    /// after the resolve, so a listing is a genuinely new (or still open)
+    /// conflict on the same file, and hiding it would last until relaunch.
+    nonisolated static func stillSuppressedConflictIDs(
+        resolved: Set<String>, resolvedBeforeScan: Set<String>, listedByScan: Set<String>
+    ) -> Set<String> {
+        resolved.subtracting(resolvedBeforeScan).intersection(listedByScan)
     }
 
     /// Drops a retry-queue row whose file was moved to the Trash, and makes the

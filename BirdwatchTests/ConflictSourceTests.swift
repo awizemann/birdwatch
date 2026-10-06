@@ -52,6 +52,11 @@ struct ConflictResolutionTests {
         return try NSFileVersion.addOfItem(at: file, withContentsOf: donor)
     }
 
+    /// The ids a screen would have shown for these versions (plus "current").
+    private func ids(_ versions: NSFileVersion...) -> Set<String> {
+        Set(versions.map(ConflictSource.versionID(for:))).union([ConflictSource.currentVersionID])
+    }
+
     // MARK: - conflictedCopyURL numbering
 
     // Pins the numbering sequence actually implemented: the FIRST copy carries
@@ -180,7 +185,7 @@ struct ConflictResolutionTests {
     // single byte. Fails if resolve ever starts mutating (replaceItem /
     // removeOtherVersions / copy) before confirming there is a conflict to
     // resolve — the exact regression that could destroy user data.
-    @Test("resolve on a file with no conflicts succeeds and leaves the bytes untouched",
+    @Test("resolve on a file with no conflicts reports notFound and leaves the bytes untouched",
           arguments: [ConflictSource.currentVersionID,
                       ConflictSource.keepBothVersionID,
                       "version-deadbeef"])
@@ -192,9 +197,11 @@ struct ConflictResolutionTests {
         // `root:` is a pure test seam; production callers use the real
         // CloudDocs container. Here it makes the scratch dir the allowed root.
         let ok = await ConflictSource.resolve(
-            fileURL: file, keepVersionID: keepVersionID, root: scratch.url
+            fileURL: file, keepVersionID: keepVersionID, shownVersionIDs: [], root: scratch.url
         )
-        #expect(ok, "nothing to resolve is success, not failure")
+        // Birdwatch did nothing, so the UI must not announce "Kept …": the
+        // honest answer is "no longer reported".
+        #expect(ok == .notFound)
 
         let after = try Data(contentsOf: file)
         #expect(before == after, "resolve must not rewrite a file it had no conflict for")
@@ -215,9 +222,9 @@ struct ConflictResolutionTests {
         let before = try Data(contentsOf: file)
 
         let ok = await ConflictSource.resolve(
-            fileURL: file, keepVersionID: ConflictSource.currentVersionID, root: scratch.url
+            fileURL: file, keepVersionID: ConflictSource.currentVersionID, shownVersionIDs: [], root: scratch.url
         )
-        #expect(!ok)
+        #expect(ok == .failed)
         #expect(try Data(contentsOf: file) == before)
     }
 
@@ -239,11 +246,11 @@ struct ConflictResolutionTests {
         let ok = ConflictSource.applyResolution(
             fileURL: file,
             keepVersionID: ConflictSource.versionID(for: winner),
-            unresolved: [loser, winner],
+            unresolved: [loser, winner], shownVersionIDs: ids(loser, winner),
             root: scratch.url
         )
 
-        #expect(ok)
+        #expect(ok == .resolved)
         #expect(try scratch.read("Doc.txt") == "from Mac B",
                 "the chosen version's bytes really replaced the file")
         #expect(NSFileVersion.otherVersionsOfItem(at: file)?.isEmpty == true,
@@ -262,10 +269,10 @@ struct ConflictResolutionTests {
 
         let ok = ConflictSource.applyResolution(
             fileURL: file, keepVersionID: "version-notmine",
-            unresolved: [version], root: scratch.url
+            unresolved: [version], shownVersionIDs: ids(version), root: scratch.url
         )
 
-        #expect(!ok)
+        #expect(ok == .failed)
         #expect(try scratch.read("Doc.txt") == "current bytes")
         #expect(NSFileVersion.otherVersionsOfItem(at: file)?.count == 1,
                 "a refused resolution must not remove versions")
@@ -283,10 +290,10 @@ struct ConflictResolutionTests {
 
         let ok = ConflictSource.applyResolution(
             fileURL: file, keepVersionID: ConflictSource.keepBothVersionID,
-            unresolved: [a, b], root: scratch.url
+            unresolved: [a, b], shownVersionIDs: ids(a, b), root: scratch.url
         )
 
-        #expect(ok)
+        #expect(ok == .resolved)
         #expect(try scratch.read("Doc.txt") == "current bytes", "keep-both never rewrites the original")
         #expect(try scratch.names() == ["Doc (conflicted copy 2).txt", "Doc (conflicted copy).txt", "Doc.txt"])
         // Both versions survived, under distinct names, with their own bytes.
@@ -314,15 +321,120 @@ struct ConflictResolutionTests {
 
         let ok = ConflictSource.applyResolution(
             fileURL: file, keepVersionID: ConflictSource.keepBothVersionID,
-            unresolved: [a, b], root: scratch.url
+            unresolved: [a, b], shownVersionIDs: ids(a, b), root: scratch.url
         )
 
-        #expect(ok)
+        #expect(ok == .resolved)
         let preserved = Set([try scratch.read("Doc (conflicted copy 2).txt"),
                              try scratch.read("Doc (conflicted copy 3).txt")])
         #expect(preserved == ["from Mac A", "from Mac B"],
                 "both versions preserved: the occupied name is skipped, not lost")
         #expect(try scratch.names().allSatisfy { !$0.hasPrefix(".bw-conflicted-copy-") })
+    }
+
+    // keep-both when one copy FAILS: the pre-fix loop logged the failure, kept
+    // going, and then removeOtherVersionsOfItem deleted the version it never
+    // copied — and reported success. FAILS on the old behavior (ok == true,
+    // the version store empty). The failure is injected for the SECOND
+    // version so the test also pins that an earlier, successful copy stays.
+    @Test("keep-both stops on a failed copy: nothing is removed or resolved, and it reports failure")
+    func keepBothCopyFailureLosesNothing() throws {
+        let scratch = Scratch()
+        let file = scratch.write("Doc.txt", "current bytes")
+        let a = try addVersion(to: file, contents: "from Mac A", scratch: scratch)
+        let b = try addVersion(to: file, contents: "from Mac B", scratch: scratch)
+        struct InjectedCopyFailure: Error {}
+
+        let ok = ConflictSource.applyResolution(
+            fileURL: file, keepVersionID: ConflictSource.keepBothVersionID,
+            unresolved: [a, b], shownVersionIDs: ids(a, b), root: scratch.url,
+            claimCopy: { source, nextTo in
+                guard source != b.url else { throw InjectedCopyFailure() }
+                return try ConflictSource.claimConflictedCopy(of: source, nextTo: nextTo)
+            }
+        )
+
+        #expect(ok == .failed, "a resolution that could not preserve every version must say so")
+        #expect(NSFileVersion.otherVersionsOfItem(at: file)?.count == 2,
+                "the uncopied version (and every other) is still in the version store")
+        #expect(try scratch.read("Doc.txt") == "current bytes")
+        #expect(try scratch.names() == ["Doc (conflicted copy).txt", "Doc.txt"],
+                "the copy that did succeed stays — it is the user's bytes")
+        #expect(try scratch.read("Doc (conflicted copy).txt") == "from Mac A")
+    }
+
+    // A conflict version that lands between the unresolved read and the
+    // removal was never shown, chosen or copied; removeOtherVersionsOfItem
+    // would delete it. Only iCloud can mint a real conflict version, so the
+    // last-moment re-read is injected: it reports one id we did not handle.
+    @Test("A conflict version arriving mid-resolution aborts before anything is removed",
+          arguments: [ConflictSource.currentVersionID, ConflictSource.keepBothVersionID])
+    func newVersionDuringResolutionAborts(keepVersionID: String) throws {
+        let scratch = Scratch()
+        let file = scratch.write("Doc.txt", "current bytes")
+        let a = try addVersion(to: file, contents: "from Mac A", scratch: scratch)
+
+        let ok = ConflictSource.applyResolution(
+            fileURL: file, keepVersionID: keepVersionID,
+            unresolved: [a], shownVersionIDs: ids(a), root: scratch.url,
+            unresolvedIDsNow: { _ in [ConflictSource.versionID(for: a), "version-arrived-late"] }
+        )
+
+        #expect(ok == .changed, "the screen must reload, not offer a blind retry")
+        #expect(NSFileVersion.otherVersionsOfItem(at: file)?.count == 1, "nothing was removed")
+        #expect(try scratch.read("Doc.txt") == "current bytes")
+    }
+
+    // The re-review's data-loss case: the screen showed {current, A}; B
+    // arrived later; the user clicked "Keep current". The click-time read is
+    // {A, B}, and removeOtherVersionsOfItem would delete B, which the user
+    // never saw. The old code compared nothing against what was shown and
+    // resolved (B gone). Keep-version follows the same rule; keep-both,
+    // which removes nothing it has not copied, still copies everything.
+    @Test("Keep-current / keep-version refuse when a version the user was not shown is unresolved",
+          arguments: [ConflictSource.currentVersionID, "winner"])
+    func unseenVersionAtClickTimeIsRefused(choice: String) throws {
+        let scratch = Scratch()
+        let file = scratch.write("Doc.txt", "current bytes")
+        let a = try addVersion(to: file, contents: "from Mac A (shown)", scratch: scratch)
+        let b = try addVersion(to: file, contents: "from Mac B (never shown)", scratch: scratch)
+        let keep = choice == "winner" ? ConflictSource.versionID(for: a) : choice
+
+        let ok = ConflictSource.applyResolution(
+            fileURL: file, keepVersionID: keep,
+            unresolved: [a, b],
+            shownVersionIDs: [ConflictSource.currentVersionID, ConflictSource.versionID(for: a)],
+            root: scratch.url
+        )
+
+        #expect(ok == .changed)
+        #expect(NSFileVersion.otherVersionsOfItem(at: file)?.count == 2, "B — and A — are still there")
+        #expect(try scratch.read("Doc.txt") == "current bytes", "nothing was replaced either")
+    }
+
+    // An unreadable re-read is not "nothing new": it aborts too.
+    @Test("An unreadable last-moment re-read aborts the removal")
+    func unreadableRecheckAborts() throws {
+        let scratch = Scratch()
+        let file = scratch.write("Doc.txt", "current bytes")
+        let a = try addVersion(to: file, contents: "from Mac A", scratch: scratch)
+        let ok = ConflictSource.applyResolution(
+            fileURL: file, keepVersionID: ConflictSource.currentVersionID,
+            unresolved: [a], shownVersionIDs: ids(a), root: scratch.url, unresolvedIDsNow: { _ in nil }
+        )
+        #expect(ok == .failed)
+        #expect(NSFileVersion.otherVersionsOfItem(at: file)?.count == 1)
+    }
+
+    // A scan that could not look must say so (nil), never claim "no
+    // conflicts" ([]) — the store would take [] as the producer's first
+    // successful delivery. An empty but readable root really is [].
+    @Test("findConflicts: nil for an unreachable root, [] for a readable empty one")
+    func findConflictsFailureIsNotEmpty() async {
+        let scratch = Scratch()
+        #expect(await ConflictSource.findConflicts(root: scratch.url.appending(path: "missing")) == nil)
+        let empty = await ConflictSource.findConflicts(root: scratch.url)
+        #expect(empty?.isEmpty == true)
     }
 
     // The containment guard also protects the direct mutating entry point.
@@ -335,10 +447,10 @@ struct ConflictResolutionTests {
 
         let ok = ConflictSource.applyResolution(
             fileURL: file, keepVersionID: ConflictSource.versionID(for: version),
-            unresolved: [version], root: scratch.url
+            unresolved: [version], shownVersionIDs: ids(version), root: scratch.url
         )
 
-        #expect(!ok)
+        #expect(ok == .failed)
         #expect(try outside.read("Doc.txt") == "do not touch")
     }
 

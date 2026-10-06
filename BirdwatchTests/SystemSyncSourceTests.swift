@@ -180,6 +180,117 @@ struct SystemSyncSourceAssemblyTests {
         #expect(issue.appID == nil)
     }
 
+    // MARK: - Resolved-conflict suppression
+
+    // The old set was never pruned: once a file's conflict was resolved, a NEW
+    // conflict on that file (same path → same id) stayed hidden until relaunch.
+    @Test("A resolve before the scan started never hides that scan's listing; one during the scan does, once")
+    func resolvedConflictPruning() {
+        // Resolved before this scan began: the scan saw the file afterwards,
+        // so a listing is a new conflict and must show.
+        #expect(SystemSyncSource.stillSuppressedConflictIDs(
+            resolved: ["conflict-a"], resolvedBeforeScan: ["conflict-a"], listedByScan: ["conflict-a"]
+        ).isEmpty)
+        // Resolved while the scan ran and still listed: the listing may predate
+        // the resolve, so it stays hidden — for this scan only.
+        #expect(SystemSyncSource.stillSuppressedConflictIDs(
+            resolved: ["conflict-b"], resolvedBeforeScan: [], listedByScan: ["conflict-b"]
+        ) == ["conflict-b"])
+        // The next scan started after that resolve, so it is authoritative.
+        #expect(SystemSyncSource.stillSuppressedConflictIDs(
+            resolved: ["conflict-b"], resolvedBeforeScan: ["conflict-b"], listedByScan: ["conflict-b"]
+        ).isEmpty)
+        // Not listed: nothing to hide, nothing to remember.
+        #expect(SystemSyncSource.stillSuppressedConflictIDs(
+            resolved: ["conflict-c"], resolvedBeforeScan: [], listedByScan: []
+        ).isEmpty)
+    }
+
+    // The wiring around that rule: the claim must capture the resolved set AT
+    // CLAIM TIME, and completion must use the captured set, not the live one.
+    // Drives the real claim/complete/mark methods; no scan, no file system
+    // (constructing SystemSyncSource does no I/O).
+    @Test("The scan claim captures resolves made before it; completion hides only those made during it")
+    func resolvedBeforeScanWiring() async {
+        func found(_ id: String) -> ConflictSource.FoundConflict {
+            ConflictSource.FoundConflict(
+                issue: TestIssues.make(id: id, action: .reviewVersions, severity: .conflict),
+                detail: ConflictDetail(fileName: id, location: "", versions: [])
+            )
+        }
+        let source = SystemSyncSource()
+        let t0 = Date()
+
+        source.markConflictResolved("conflict-before")
+        let captured = source.claimConflictScan(now: t0)
+        #expect(captured == ["conflict-before"])
+        #expect(source.claimConflictScan(now: t0) == nil, "single-flight: a second claim is refused")
+        source.markConflictResolved("conflict-during")    // resolved while the scan runs
+        source.completeConflictScan([found("conflict-before"), found("conflict-during")],
+                                    resolvedBeforeScan: captured ?? [])
+
+        #expect(await source.conflictDetail(issueID: "conflict-before") != nil,
+                "resolved before the scan began: its listing is a new conflict and shows")
+        #expect(await source.conflictDetail(issueID: "conflict-during") == nil,
+                "resolved during the scan: the listing may be stale, so it stays hidden")
+
+        // The next scan began after that resolve, so it is authoritative.
+        let next = source.claimConflictScan(now: t0 + SystemSyncSource.conflictRetryInterval)
+        source.completeConflictScan([found("conflict-during")], resolvedBeforeScan: next ?? [])
+        #expect(await source.conflictDetail(issueID: "conflict-during") != nil)
+    }
+
+    // A scan that could not look (nil) is not "no conflicts": it must not
+    // replace the cache, or it would count as the producer's first delivery.
+    @Test("A failed conflict scan keeps the previous cache and frees the claim")
+    func failedScanKeepsCache() async {
+        let source = SystemSyncSource()
+        let t0 = Date()
+        let retry = SystemSyncSource.conflictRetryInterval
+        let first = source.claimConflictScan(now: t0)
+        source.completeConflictScan([ConflictSource.FoundConflict(
+            issue: TestIssues.make(id: "conflict-a", action: .reviewVersions, severity: .conflict),
+            detail: ConflictDetail(fileName: "a", location: "", versions: [])
+        )], resolvedBeforeScan: first ?? [])
+        let second = source.claimConflictScan(now: t0 + retry)
+        source.completeConflictScan(nil, resolvedBeforeScan: second ?? [])
+        #expect(await source.conflictDetail(issueID: "conflict-a") != nil)
+        #expect(source.claimConflictScan(now: t0 + 2 * retry) != nil, "a failed scan still releases single-flight")
+    }
+
+    // A failing scan used to be re-walked on every 15s snapshot: the claim
+    // never looked at when the last attempt was.
+    @Test("A failed scan is not retried before the retry interval")
+    func failedScanBacksOff() {
+        let source = SystemSyncSource()
+        let t0 = Date()
+        let retry = SystemSyncSource.conflictRetryInterval
+        let claimed = source.claimConflictScan(now: t0)
+        #expect(claimed != nil)
+        source.completeConflictScan(nil, resolvedBeforeScan: claimed ?? [])
+        #expect(source.claimConflictScan(now: t0 + 15) == nil, "the next 15s snapshot must not rescan")
+        #expect(source.claimConflictScan(now: t0 + retry - 1) == nil)
+        #expect(source.claimConflictScan(now: t0 + retry) != nil)
+    }
+
+    // After one good scan, failing rescans used to serve that list forever as
+    // if it were current (C1). It is dropped once older than the bound.
+    @Test("A good conflict list stops being served once it is older than the staleness bound")
+    func staleConflictListAgesOut() async {
+        let source = SystemSyncSource()
+        let scanned = Date()
+        let claimed = source.claimConflictScan(now: scanned)
+        source.completeConflictScan([ConflictSource.FoundConflict(
+            issue: TestIssues.make(id: "conflict-a", action: .reviewVersions, severity: .conflict),
+            detail: ConflictDetail(fileName: "a", location: "", versions: [])
+        )], resolvedBeforeScan: claimed ?? [], now: scanned)
+
+        let bound = SystemSyncSource.conflictMaxStaleness
+        #expect(source.usableConflictCache(now: scanned + bound - 1) != nil, "inside the bound it is still served")
+        #expect(source.usableConflictCache(now: scanned + bound) == nil, "past it, it is gone — not shown as current")
+        #expect(await source.conflictDetail(issueID: "conflict-a") == nil, "every reader sees the drop")
+    }
+
     // MARK: - engineInfo
 
     // Fails if a missing brctl status is ever rendered as a healthy engine —

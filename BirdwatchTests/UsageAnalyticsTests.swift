@@ -36,7 +36,7 @@ private func makeStore(
     snapshot: SyncSnapshot = .minimal(),
     tracker: RecordingUsageTracker = RecordingUsageTracker()
 ) -> (SyncStore, RecordingUsageTracker) {
-    (SyncStore(source: StubSyncSource(snapshot: snapshot), defaults: throwawayDefaults(), usage: tracker), tracker)
+    (SyncStore(source: StubSyncSource(snapshot: snapshot), notifier: noBanners, defaults: throwawayDefaults(), usage: tracker), tracker)
 }
 
 /// Every event case, one instance each. The wire tests iterate this list.
@@ -219,6 +219,7 @@ struct UsageStoreHookTests {
         let app = AppSyncState.stub(id: "photos", status: .upToDate)
         let (store, tracker) = makeStore(snapshot: .minimal(apps: [app]))
         await store.refresh(force: true)
+        await store.applicationDidBecomeActive()
         store.searchText = "pho"
         store.open(.app(id: "photos"))
         let events = tracker.events
@@ -233,8 +234,10 @@ struct UsageStoreHookTests {
     @Test("snapshot_health and the launch view_shown fire once per launch, not per refresh")
     func healthOnce() async {
         let (store, tracker) = makeStore()
+        await store.applicationDidBecomeActive()
         await store.refresh(force: true)
         await store.refresh(force: true)
+        await store.applicationDidBecomeActive()         // a later activation re-sends nothing
         store.togglePauseAll()
         let events = tracker.events
         #expect(events == [
@@ -250,6 +253,7 @@ struct UsageStoreHookTests {
         let issue = TestIssues.make(id: "i1", action: .none, title: "", symbolName: "")
         let (store, tracker) = makeStore(snapshot: .minimal(apps: [app], issues: [issue]))
         await store.refresh(force: true)
+        await store.applicationDidBecomeActive()
         store.togglePauseAll()
         store.togglePauseAll()
         store.toggleMute(appID: "notes")
@@ -263,6 +267,31 @@ struct UsageStoreHookTests {
             .issueDismissed(severity: .warning),
             .conflictResolved(keptCurrent: true),
         ])
+    }
+
+    // An unattended login-item launch: snapshots land, nobody ever activates
+    // the app. Fails on the old store, which recorded view_shown(.launch) +
+    // snapshot_health right after the first snapshot — and swift-stats opens
+    // a session on any captured event.
+    @Test("Launch events are held until a real activation, then sent exactly once and after it")
+    func launchEventsWaitForActivation() async {
+        let (store, tracker) = makeStore()
+        await store.refresh(force: true)
+        await store.refresh(force: true)
+        #expect(tracker.calls.isEmpty, "an unattended launch records nothing: got \(tracker.calls)")
+
+        await store.applicationDidBecomeActive()
+        #expect(tracker.calls == ["didBecomeActive", "view_shown", "snapshot_health"], "got \(tracker.calls)")
+        #expect(tracker.events.first == .viewShown(.overview, via: .launch))
+    }
+
+    @Test("Opening the popover before any activation releases the launch events ahead of menubar_opened")
+    func menuBarReleasesLaunchEvents() async {
+        let (store, tracker) = makeStore()
+        await store.refresh(force: true)
+        await store.menuBarOpened()
+        #expect(tracker.calls == ["didBecomeActive", "view_shown", "snapshot_health", "menubar_opened"],
+                "got \(tracker.calls)")
     }
 
     @Test("Opening the menu-bar popover activates the session before recording the open")

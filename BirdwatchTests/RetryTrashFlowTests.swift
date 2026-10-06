@@ -105,7 +105,7 @@ struct RetryTrashFlowTests {
         snapshot.retryQueue = [row(id: "A"), row(id: "B")]
         snapshot.retryQueueTotal = 7
         let source = RecordingSource(snapshot: snapshot)
-        let store = SyncStore(source: source, defaults: throwawayDefaults())
+        let store = SyncStore(source: source, notifier: noBanners, defaults: throwawayDefaults())
         await store.refresh(force: true)
         source.log.removeAll()
 
@@ -146,7 +146,7 @@ struct RetryTrashFlowTests {
         // Deliberately does NOT drop the row on forget — this is the source
         // still reporting the item, exactly as bird does until it re-scans.
         source.forgetIsANoOp = true
-        let store = SyncStore(source: source, defaults: throwawayDefaults())
+        let store = SyncStore(source: source, notifier: noBanners, defaults: throwawayDefaults())
         await store.refresh(force: true)
 
         let outcome = await store.trashRetryQueueItem(store.retryQueue[1]) { _ in "~/.Trash/Folder" }
@@ -178,7 +178,7 @@ struct RetryTrashFlowTests {
         snapshot.retryQueue = [row(id: "A")]
         snapshot.retryQueueTotal = 1
         let source = RecordingSource(snapshot: snapshot)
-        let store = SyncStore(source: source, defaults: throwawayDefaults())
+        let store = SyncStore(source: source, notifier: noBanners, defaults: throwawayDefaults())
         await store.refresh(force: true)
         source.log.removeAll()
 
@@ -205,7 +205,7 @@ struct RetryTrashFlowTests {
         var snapshot = SyncSnapshot.minimal()
         snapshot.retryQueue = [row(id: "A", path: nil)]
         let source = RecordingSource(snapshot: snapshot)
-        let store = SyncStore(source: source, defaults: throwawayDefaults())
+        let store = SyncStore(source: source, notifier: noBanners, defaults: throwawayDefaults())
         await store.refresh(force: true)
 
         var asked = false

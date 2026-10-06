@@ -92,8 +92,8 @@ actor ProcessRunner: ProcessRunning {
         timeout: Duration
     ) async throws -> String {
         return try await withThrowingTaskGroup(of: Piece.self) { group in
-            group.addTask { .stdout(try await Self.drain(box.stdout)) }
-            group.addTask { .stderr(try await Self.drain(box.stderr)) }
+            group.addTask { .stdout(await Self.drain(box.stdout).data) }
+            group.addTask { .stderr(await Self.drain(box.stderr).data) }
             group.addTask {
                 for await code in exitStream { return .exit(code) }
                 return .exit(-1)
@@ -167,7 +167,12 @@ actor ProcessRunner: ProcessRunning {
     /// measured ~73 KB/s — a 2 MB `log show` took 29s and blew every timeout.
     /// `readabilityHandler` delivers whole buffers instead. The handler is
     /// built in this nonisolated static helper because it fires off-main.
-    private nonisolated static func drain(_ handle: FileHandle) async throws -> Data {
+    ///
+    /// Also reports how many chunks delivered the bytes. `run` discards the
+    /// count; tests call THIS function (the one `run` uses, not a copy) and
+    /// assert on it — a byte-at-a-time regression shows up as one chunk per
+    /// byte, whatever the machine's speed.
+    nonisolated static func drain(_ handle: FileHandle) async -> (data: Data, chunks: Int) {
         let chunks = AsyncStream<Data> { continuation in
             handle.readabilityHandler = { readable in
                 let chunk = readable.availableData
@@ -181,9 +186,11 @@ actor ProcessRunner: ProcessRunning {
             continuation.onTermination = { _ in handle.readabilityHandler = nil }
         }
         var data = Data()
+        var count = 0
         for await chunk in chunks {
+            count += 1
             if data.count < maxCapturedBytes { data.append(chunk) }
         }
-        return data
+        return (data, count)
     }
 }

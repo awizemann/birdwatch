@@ -425,7 +425,7 @@ struct PlanCapPersistenceTests {
         )
         snapshot.quotaRemainingBytes = 100_000_000_000
         let source = StubSyncSource(snapshot: snapshot)
-        return (SyncStore(source: source, defaults: defaults), defaults, source)
+        return (SyncStore(source: source, notifier: noBanners, defaults: defaults), defaults, source)
     }
 
     @Test("A confirmed plan overrides the derived cap and survives the next snapshot")

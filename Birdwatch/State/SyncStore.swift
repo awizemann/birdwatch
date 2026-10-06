@@ -117,8 +117,9 @@ final class SyncStore {
 
     private let source: any SyncSource
     private let now: () -> Date     // injected for deterministic debounce tests
-    /// System-banner sink (title, body, id). Injected so tests can record
-    /// instead of posting real user notifications.
+    /// System-banner sink (title, body, id). Deliberately NOT defaulted: every
+    /// construction says where banners go, so a test cannot post a real user
+    /// notification by forgetting an argument. The app passes `SystemNotifier`.
     private let notifier: (String, String, String) -> Void
     /// Injected so plan-cap tests use a throwaway suite instead of the user's.
     private let defaults: UserDefaults
@@ -136,9 +137,7 @@ final class SyncStore {
     init(
         source: any SyncSource,
         now: @escaping () -> Date = { Date() },
-        notifier: @escaping (String, String, String) -> Void = { title, body, id in
-            SystemNotifier.post(title: title, body: body, id: id)
-        },
+        notifier: @escaping (String, String, String) -> Void,
         defaults: UserDefaults = .standard,
         usage: any UsageTracking = NoopUsageTracker()
     ) {
@@ -157,13 +156,35 @@ final class SyncStore {
         usage.record(event)
     }
 
-    /// The popover can open without the app ever becoming active, so opening
-    /// it is itself the "a person is here" signal: start (or continue) the
-    /// session first — idempotent within a session — then record the open,
-    /// so `menubar_opened` lands in a session that has its `app_open`.
-    func menuBarOpened() async {
+    /// A person activated the app (NSApplication didBecomeActive, driven by
+    /// `UsageLifecycle`). Starts or continues the session — idempotent within
+    /// one — and releases the launch events if the first snapshot is in.
+    func applicationDidBecomeActive() async {
         await usage.applicationDidBecomeActive()
+        hasActivated = true
+        recordLaunchEventsIfDue()
+    }
+
+    /// The popover can open without the app ever becoming active, so opening
+    /// it is itself the "a person is here" signal: activate first, then record
+    /// the open, so `menubar_opened` lands in a session that has its `app_open`.
+    func menuBarOpened() async {
+        await applicationDidBecomeActive()
         record(.menubarOpened(issueCount: issueCount, paused: isGloballyPaused))
+    }
+
+    /// The launch events (`view_shown` via launch + `snapshot_health`) are
+    /// HELD until a person is actually here. Recording them at the first
+    /// snapshot opened a session on every unattended login-item launch —
+    /// swift-stats starts a session on any captured event.
+    private var hasActivated = false
+    /// Set once, when the first snapshot lands; cleared when the events go.
+    private var launchEventsDue = false
+
+    private func recordLaunchEventsIfDue() {
+        guard hasActivated, launchEventsDue else { return }
+        launchEventsDue = false
+        recordSnapshotHealth()
     }
 
     /// Navigation with a known origin, so `view_shown` carries `via`.
@@ -340,10 +361,15 @@ final class SyncStore {
         }
         if !force, let last = lastRefresh, now().timeIntervalSince(last) < 60 { return }
         let task = Task { [source] in
+            self.fetchGeneration += 1
+            let generation = self.fetchGeneration
             let snapshot = await source.currentSnapshot()
-            self.apply(snapshot)
+            self.apply(snapshot, fetchedAt: generation)
             self.lastRefresh = self.now()
-            if !self.hasLoaded { self.recordSnapshotHealth() }
+            if !self.hasLoaded {
+                self.launchEventsDue = true
+                self.recordLaunchEventsIfDue()
+            }
             self.hasLoaded = true
         }
         inFlightRefresh = task
@@ -354,7 +380,8 @@ final class SyncStore {
         if inFlightRefresh == task { inFlightRefresh = nil }
     }
 
-    /// Once per launch, after the first snapshot lands: how much of the world
+    /// Once per launch, once the first snapshot has landed AND the app has
+    /// been activated (whichever comes second): how much of the world
     /// Birdwatch can actually see on this Mac. Counts only, bucketed.
     private func recordSnapshotHealth() {
         // `didSet` does not run for the initial value, so the launch view
@@ -372,14 +399,31 @@ final class SyncStore {
         ))
     }
 
-    private func apply(_ s: SyncSnapshot) {
-        deriveNotifications(oldIssues: issues, newIssues: s.issues, fixtures: s.notifications)
+    private func apply(_ s: SyncSnapshot, fetchedAt generation: Int) {
+        // Presence is tracked on what the SOURCE reports, before suppression.
+        let arrivedIDs = recentIssueIDs.observe(Set(s.issues.map(\.id)))
+        // A dismissed id is released once the source has stopped reporting
+        // it for the whole absence window (same rule as an arrival), so a
+        // genuine recurrence shows again but a one-cycle blip does not.
+        dismissedIssueIDs = dismissedIssueIDs.filter(recentIssueIDs.contains)
+        // A resolved id is hidden only from snapshots whose fetch began before
+        // the resolve finished; later ones come from a source that already
+        // dropped it, so a listing there is a real (re)occurrence.
+        resolvedAtGeneration = resolvedAtGeneration.filter { $0.value >= generation }
+        let visibleIssues = s.issues.filter {
+            !dismissedIssueIDs.contains($0.id) && resolvedAtGeneration[$0.id] == nil
+        }
+        deriveNotifications(
+            arrivals: visibleIssues.filter { arrivedIDs.contains($0.id) },
+            baseline: absorbFirstDeliveries(s),
+            fixtures: s.notifications
+        )
         apps = s.apps
         transfers = s.transfers
         driveFolders = s.driveFolders
         devices = s.devices
         deviceActivity = s.deviceActivity
-        issues = s.issues
+        issues = visibleIssues
         activity = s.activity
         daemons = s.daemons
         // Rows the user has already trashed must not come back on a snapshot
@@ -470,24 +514,74 @@ final class SyncStore {
         )
     }
 
+    // MARK: - Issue arrivals and suppression
+
+    /// Ids the source reported recently — the memory arrivals are judged by.
+    private var recentIssueIDs = RecentIssueIDs()
+    /// Ids the user dismissed. The source keeps reporting a dismissed issue,
+    /// so it is filtered out of every snapshot in `apply` until the source
+    /// stops reporting it — the same pattern as `forgottenRetryIDs`.
+    private var dismissedIssueIDs: Set<String> = []
+    /// Resolved conflict id → the `fetchGeneration` current when the resolve
+    /// finished. Only snapshots fetched at or before that generation can
+    /// still carry it (they started before the source dropped it); anything
+    /// later is authoritative, so the source's own pruning decides — a store
+    /// rule here would hide a genuine quick recurrence.
+    private var resolvedAtGeneration: [String: Int] = [:]
+    /// Bumped as each snapshot fetch starts.
+    private var fetchGeneration = 0
+    /// Issue producers whose first successful delivery has been absorbed.
+    private var baselinedProducers: Set<IssueProducer> = []
+
+    /// Per-producer launch baseline. Returns the ids a producer delivered on
+    /// its FIRST successful result — those existed before Birdwatch looked,
+    /// so they are listed without a banner, whenever that result lands.
+    /// Producers already baselined banner normally, so a slow or failing
+    /// producer can never hold back another's alerts.
+    ///
+    /// Ids no listed producer claims form an implicit `.unclaimed` producer
+    /// (always delivered), so they cannot bypass the baseline.
+    ///
+    /// A producer that STOPS delivering (its stale result aged out, its
+    /// tool started failing) loses its baseline: Birdwatch could not see
+    /// meanwhile, so what it reports on recovery is a fresh baseline, not a
+    /// burst of "new" banners for things that may have been there all along.
+    /// The cost: an issue that first appears exactly on a recovery is listed
+    /// without a banner.
+    private func absorbFirstDeliveries(_ s: SyncSnapshot) -> Set<String> {
+        var delivered = s.issueProducers ?? [.fixture: Set(s.issues.map(\.id))]
+        if s.issueProducers != nil {
+            let claimed = delivered.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+            delivered[.unclaimed] = Set(s.issues.map(\.id)).subtracting(claimed)
+        }
+        baselinedProducers.formIntersection(delivered.keys)
+        var baseline: Set<String> = []
+        for (producer, ids) in delivered where !baselinedProducers.contains(producer) {
+            baselinedProducers.insert(producer)
+            baseline.formUnion(ids)
+        }
+        return baseline
+    }
+
     /// In-app notifications derive from issue arrivals; fixture sources (mock)
     /// supply theirs directly.
     ///
-    /// An issue "arrives" when its id is absent from the PREVIOUS issue list,
-    /// so an issue that resolves and later recurs (conflict/quota ids are
-    /// stable by design) notifies again: any prior notification with the same
-    /// id is REPLACED by a fresh unread one at the top of the list.
+    /// An issue "arrives" when the source has not reported its id recently
+    /// (`RecentIssueIDs`): an issue that resolves and later recurs
+    /// (conflict/quota ids are stable by design) notifies again, and any prior
+    /// notification with the same id is REPLACED by a fresh unread one at the
+    /// top of the list. One that drops out for a cycle or two does not, and
+    /// neither does a producer's launch baseline (`absorbFirstDeliveries`).
     ///
     /// Each arrival also posts a system banner, EXCEPT when the issue is
     /// attributable to an app (`IssueItem.appID` non-nil) that the user has
     /// muted — muted apps still get the in-app row, just no banner.
-    private func deriveNotifications(oldIssues: [IssueItem], newIssues: [IssueItem], fixtures: [AppNotification]) {
+    private func deriveNotifications(arrivals: [IssueItem], baseline: Set<String>, fixtures: [AppNotification]) {
         guard fixtures.isEmpty else {
             notifications = fixtures
             return
         }
-        let known = Set(oldIssues.map(\.id))
-        let arrived = newIssues.filter { !known.contains($0.id) && hasLoaded }
+        let arrived = arrivals.filter { !baseline.contains($0.id) }
         guard !arrived.isEmpty else { return }
         let fresh = arrived.map { issue in
             (issue: issue, notification: AppNotification(
@@ -533,17 +627,68 @@ final class SyncStore {
 
     func dismissIssue(id: String) {
         if let issue = issues.first(where: { $0.id == id }) { record(.issueDismissed(severity: issue.severity)) }
+        dismissedIssueIDs.insert(id)
         issues.removeAll { $0.id == id }
     }
 
+    /// True while a conflict resolution is running. The resolution screen
+    /// disables its Keep buttons on it, and a second call is refused, so one
+    /// conflict can never be resolved twice concurrently.
+    private(set) var isResolvingConflict = false
+
     /// Resolves the conflict at the source (real file ops for the system
-    /// source; no-op for fixtures), then removes the issue and closes the
-    /// screen — any choice resolves and returns.
-    func resolveConflict(issueID: String, keepVersionID: String = ConflictSource.currentVersionID) async {
-        await source.resolveConflict(issueID: issueID, keepVersionID: keepVersionID)
-        record(.conflictResolved(keptCurrent: keepVersionID == ConflictSource.currentVersionID))
-        issues.removeAll { $0.id == issueID }
-        conflictIssueID = nil
+    /// source; trivially succeeds for fixtures). `shownVersionIDs` are the
+    /// versions on the user's screen — the source refuses (`.changed`) to
+    /// remove any version outside them.
+    ///
+    /// - `.resolved`: record, remove the row, close the screen — the screen
+    ///   only if it still shows THIS conflict (the user may have moved on).
+    /// - `.notFound`: the source no longer has it; remove the row so Review
+    ///   cannot loop on it until the next snapshot. Nothing is recorded.
+    /// - `.failed` / `.changed`: the conflict is still open and the row stays.
+    ///   If the user already left its screen, nobody would see the outcome,
+    ///   so it is noted in the notifications panel (no banner: it is the
+    ///   answer to the user's own click, not a new problem).
+    /// - `.busy`: another resolve was running; this one was ignored.
+    @discardableResult
+    func resolveConflict(
+        issueID: String, keepVersionID: String, shownVersionIDs: Set<String>
+    ) async -> ConflictResolveResult {
+        guard !isResolvingConflict else { return .busy }
+        isResolvingConflict = true
+        defer { isResolvingConflict = false }
+        let issue = issues.first { $0.id == issueID }
+        let result = await source.resolveConflict(
+            issueID: issueID, keepVersionID: keepVersionID, shownVersionIDs: shownVersionIDs
+        )
+        switch result {
+        case .resolved, .notFound:
+            if result == .resolved {
+                record(.conflictResolved(keptCurrent: keepVersionID == ConflictSource.currentVersionID))
+            }
+            resolvedAtGeneration[issueID] = fetchGeneration
+            issues.removeAll { $0.id == issueID }
+            if result == .resolved, conflictIssueID == issueID { conflictIssueID = nil }
+        case .failed, .changed:
+            if conflictIssueID != issueID { noteUnseenResolveOutcome(result, issueID: issueID, issue: issue) }
+        case .busy:
+            break
+        }
+        return result
+    }
+
+    /// An in-panel line (unread, no banner) for a resolve outcome the user
+    /// was no longer on screen to see. One row per conflict, replaced.
+    private func noteUnseenResolveOutcome(_ result: ConflictResolveResult, issueID: String, issue: IssueItem?) {
+        let title = result == .changed
+            ? "Conflict not resolved: a new version arrived"
+            : "Couldn't resolve a sync conflict"
+        let id = "notif-unresolved-\(issueID)"
+        let note = AppNotification(
+            id: id, severity: .conflict, title: title,
+            detail: issue?.meta ?? "It is still listed in Issues.", date: now(), isRead: false
+        )
+        notifications = Array(([note] + notifications.filter { $0.id != id }).prefix(50))
     }
 
     /// What a "Move to Trash" on a retry row actually did. Carries the name so
@@ -639,5 +784,35 @@ final class SyncStore {
 
     func conflictDetail(issueID: String) async -> ConflictDetail? {
         await source.conflictDetail(issueID: issueID)
+    }
+}
+
+/// Which issue ids the source reported recently, for arrival detection.
+///
+/// An id is forgotten only after it has been missing from
+/// `absenceThreshold` CONSECUTIVE snapshots. Sources drop issues for a
+/// cycle when one call fails (a single failed `brctl` quota read removes
+/// the low-quota issue), and judging arrivals against only the previous
+/// snapshot turned every such blip into a fresh unread notification and a
+/// banner. The issue LIST still shows the blip — Birdwatch never invents a
+/// value to paper over it (C1); only the alert waits.
+nonisolated struct RecentIssueIDs: Sendable {
+    static let absenceThreshold = 3
+
+    /// id → consecutive snapshots it has been missing (0 = present now).
+    private var missedSnapshots: [String: Int] = [:]
+
+    func contains(_ id: String) -> Bool { missedSnapshots[id] != nil }
+
+    /// Folds one snapshot's ids in and returns the ones not seen recently.
+    mutating func observe(_ present: Set<String>) -> Set<String> {
+        let arrivals = present.filter { missedSnapshots[$0] == nil }
+        var next: [String: Int] = [:]
+        for (id, missed) in missedSnapshots where !present.contains(id) && missed + 1 < Self.absenceThreshold {
+            next[id] = missed + 1
+        }
+        for id in present { next[id] = 0 }
+        missedSnapshots = next
+        return arrivals
     }
 }

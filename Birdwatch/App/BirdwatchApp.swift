@@ -31,11 +31,8 @@ struct BirdwatchApp: App {
     /// 3. **Not `--mock`** — demo/screenshot launches must stay quiet and
     ///    offline.
     private static let updaterEnabled: Bool = {
-        let info = ProcessInfo.processInfo
-        guard info.environment["XCTestConfigurationFilePath"] == nil,
-              info.environment["XCTestSessionIdentifier"] == nil
-        else { return false }
-        guard !info.arguments.contains("--mock") else { return false }
+        guard !isRunningTests else { return false }
+        guard !ProcessInfo.processInfo.arguments.contains("--mock") else { return false }
 
         let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
         guard let key, !key.isEmpty, key != "REPLACE_WITH_PUBLIC_ED_KEY" else {
@@ -60,23 +57,44 @@ struct BirdwatchApp: App {
     /// Allocating it runs no Process and touches no disk (C4).
     @State private var maintenance = MaintenanceActions()
 
+    /// The app is its own test host, so this `init` runs for every test run.
+    private static let isRunningTests: Bool = {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestSessionIdentifier"] != nil
+    }()
+
     init() {
         let usage = UsageAnalytics.makeTracker()
-        _store = State(initialValue: SyncStore(
-            source: ProcessInfo.processInfo.arguments.contains("--mock")
-                ? MockSyncSource() as any SyncSource
-                : SystemSyncSource(),
+        // Under XCTest the host app must be inert: the live source would spawn
+        // brctl / ps / nettop / log, walk iCloud Drive and post real banners
+        // during every test run. Tests build their own stores with stubs.
+        let inert = Self.isRunningTests || ProcessInfo.processInfo.arguments.contains("--mock")
+        let store = SyncStore(
+            source: inert ? MockSyncSource() as any SyncSource : SystemSyncSource(),
+            notifier: { title, body, id in
+                guard !inert else { return }
+                SystemNotifier.post(title: title, body: body, id: id)
+            },
             usage: usage
-        ))
-        usageLifecycle = UsageLifecycle(usage: usage)
+        )
+        _store = State(initialValue: store)
+        usageLifecycle = UsageLifecycle(store: store)
     }
 
     var body: some Scene {
         Window("Birdwatch", id: "main") {
-            RootView()
-                .environment(store)
-                .environment(\.maintenanceActions, maintenance)
-                .frame(minWidth: 900, minHeight: 620)
+            // Under XCTest the host window renders nothing: RootView would
+            // start the 15s poll and OnboardingView's .task polls the real
+            // Full Disk Access probe every 2s. Tests drive views directly.
+            if Self.isRunningTests {
+                EmptyView()
+            } else {
+                RootView()
+                    .environment(store)
+                    .environment(\.maintenanceActions, maintenance)
+                    .frame(minWidth: 900, minHeight: 620)
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .commands { viewCommands }
@@ -162,24 +180,28 @@ struct BirdwatchApp: App {
 /// — no `app_background` event, that would be noise on macOS.
 ///
 /// Deliberately no activation call at launch: a launch nobody sees (a login
-/// item) must not count as an open or start a session. A person opening the
-/// menu-bar popover without activating the app is covered by
+/// item) must not count as an open or start a session. Activation goes
+/// through the store, which also holds the launch events until then; a person
+/// opening the menu-bar popover without activating the app is covered by
 /// `SyncStore.menuBarOpened()`.
+///
+/// No willTerminate flush: the process exits as soon as that notification
+/// returns, so a spawned flush Task never ran — a no-op that looked like a
+/// guarantee. swift-stats keeps its queue on disk and the next launch picks
+/// it up, so quitting costs latency, not events — short of a `record()` from
+/// the last instant that had not reached disk yet, which is not worth a
+/// terminateLater delegate.
 @MainActor
 final class UsageLifecycle {
     private var tokens: [any NSObjectProtocol] = []
 
-    init(usage: any UsageTracking) {
+    init(store: SyncStore) {
         let center = NotificationCenter.default
+        let usage = store.usage
         tokens.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-            Task { await usage.applicationDidBecomeActive() }
+            Task { await store.applicationDidBecomeActive() }
         })
         tokens.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
-            Task { await usage.flush() }
-        })
-        // Best-effort: the process may exit before the send finishes. Events
-        // already on disk go out next launch.
-        tokens.append(center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             Task { await usage.flush() }
         })
     }
