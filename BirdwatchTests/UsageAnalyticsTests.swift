@@ -11,11 +11,14 @@ import Testing
 final class RecordingUsageTracker: UsageTracking, @unchecked Sendable {
     private let lock = NSLock()
     private var _events: [UsageEvent] = []
+    private var _calls: [String] = []
     private var _enabled = true
 
     var events: [UsageEvent] { lock.withLock { _events } }
-    func record(_ event: UsageEvent) { lock.withLock { _events.append(event) } }
-    func applicationDidBecomeActive() async {}
+    /// Activations and events interleaved, in call order.
+    var calls: [String] { lock.withLock { _calls } }
+    func record(_ event: UsageEvent) { lock.withLock { _events.append(event); _calls.append(event.name) } }
+    func applicationDidBecomeActive() async { lock.withLock { _calls.append("didBecomeActive") } }
     func flush() async {}
     func setEnabled(_ enabled: Bool) async { lock.withLock { _enabled = enabled } }
     var isEnabled: Bool { get async { lock.withLock { _enabled } } }
@@ -171,6 +174,24 @@ struct UsageAnalyticsGatingTests {
     }
 }
 
+// MARK: - Install identity
+
+@Suite("Usage analytics — install identity")
+struct UsageInstallIdentityTests {
+    /// The shipping configuration grants `.identity` (decision 2026-08-18), so
+    /// one install keeps one `installId` across a relaunch. If consent ever
+    /// loses `.identity`, install counts silently become session counts —
+    /// this is the test that notices. The probe runs isolated (fresh app id
+    /// suffix, temp storage) and swaps in an in-memory sink.
+    @Test("The shipping configuration keeps one installId across a relaunch")
+    func stableAcrossRelaunch() async throws {
+        let configuration = UsageAnalytics.configuration(sink: InMemorySink())
+        #expect(configuration.consent.contains(.identity))
+        let probe = try #require(await RelaunchProbe.installIDsAcrossRelaunch(configuration: configuration))
+        #expect(probe.isInstallIdStable, "installId changed across relaunch: \(probe)")
+    }
+}
+
 // MARK: - Store hooks
 
 @Suite("Usage analytics — store hooks")
@@ -242,6 +263,14 @@ struct UsageStoreHookTests {
             .issueDismissed(severity: .warning),
             .conflictResolved(keptCurrent: true),
         ])
+    }
+
+    @Test("Opening the menu-bar popover activates the session before recording the open")
+    func menuBarOpenedActivatesFirst() async {
+        let (store, tracker) = makeStore()
+        await store.menuBarOpened()
+        #expect(tracker.calls == ["didBecomeActive", "menubar_opened"], "got \(tracker.calls)")
+        #expect(tracker.events == [.menubarOpened(issueCount: 0, paused: false)])
     }
 
     @Test("Opt-out flows through to the tracker's master switch")

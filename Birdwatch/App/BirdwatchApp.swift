@@ -160,6 +160,11 @@ struct BirdwatchApp: App {
 /// while the app is still in use from the menu bar, and never fires again once
 /// the window is gone. Resign-active (every ⌘-tab away) only flushes the queue
 /// — no `app_background` event, that would be noise on macOS.
+///
+/// Deliberately no activation call at launch: a launch nobody sees (a login
+/// item) must not count as an open or start a session. A person opening the
+/// menu-bar popover without activating the app is covered by
+/// `SyncStore.menuBarOpened()`.
 @MainActor
 final class UsageLifecycle {
     private var tokens: [any NSObjectProtocol] = []
@@ -172,9 +177,11 @@ final class UsageLifecycle {
         tokens.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
             Task { await usage.flush() }
         })
-        // A launch that finishes without ever activating (opened straight into
-        // the menu bar) still counts as an open.
-        Task { await usage.applicationDidBecomeActive() }
+        // Best-effort: the process may exit before the send finishes. Events
+        // already on disk go out next launch.
+        tokens.append(center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            Task { await usage.flush() }
+        })
     }
 
     // No deinit: this object lives as long as the App does, and block-based

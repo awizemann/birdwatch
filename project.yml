@@ -23,12 +23,15 @@ settings:
     ENABLE_HARDENED_RUNTIME: "YES"
     ENABLE_APP_SANDBOX: "NO"
     # The swift-stats write key is deliberately NOT a setting here. Info.plist
-    # references $(BW_STATS_WRITE_KEY), which xcodebuild expands from a
-    # command-line setting (scripts/release.sh) or an -xcconfig, and to "" when
-    # absent → analytics gated off (UsageAnalytics.makeTracker). Keeping it out
-    # of project.yml means `xcodegen generate` can never bake it into the
-    # committed .xcodeproj. Local test against the real backend:
-    #   xcodebuild … BW_STATS_WRITE_KEY=<key> build
+    # references $(BW_STATS_WRITE_KEY), which xcodebuild expands from the
+    # environment (scripts/release.sh exports it) or an -xcconfig outside the
+    # repo, and to "" when absent → analytics gated off
+    # (UsageAnalytics.makeTracker). Keeping it out of project.yml means
+    # `xcodegen generate` can never bake it into the committed .xcodeproj — and
+    # any definition here, even empty, would override the environment. Never
+    # pass it as a KEY=value xcodebuild argument (visible in `ps` and the build
+    # log). Local test against the real backend:
+    #   BW_STATS_WRITE_KEY=<key> xcodebuild … build
 packages:
   # Sparkle auto-update framework (app target only). The app is NOT sandboxed
   # (ENABLE_APP_SANDBOX: NO), so Sparkle's standard installer path applies and
@@ -40,7 +43,8 @@ packages:
   # sink that speaks to api.swiftstats.co). Zero transitive dependencies.
   swift-stats:
     url: https://github.com/awizemann/swift-stats
-    from: "0.2.0"
+    # 0.x: a minor release may break, so take patches only (0.3.x).
+    minorVersion: "0.3.0"
 targets:
   Birdwatch:
     type: application

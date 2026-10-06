@@ -77,7 +77,13 @@ export DEVELOPMENT_TEAM="$TEAM_ID"
 # baked into Info.plist (BWStatsWriteKey) via the BW_STATS_WRITE_KEY build
 # setting at archive time. A release without it would silently ship with
 # analytics off, so it is required here.
+# It reaches xcodebuild through the ENVIRONMENT, never as a KEY=value argument:
+# arguments show in `ps` and xcodebuild echoes them into the build log.
+# xcodebuild expands $(BW_STATS_WRITE_KEY) from the environment, at the lowest
+# precedence — so nothing (project, target, xcconfig) may define it, not even
+# empty. The post-export check below proves it actually expanded.
 STATS_WRITE_KEY="${BW_STATS_WRITE_KEY:?set BW_STATS_WRITE_KEY to the swift-stats write key (Memophant → vendors → swift-stats)}"
+export BW_STATS_WRITE_KEY="$STATS_WRITE_KEY"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-Developer ID Application}"
 BUNDLE_ID="com.wizemann.birdwatch"
 SCHEME="Birdwatch"
@@ -268,7 +274,6 @@ xcodebuild \
   ONLY_ACTIVE_ARCH=NO \
   CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
   DEVELOPMENT_TEAM="$TEAM_ID" \
-  BW_STATS_WRITE_KEY="$STATS_WRITE_KEY" \
   CODE_SIGN_STYLE=Manual \
   archive
 

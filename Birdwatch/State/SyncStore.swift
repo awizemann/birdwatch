@@ -157,6 +157,15 @@ final class SyncStore {
         usage.record(event)
     }
 
+    /// The popover can open without the app ever becoming active, so opening
+    /// it is itself the "a person is here" signal: start (or continue) the
+    /// session first — idempotent within a session — then record the open,
+    /// so `menubar_opened` lands in a session that has its `app_open`.
+    func menuBarOpened() async {
+        await usage.applicationDidBecomeActive()
+        record(.menubarOpened(issueCount: issueCount, paused: isGloballyPaused))
+    }
+
     /// Navigation with a known origin, so `view_shown` carries `via`.
     func navigate(to view: MonitorView, via: UsageEvent.NavigationSource) {
         pendingNavigationSource = via

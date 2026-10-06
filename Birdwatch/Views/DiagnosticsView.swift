@@ -828,7 +828,7 @@ struct DiagnosticsView: View {
                         Text("Share anonymous usage")
                             .scaledFont(size: 13, weight: .medium)
                             .foregroundStyle(Surface.fg)
-                        Text("Which screens and actions get used, plus app version and macOS version, under a random install ID. Never file names, paths, app names or account details.")
+                        Text("Which screens and actions get used, plus app version, macOS version, Mac model, language and region, under a random install ID. Never file names, paths, app names or account details.")
                             .scaledFont(size: 11.5)
                             .foregroundStyle(Surface.fg3)
                             .fixedSize(horizontal: false, vertical: true)

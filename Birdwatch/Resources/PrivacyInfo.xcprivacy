@@ -4,9 +4,11 @@
 <dict>
 	<!-- Birdwatch is distributed directly (Sparkle), so nothing enforces this
 	     manifest — it is here because it is true. Usage analytics via
-	     swift-stats (schema §14): Product Interaction + Other Diagnostic Data,
-	     not linked to identity (a random, salted install id), not used for
-	     tracking. No identify(userID:) call, so no User ID. -->
+	     swift-stats (schema §14): Product Interaction + Other Diagnostic Data
+	     + Device ID (the salted hash of a random per-install UUID, collected
+	     because consent includes .identity), none linked to the user, none
+	     used for tracking. No identify(userID:) call, so no User ID. If that
+	     ever changes: add User ID and mark every type below Linked. -->
 	<key>NSPrivacyTracking</key>
 	<false/>
 	<key>NSPrivacyTrackingDomains</key>
@@ -28,6 +30,18 @@
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeOtherDiagnosticData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
 			<false/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>

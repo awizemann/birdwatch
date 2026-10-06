@@ -10,7 +10,7 @@ import StatsCloudflare
 /// `nonisolated` because this module defaults to MainActor and the real
 /// implementation wraps an actor.
 nonisolated protocol UsageTracking: Sendable {
-    /// Synchronous and ordered: swift-stats 0.2's `record()` takes the
+    /// Synchronous and ordered: swift-stats' `record()` takes the
     /// timestamp at the call, preserves arrival order, and hands off to the
     /// actor without a suspension — so a button handler never waits on disk.
     func record(_ event: UsageEvent)
@@ -83,23 +83,31 @@ enum UsageAnalytics {
             return NoopUsageTracker()
         }
         do {
-            let client = StatsClient(configuration: StatsConfiguration(
-                appId: "com.wizemann.birdwatch",
-                projectId: "birdwatch",
-                installIdSalt: installIdSalt,
-                sink: CloudflareSink(endpoint: try CloudflareEndpoint(string: endpoint), writeKey: writeKey),
-                // .identity on (decision 2026-08-18): a hashed random UUID per
-                // install so active-install and retention counts are real.
-                // Disclosed in the Diagnostics toggle copy.
-                consent: .all,
-                // No .appBackground: on macOS "left the foreground" is every
-                // ⌘-tab, which is noise. Sessions still close on the gap.
-                autoEvents: [.appOpen, .sessions]
-            ))
-            return StatsUsageTracker(client: client)
+            let sink = CloudflareSink(endpoint: try CloudflareEndpoint(string: endpoint), writeKey: writeKey)
+            return StatsUsageTracker(client: StatsClient(configuration: configuration(sink: sink)))
         } catch {
             logger.error("Usage analytics disabled: \(error.localizedDescription, privacy: .public)")
             return NoopUsageTracker()
         }
+    }
+
+    /// The shipping configuration, minus the transport — split out so tests
+    /// can probe exactly what ships (e.g. install identity across a relaunch).
+    /// The one `StatsClient` per launch is built from this in `makeTracker`.
+    static func configuration(sink: any StatsSink) -> StatsConfiguration {
+        StatsConfiguration(
+            appId: "com.wizemann.birdwatch",
+            projectId: "birdwatch",
+            installIdSalt: installIdSalt,
+            sink: sink,
+            // .identity on (decision 2026-08-18): a hashed random UUID per
+            // install so active-install and retention counts are real. Equal
+            // to the SDK default since 0.3.0; written out so the choice is
+            // visible here. Never setConsent per launch — this is the seed.
+            consent: .all,
+            // No .appBackground: on macOS "left the foreground" is every
+            // ⌘-tab, which is noise. Sessions still close on the gap.
+            autoEvents: [.appOpen, .sessions]
+        )
     }
 }

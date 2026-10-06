@@ -33,7 +33,7 @@ struct MenuBarPopoverView: View {
         // forever — the window's onDisappear was the only resume/pause driver.
         .onAppear {
             NotificationCenter.default.post(name: UbiquityTransferSource.resumeRequest, object: nil)
-            store.record(.menubarOpened(issueCount: store.issueCount, paused: store.isGloballyPaused))
+            Task { await store.menuBarOpened() }
         }
         .onDisappear {
             // Only pause when nothing else is on screen: the popover can be

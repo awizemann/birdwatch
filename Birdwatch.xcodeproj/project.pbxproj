@@ -905,8 +905,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/awizemann/swift-stats";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.2.0;
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.3.0;
 			};
 		};
 		F6933A6BC5401F38275C9BB6 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
