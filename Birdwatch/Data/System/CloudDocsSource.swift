@@ -123,7 +123,7 @@ nonisolated struct CloudDocsStatusCache: Sendable, Equatable {
             return .unknown("brctl status \(lastFailure.summary), so it could not be read")
         }
         let note = lastFailure.map {
-            "Last-known setting, confirmed by brctl status \(SystemSyncSource.ageText(now.timeIntervalSince(at))); the latest read \($0.summary)."
+            "Last-known setting, confirmed by brctl status \(Format.age(now.timeIntervalSince(at))); the latest read \($0.summary)."
         }
         return SystemSyncSource.desktopDocumentsSynced(lastGood) ? .on(lastKnown: note) : .off(lastKnown: note)
     }

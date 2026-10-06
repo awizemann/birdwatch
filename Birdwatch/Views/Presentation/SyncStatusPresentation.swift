@@ -85,6 +85,11 @@ struct SyncStatusDisplay: Equatable {
             bar = nil
             showsSpinner = false
             tone = .neutral
+        case .notSyncing(let items):
+            label = "\(Plural.count(items, "item")) not syncing"
+            bar = nil
+            showsSpinner = false
+            tone = .warning
         }
     }
 
@@ -244,6 +249,13 @@ enum PopoverSummary {
                 ? "\(unconfirmed) with no activity seen"
                 : "\(Plural.count(unconfirmed, "app")) with no activity seen")
         }
+        // Not idle: bird holds items for these rows that have not synced.
+        let backlogged = apps.filter { if case .notSyncing = $0.status { true } else { false } }.count
+        if backlogged > 0 {
+            parts.append(parts.isEmpty
+                ? "\(Plural.count(backlogged, "app")) with items not syncing"
+                : "\(backlogged) with items not syncing")
+        }
         // Not idle and not a problem: state not read yet (neutral).
         let unknown = apps.filter { UnknownRowKind(of: $0) == .notReadYet }.count
         if unknown > 0 {
@@ -372,12 +384,62 @@ enum TransferWatchNotes {
         return "\(names) transfers aren't watched without Full Disk Access."
     }
 
-    /// Uploading / Downloading tiles: "—" when the figure can't be stated.
-    static func tile(bytes: Int64, paused: Bool, unwatched: [AppSyncState]) -> (value: String, caption: String?) {
+    /// Uploading / Downloading tiles: "—" when the figure can't be stated —
+    /// including before the watcher's first sweep, when a zero would be a
+    /// figure nobody measured (C1).
+    static func tile(
+        bytes: Int64, paused: Bool, unwatched: [AppSyncState], ready: Bool = true
+    ) -> (value: String, caption: String?) {
         if paused { return ("—", "Not watched while paused") }
+        if !ready { return ("—", OverviewTiles.waiting) }
         guard !unwatched.isEmpty else { return (Format.size(bytes), nil) }
         let caption = "Excludes \(ListFormatter.localizedString(byJoining: unwatched.map(\.name)))"
         return (bytes > 0 ? Format.size(bytes) : "—", caption)
+    }
+}
+
+/// The Overview's count tiles. Each says "—" with a reason rather than a
+/// number nobody measured: before the first snapshot, and while paused
+/// (the snapshot shown is the last one taken before the pause).
+enum OverviewTiles {
+    static let waiting = "Waiting for first read"
+
+    static func activeApps(count: Int, loaded: Bool, paused: Bool) -> (value: String, caption: String?) {
+        if paused { return ("—", "Not watched while paused") }
+        if !loaded { return ("—", waiting) }
+        return ("\(count)", nil)
+    }
+}
+
+/// One daemon's load, as Diagnostics and the app detail show it. While
+/// monitoring is paused the last `ps` sample is not current, so it is shown
+/// as paused — never "0% CPU · Healthy" as if just measured (C1).
+struct DaemonLoadDisplay: Equatable {
+    enum Tone: Equatable { case healthy, elevated, high, paused }
+
+    let cpuText: String
+    let healthWord: String
+    let memoryText: String
+    let tone: Tone
+    /// nil while paused: no bar for a figure that is not current.
+    let barFraction: Double?
+
+    init(_ daemon: DaemonStat, paused: Bool) {
+        if paused {
+            cpuText = "—"
+            healthWord = "Not sampled while paused"
+            memoryText = "—"
+            tone = .paused
+            barFraction = nil
+            return
+        }
+        let percent = daemon.cpuPercent
+        cpuText = Format.cpu(percent)
+        memoryText = Format.memory(megabytes: daemon.memoryMB)
+        (healthWord, tone) = if percent < 15 { ("Healthy", .healthy) }
+            else if percent < 30 { ("Elevated", .elevated) }
+            else { ("High load", .high) }
+        barFraction = min(max(percent, 0) / 100, 1)
     }
 }
 

@@ -318,6 +318,10 @@ final class RecordingSource: SyncSource, @unchecked Sendable {
         }
     }
 
+    func invalidatePermissions() async {
+        log.append("reprobe")
+    }
+
     func logStream(appID: String, backend: SyncBackend) -> AsyncThrowingStream<LogLine, any Error> { AsyncThrowingStream { $0.finish() } }
     func conflictDetail(issueID: String) async -> ConflictDetail? { nil }
 }

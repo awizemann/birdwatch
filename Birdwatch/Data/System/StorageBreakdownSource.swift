@@ -66,7 +66,11 @@ enum StorageBreakdownSource {
     /// - Package directories (`.app`, `.photoslibrary`, …) are counted ONCE, by
     ///   their own allocated size, and their descendants are never visited
     ///   (`.skipsPackageDescendants` + an explicit `isPackage` check).
-    /// - Hidden files are skipped.
+    /// - Dot-files, and everything under a dot-directory, are skipped by NAME.
+    ///   Not `.skipsHiddenFiles`: macOS sets the hidden flag on most iCloud
+    ///   container directories, so that option pruned ~90% of the containers'
+    ///   subtrees and under-counted the footprint. Not `skipDescendants()`
+    ///   either: it ends the whole enumeration early on fileprovider volumes.
     /// - Symlinks are not followed and directories contribute nothing on their own.
     ///
     /// Returns totals plus whether the entry cap truncated the walk.
@@ -86,7 +90,7 @@ enum StorageBreakdownSource {
             if isPartial || Task.isCancelled { break }
             guard let enumerator = FileManager.default.enumerator(
                 at: directory, includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                options: [.skipsPackageDescendants],
                 errorHandler: { failed, error in
                     logger.debug("breakdown skipped \(failed.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .private)")
                     return true      // per-item fault tolerance: keep walking
@@ -101,6 +105,7 @@ enum StorageBreakdownSource {
                     break
                 }
                 if Task.isCancelled { isPartial = true; break }
+                guard !isUnderDotName(item, level: enumerator.level) else { continue }
                 guard let values = try? item.resourceValues(forKeys: keySet),
                       values.isSymbolicLink != true else { continue }
 
@@ -116,6 +121,14 @@ enum StorageBreakdownSource {
             }
         }
         return (totals, isPartial)
+    }
+
+    /// True when `item`, or any ancestor of it below the walk's root, is a
+    /// dot-name. `level` is the enumerator's depth (1 = a direct child), so a
+    /// dot in the root's own path (or the /private/var symlink resolution of
+    /// a temp root) never counts.
+    nonisolated static func isUnderDotName(_ item: URL, level: Int) -> Bool {
+        item.pathComponents.suffix(max(level, 1)).contains { $0.hasPrefix(".") }
     }
 
     /// Allocated bytes inside a package, used only when the package URL itself

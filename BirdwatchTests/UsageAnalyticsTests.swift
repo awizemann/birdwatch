@@ -20,8 +20,20 @@ final class RecordingUsageTracker: UsageTracking, @unchecked Sendable {
     func record(_ event: UsageEvent) { lock.withLock { _events.append(event); _calls.append(event.name) } }
     func applicationDidBecomeActive() async { lock.withLock { _calls.append("didBecomeActive") } }
     func flush() async {}
-    func setEnabled(_ enabled: Bool) async { lock.withLock { _enabled = enabled } }
+    func setEnabled(_ enabled: Bool) async {
+        lock.withLock { _enabled = enabled }
+        enabledChangesContinuation.yield(enabled)
+    }
     var isEnabled: Bool { get async { lock.withLock { _enabled } } }
+
+    /// Every `setEnabled` value, in order, once it has landed — the signal a
+    /// test awaits instead of polling `isEnabled` against a clock (C8).
+    let enabledChanges: AsyncStream<Bool>
+    private let enabledChangesContinuation: AsyncStream<Bool>.Continuation
+
+    init() {
+        (enabledChanges, enabledChangesContinuation) = AsyncStream.makeStream(of: Bool.self)
+    }
 }
 
 private func throwawayDefaults() -> UserDefaults {
@@ -319,9 +331,9 @@ struct UsageStoreHookTests {
         let (store, tracker) = makeStore()
         await store.loadUsagePreference()
         #expect(store.usageSharingEnabled)
+        var changes = tracker.enabledChanges.makeAsyncIterator()
         store.setUsageSharing(false)
-        let deadline = ContinuousClock.now + .seconds(2)
-        while await tracker.isEnabled && ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(1)) }
+        #expect(await changes.next() == false, "the flip reaches the tracker's master switch")
         #expect(await tracker.isEnabled == false)
         #expect(!store.usageSharingEnabled)
     }

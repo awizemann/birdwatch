@@ -76,6 +76,47 @@ actor BrctlDumpSource {
 /// Turns a parsed dump into the DTOs the UI consumes. Every value here is
 /// something bird actually printed — nothing is inferred into a number that
 /// the engine did not report.
+/// Where one of bird's scheduled (not yet synced) items lives.
+nonisolated enum RetryLocation: Sendable, Hashable {
+    /// Inside an app's own container — that container row's id.
+    case app(String)
+    /// Inside a top-level iCloud Drive folder (its name).
+    case driveFolder(String)
+    /// A file directly in the iCloud Drive root — in no folder.
+    case driveRootFile
+    /// Somewhere in iCloud Drive; which folder is not known.
+    case driveFolderUnknown
+    /// No container or path could be matched on this disk.
+    case unplaced
+}
+
+/// Every scheduled item's location, computed once per dump refresh. All of
+/// them are bird's — so all of them keep the iCloud Drive row from reading
+/// "Up to date" — and the placed ones also mark their own app or folder.
+nonisolated struct RetryAttribution: Sendable, Hashable {
+    var locations: [String: RetryLocation] = [:]
+    /// Scheduled items beyond `BrctlDumpMapper.attributionCap`, not placed.
+    var overflow: Int = 0
+
+    /// Every scheduled item.
+    var total: Int { locations.count + overflow }
+
+    func count(appID: String) -> Int { locations.values.count { $0 == .app(appID) } }
+    func count(folder: String) -> Int { locations.values.count { $0 == .driveFolder(folder) } }
+
+    /// Items that may be in ANY Drive folder: no folder can be confirmed
+    /// up to date while one of these exists.
+    var unplacedForFolders: Int {
+        overflow + locations.values.count { $0 == .driveFolderUnknown || $0 == .unplaced }
+    }
+
+    func removing(_ ids: Set<String>) -> RetryAttribution {
+        var copy = self
+        for id in ids { copy.locations[id] = nil }
+        return copy
+    }
+}
+
 nonisolated enum BrctlDumpMapper {
 
     /// bird gives up on an item after 62 attempts (documented in the retry
@@ -153,6 +194,72 @@ nonisolated enum BrctlDumpMapper {
 
     /// Every scheduled item, not just the rows that fit on the card.
     static func retryQueueTotal(from dump: BrctlDump) -> Int { pendingItems(dump).count }
+
+    // MARK: Retry attribution (which row each scheduled item belongs to)
+
+    /// Items placed per dump refresh. Beyond this they count as unplaced:
+    /// still "not syncing" on iCloud Drive, just not pinned to a row.
+    static let attributionCap = 5_000
+
+    /// Where every scheduled item lives, as far as our own disk can say.
+    ///
+    /// The app-library header gives each item a CONTAINER (redacted, but
+    /// matched structurally against the real `Mobile Documents` children —
+    /// see `RedactedPathResolver`), which is enough to pin it to an app row
+    /// even when its own name has no unique fit. Inside CloudDocs, a resolved
+    /// path pins it to a top-level folder. Anything else stays unplaced and
+    /// is never guessed into a row.
+    static func retryAttribution(
+        from dump: BrctlDump, candidates: [PathCandidate], homeDirectory: String = NSHomeDirectory()
+    ) -> RetryAttribution {
+        let items = pendingItems(dump)
+        let placed = Array(items.prefix(attributionCap))
+        let resolved = RedactedPathResolver.resolve(items: placed, candidates: candidates)
+        let containerNames = Array(Set(candidates.compactMap(\.containerDirectoryName)))
+        var containerCache: [String: String?] = [:]
+        var locations: [String: RetryLocation] = [:]
+        locations.reserveCapacity(placed.count)
+        for item in placed {
+            var container: String?
+            if let pattern = item.containerPattern {
+                if let cached = containerCache[pattern] {
+                    container = cached
+                } else {
+                    let matched = containerNames.filter {
+                        RedactedPathResolver.matchesContainer(pattern: pattern, directoryName: $0)
+                    }
+                    container = matched.count == 1 ? matched[0] : nil
+                    containerCache[pattern] = container
+                }
+            }
+            let match = resolved[item.itemID]
+            if container == nil, let path = match?.absolutePath {
+                container = AppContainerSource.containerDirectory(forPath: path, homeDirectory: homeDirectory)
+            }
+            locations[item.itemID] = location(
+                container: container, match: match, isDirectory: item.isDirectory, homeDirectory: homeDirectory)
+        }
+        return RetryAttribution(locations: locations, overflow: items.count - placed.count)
+    }
+
+    private static func location(
+        container: String?, match: ResolvedPath?, isDirectory: Bool, homeDirectory: String
+    ) -> RetryLocation {
+        guard let container else { return .unplaced }
+        guard container == "com~apple~CloudDocs" else {
+            return .app(AppContainerSource.appID(forDirectory: container))
+        }
+        let root = homeDirectory + "/Library/Mobile Documents/com~apple~CloudDocs"
+        guard let path = match?.absolutePath, path.hasPrefix(root) else { return .driveFolderUnknown }
+        let components = path.dropFirst(root.count).split(separator: "/").map(String.init)
+        guard let first = components.first else {
+            // An ambiguous match whose shared parent is the Drive root itself.
+            return .driveFolderUnknown
+        }
+        // An exact match is the item itself: a top-level FILE is in no folder.
+        if match?.confidence == .exact, components.count == 1, !isDirectory { return .driveRootFile }
+        return .driveFolder(first)
+    }
 
     /// bird length-redacts every file name (`n:"b{5}2.bin"`), so the extension
     /// is the ONLY real characters in it. Never show the redacted pattern.
@@ -247,7 +354,8 @@ nonisolated enum BrctlDumpMapper {
 
     // MARK: Engine
 
-    /// Enriches the brctl-status-derived engine info with the dump's internals.
+    /// Enriches the engine info (CloudDocs state from the dump's container
+    /// line, or last-known `brctl status`) with the dump's internals.
     static func enrich(_ base: SyncEngineInfo, with dump: BrctlDump) -> SyncEngineInfo {
         var engine = base
         let budget = dump.scheduler.budget ?? dump.clientState.budget
@@ -291,11 +399,13 @@ nonisolated enum BrctlDumpMapper {
             .contains { $0 >= 100 }
     }
 
-    /// "0.5%" below 10 when fractional, else whole ("57%"), in the user's
-    /// locale ("0,5 %" in French).
+    /// `value` is already in percent units (bird prints them that way):
+    /// "0.5%" below 10 when fractional, else whole ("57%"). Only the digit
+    /// rule lives here — the formatting is `Format.percent`, so the locale
+    /// spelling ("0,5 %" in French) matches every other percentage.
     static func percent(_ value: Double, locale: Locale = .current) -> String {
         let digits = value < 10 && value != value.rounded() ? 1 : 0
-        return (value / 100).formatted(.percent.precision(.fractionLength(digits)).locale(locale))
+        return Format.percent(value / 100, locale: locale, fractionLength: digits)
     }
 
     private static func count(_ value: Int) -> String {

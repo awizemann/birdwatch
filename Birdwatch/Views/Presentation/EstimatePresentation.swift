@@ -137,6 +137,17 @@ enum PlanPromptChoice {
         return storage.trustedCapBytes
     }
 
+    /// Said beside the pre-selected answer while it is still Birdwatch's
+    /// derivation rather than the user's own choice: a prefilled "8 TB" with
+    /// no label reads as a fact (C2). nil when the seed is what the user
+    /// already confirmed, or when nothing is pre-selected.
+    static let suggestionNote = "Suggested from iCloud's reported space — not confirmed"
+
+    static func seedIsSuggestion(_ storage: StorageInfo) -> Bool {
+        let userOwn = storage.capSource == .userChosen && !storage.planCapBelowRemaining
+        return !userOwn && suggestedCap(storage) != nil
+    }
+
     struct Seed: Equatable {
         /// Index into `StorageBreakdownSource.tiers`, or nil for custom.
         var tierIndex: Int?
@@ -190,6 +201,10 @@ enum PlanPromptChoice {
 /// Birdwatch started" — not "Last 24 hours".
 enum BandwidthPresentation {
     static let chartTitle = "Today, since Birdwatch started"
+    /// The popover sparkline's caption. "Estimated" LEADS: at the popover's
+    /// 328 pt the old trailing ", estimated" was the part that truncated
+    /// away, leaving an attributed figure unlabelled (C2).
+    static let popoverCaption = "Estimated iCloud traffic per hour, today since Birdwatch started"
 
     /// Every byte figure here is attributed from daemon traffic (C2). With no
     /// hour observed yet there is no figure at all — "≈ Zero KB" would be a
@@ -240,5 +255,11 @@ enum DevicesHeadline {
         let floor = countsArePartial ? "at least " : ""
         let wrote = wroteItems == 1 ? "1 has written items" : "\(wroteItems) have written items"
         return "\(Plural.count(registered, "device")) registered · \(floor)\(wrote) · \(floor)\(activeThisWeek) active this week"
+    }
+
+    /// One device row's count. When bird truncated its dump every per-row
+    /// figure is a floor too, and says so like the headline does.
+    static func itemCount(_ count: Int, countsArePartial: Bool) -> String {
+        (countsArePartial ? "at least " : "") + Plural.count(count, "item")
     }
 }

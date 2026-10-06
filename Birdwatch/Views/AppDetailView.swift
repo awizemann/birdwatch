@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import os
 
-private let detailLogger = Logger(subsystem: "com.wizemann.birdwatch", category: "AppDetail")
+private nonisolated let detailLogger = Logger(subsystem: "com.wizemann.birdwatch", category: "AppDetail")
 
 struct AppDetailView: View {
     @Environment(SyncStore.self) private var store
@@ -97,7 +97,7 @@ struct AppDetailView: View {
                 // supported API or command to trigger one (see footnote).
                 if canReveal(app) {
                     Button("Reveal in Finder") {
-                        detailLogger.info("Reveal in Finder requested for \(app.id, privacy: .public)")
+                        detailLogger.info("Reveal in Finder requested for \(app.id, privacy: .private)")
                         revealInFinder(app.locationPath)
                     }
                 }
@@ -131,7 +131,8 @@ struct AppDetailView: View {
             // are tiny, so this is the on-disk footprint, not the cloud size.
             InfoTile(label: "On this Mac", value: AppDetailFacts.localSizeValue(app))
             InfoTile(label: "Sync daemon",
-                     value: daemon.map { "\($0.name) · \(Format.cpu($0.cpuPercent))" } ?? app.backend.daemonName,
+                     value: daemon.map { "\($0.name) · \(DaemonLoadDisplay($0, paused: store.isGloballyPaused).cpuText)" }
+                        ?? app.backend.daemonName,
                      monospaced: true)
             InfoTile(label: "Progress detail", value: app.backend.progressDetail)
         }
@@ -198,6 +199,7 @@ struct AppDetailView: View {
             Card {
                 VStack(alignment: .leading, spacing: 14) {
                     if let daemon {
+                        let load = DaemonLoadDisplay(daemon, paused: store.isGloballyPaused)
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Text(daemon.name)
@@ -205,15 +207,17 @@ struct AppDetailView: View {
                                     .monospaced()
                                     .foregroundStyle(Surface.fg)
                                 Spacer()
-                                Text("\(Format.cpu(daemon.cpuPercent)) · \(healthLabel(daemon.cpuPercent))")
+                                Text("\(load.cpuText) · \(load.healthWord)")
                                     .scaledFont(size: 12, weight: .semibold)
-                                    .foregroundStyle(cpuTint(daemon.cpuPercent))
+                                    .foregroundStyle(load.color)
                                     .monospacedDigit()
                             }
-                            MiniProgressBar(progress: min(daemon.cpuPercent / 100, 1), tint: cpuTint(daemon.cpuPercent), label: "\(daemon.name) CPU load")
+                            if let fraction = load.barFraction {
+                                MiniProgressBar(progress: fraction, tint: load.color, label: "\(daemon.name) CPU load")
+                            }
                         }
                         .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(daemon.name), \(Int(daemon.cpuPercent)) percent CPU, \(healthLabel(daemon.cpuPercent))")
+                        .accessibilityLabel("\(daemon.name), \(load.cpuText == "—" ? "CPU" : load.cpuText), \(load.healthWord)")
                     }
 
                     if let warning = app.retryWarning {
@@ -244,10 +248,6 @@ struct AppDetailView: View {
                 }
             }
         }
-    }
-
-    private func healthLabel(_ percent: Double) -> String {
-        if percent < 15 { "Healthy" } else if percent < 30 { "Elevated" } else { "High load" }
     }
 
     private func footnoteText(_ backend: SyncBackend) -> String {
@@ -373,6 +373,28 @@ private struct InfoCallout: View {
 }
 
 // MARK: - Live log console
+
+/// The console's line bookkeeping, pure so its bound is testable. Only the
+/// newest `limit` lines are ever shown, so nothing older is kept — not on
+/// screen, and not in the buffer between flushes, which during a log storm
+/// used to grow without bound with an O(n) insert-at-front per line.
+enum LogConsoleLines {
+    static let limit = 25
+
+    /// Adds one arrival to the pending buffer, keeping it bounded.
+    static func buffer(_ line: LogLine, into buffer: inout [LogLine]) {
+        buffer.append(line)
+        // Amortised: trim only once it has doubled.
+        if buffer.count > limit * 2 { buffer.removeFirst(buffer.count - limit) }
+    }
+
+    /// The lines to show after a flush: newest first, at most `limit`.
+    /// Sorted by date because seeds arrive newest-first and live lines
+    /// newest-last.
+    static func merged(_ lines: [LogLine], with buffer: [LogLine]) -> [LogLine] {
+        Array((buffer.suffix(limit) + lines).sorted { $0.date > $1.date }.prefix(limit))
+    }
+}
 
 /// Always-dark console regardless of appearance. Streams from the store's
 /// per-app log stream while the detail is open; resets on app switch. Stops
@@ -526,7 +548,7 @@ private struct LiveLogConsole: View {
         while !Task.isCancelled {
             do {
                 for try await line in store.logStream(appID: appID, backend: backend) {
-                    buffer.insert(line, at: 0)
+                    LogConsoleLines.buffer(line, into: &buffer)
                     guard flushTask == nil else { continue }
                     flushTask = Task {
                         try? await Task.sleep(for: .milliseconds(250))
@@ -538,10 +560,8 @@ private struct LiveLogConsole: View {
                         // the seed burst arrives newest-first while live lines
                         // arrive newest-last, so plain insert-at-0 would leave
                         // the seeds inverted.
-                        lines.insert(contentsOf: buffer, at: 0)
-                        lines.sort { $0.date > $1.date }
-                        if lines.count > 25 { lines.removeLast(lines.count - 25) }
-                        buffer.removeAll()
+                        lines = LogConsoleLines.merged(lines, with: buffer)
+                        buffer.removeAll(keepingCapacity: true)
                         flushTask = nil
                     }
                 }

@@ -211,3 +211,93 @@ struct BrctlDumpMappingTests {
         #expect(DeviceActivitySummary.sortedByActivity(items).map(\.index) == [2, 9])
     }
 }
+
+/// bird's retry queue → which row each scheduled item keeps from reading
+/// "Up to date". Driven by the real-shape dump excerpt and candidates laid
+/// out as they are on disk (built directly: the resolver is pure).
+@MainActor
+@Suite("Retry backlog attribution")
+struct RetryBacklogAttributionTests {
+    private static let home = "/Users/bw-test"
+    private static let root = home + "/Library/Mobile Documents"
+
+    private static func candidate(_ relative: String, isDirectory: Bool = false) -> PathCandidate {
+        let path = root + "/" + relative
+        return PathCandidate(
+            path: path, name: (path as NSString).lastPathComponent, isDirectory: isDirectory,
+            sizeBytes: nil, containerDirectoryName: String(relative.split(separator: "/")[0]))
+    }
+
+    /// The four scheduled items of the fixture: two in CloudDocs (one at the
+    /// root, one in a folder) and one in each of two app containers.
+    private static let candidates = [
+        candidate("com~apple~CloudDocs/REDACTED-1.bin"),
+        candidate("com~apple~CloudDocs/Projects", isDirectory: true),
+        candidate("com~apple~CloudDocs/Projects/REDACTED-6.txt"),
+        candidate("iCloud~com~microsoft~Office~Excel/Documents", isDirectory: true),
+        candidate("iCloud~com~feedbacks~chatapp/Documents", isDirectory: true),
+    ]
+
+    private static func attribution() throws -> RetryAttribution {
+        BrctlDumpMapper.retryAttribution(from: try dumpFixture(), candidates: candidates, homeDirectory: home)
+    }
+
+    @Test("Each scheduled item is placed by its container header, and by path inside CloudDocs")
+    func placement() throws {
+        let attribution = try Self.attribution()
+        #expect(attribution.total == 4)
+        #expect(attribution.locations["E0A2E171"] == .driveRootFile)
+        #expect(attribution.locations["15478C83"] == .driveFolder("Projects"))
+        #expect(attribution.locations["documents[171]"] == .app("container-icloud-com-microsoft-office-excel"))
+        #expect(attribution.locations["documents[148]"] == .app("container-icloud-com-feedbacks-chatapp"))
+        #expect(attribution.unplacedForFolders == 0)
+
+        let bare = BrctlDumpMapper.retryAttribution(from: try dumpFixture(), candidates: [], homeDirectory: Self.home)
+        #expect(bare.total == 4)
+        #expect(bare.unplacedForFolders == 4, "nothing on disk to match: placed nowhere, never guessed")
+    }
+
+    // The soak-test bug: "Up to date · Sync engine idle", "Pending: None"
+    // and "1 app up to date" beside "110 items haven't synced".
+    @Test("A row bird holds items for is never up to date, in the list or the popover")
+    func rowsCarryTheBacklog() throws {
+        let attribution = try Self.attribution()
+        let idle = BrctlStatus(clientState: "idle", serverState: "idle", lastSync: nil, isIdle: true, tokenInfo: "t", apps: [])
+        var excel = try #require(AppContainerSource.makeContainer(directoryName: "iCloud~com~microsoft~Office~Excel"))
+        excel.itemCount = 3
+        let apps = SystemSyncSource.buildApps(
+            status: idle, transfers: [], fileProviderDomains: [], containers: [excel], retry: attribution)
+
+        let drive = try #require(apps.first { $0.id == "icloud-drive" })
+        #expect(drive.status == .notSyncing(items: 4))
+        #expect(drive.pendingItems == 4)
+        #expect(AppDetailFacts.pendingValue(drive) == "4 items")
+        let display = SyncStatusDisplay(app: drive, progressIsIndeterminate: true)
+        #expect(display.label == "4 items not syncing")
+        #expect(display.tone == .warning)
+
+        let excelRow = try #require(apps.first { $0.id == excel.id })
+        #expect(excelRow.status == .notSyncing(items: 1))
+
+        let line = PopoverSummary.idleAppsLine(apps) ?? ""
+        #expect(!line.contains("up to date"), "got \(line)")
+        #expect(line.contains("2 apps with items not syncing"), "got \(line)")
+
+        // No backlog: the engine's own idle still reads up to date.
+        let clean = SystemSyncSource.buildApps(status: idle, transfers: [], fileProviderDomains: [], retry: RetryAttribution())
+        #expect(clean.first { $0.id == "icloud-drive" }?.status == .upToDate)
+    }
+
+    @Test("Drive folders: own items say so; an item that could be anywhere leaves none green")
+    func folders() throws {
+        let folders = [DriveFolder(id: "Projects", name: "Projects", itemCount: 2, status: .upToDate),
+                       DriveFolder(id: "Notes", name: "Notes", itemCount: 5, status: .upToDate)]
+        let placed = DriveFolderSource.applying(transfers: [], to: folders, retry: try Self.attribution())
+        #expect(placed.map(\.status) == [.notSyncing(items: 1), .upToDate])
+
+        var unplaced = try Self.attribution()
+        unplaced.locations["mystery"] = .unplaced
+        let uncertain = DriveFolderSource.applying(transfers: [], to: folders, retry: unplaced)
+        #expect(uncertain.map(\.status) == [.notSyncing(items: 1), .unknown])
+    }
+}

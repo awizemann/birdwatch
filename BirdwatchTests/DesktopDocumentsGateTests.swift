@@ -164,3 +164,63 @@ struct DesktopDocumentsGateTests {
         #expect(await recorder.breakdownWalks == [false, true])
     }
 }
+
+/// The permission answers are cached for 5 minutes; these pin WHEN that cache
+/// is dropped early, so an FDA grant reaches the Desktop & Documents gate on
+/// the next snapshot instead of up to 5 minutes later.
+@Suite("Permission re-probe")
+struct PermissionReprobeTests {
+
+    // Without the invalidation the third gate pass inside the TTL serves the
+    // cached denial, and this fails.
+    @Test("An invalidated cache is re-probed inside the 5-minute TTL; an untouched one is not")
+    func invalidationForcesReprobe() async {
+        let probes = OSAllocatedUnfairLock(initialState: 0)
+        let fda = OSAllocatedUnfairLock(initialState: PermissionState.denied)
+        let readers = SystemSyncSource.DesktopDocumentsReaders(
+            permissions: {
+                probes.withLock { $0 += 1 }
+                return [PermissionStatus(name: "Full Disk Access", state: fda.withLock { $0 })]
+            },
+            localSizes: { _, _ in [:] },
+            breakdown: { _ in ([:], false) }
+        )
+        let source = SystemSyncSource(pathCandidates: { [] }, desktopDocumentsReaders: readers)
+        let t0 = Date()
+
+        let first = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0)
+        #expect(first.fullDiskAccess == .denied)
+        fda.withLock { $0 = .granted }
+        let cached = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0 + 15)
+        #expect(cached.fullDiskAccess == .denied, "a plain 15 s cycle keeps the cache")
+        #expect(probes.withLock { $0 } == 1)
+
+        await source.invalidatePermissions()
+        let reprobed = await source.applyDesktopDocumentsGate(featureOn: true, containers: [], now: t0 + 30)
+        #expect(probes.withLock { $0 } == 2)
+        #expect(reprobed.fullDiskAccess == .granted)
+        #expect(reprobed.readsDesktopDocuments, "the grant opens the gate on the next snapshot")
+    }
+
+    // `force` alone must NOT re-probe: the window's 15 s tick forces every
+    // refresh, and dropping the cache on each would defeat it.
+    @MainActor
+    @Test("⌘R and activation drop the cache; the forced 15 s tick does not")
+    func storeDecidesWhenToReprobe() async {
+        let source = RecordingSource(snapshot: .minimal())
+        let store = SyncStore(source: source, notifier: noBanners)
+
+        await store.refresh(force: true)
+        #expect(source.log == ["snapshot"])
+
+        await store.refresh(force: true, reprobePermissions: true)
+        #expect(source.log == ["snapshot", "reprobe", "snapshot"], "dropped BEFORE the snapshot that should see it")
+
+        await store.applicationDidBecomeActive()
+        #expect(source.log.last == "reprobe")
+
+        // Debounced (inside 60 s): no fetch, but the cache still goes.
+        await store.refresh(reprobePermissions: true)
+        #expect(Array(source.log.suffix(2)) == ["reprobe", "reprobe"])
+    }
+}

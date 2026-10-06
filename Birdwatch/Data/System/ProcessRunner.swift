@@ -100,7 +100,7 @@ actor ProcessRunner: ProcessRunning {
     func run(
         toolPath: String,
         arguments: [String] = [],
-        timeout: Duration = .seconds(10)
+        timeout: Duration
     ) async throws -> String {
         let (process, outPipe, errPipe) = Self.makeProcess(toolPath: toolPath, arguments: arguments)
 

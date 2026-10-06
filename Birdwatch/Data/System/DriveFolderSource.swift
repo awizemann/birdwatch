@@ -4,8 +4,9 @@ import os
 private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", category: "DriveFolderSource")
 
 /// Top-level iCloud Drive folder rows derived from the local CloudDocs container.
-/// A second NSMetadataQuery would be overkill for a shallow directory listing,
-/// so this enumerates the filesystem directly — always off the main actor.
+/// A shallow directory listing of the container — never an NSMetadataQuery,
+/// whose ubiquity scopes return nothing without an iCloud entitlement — run
+/// off the main actor.
 enum DriveFolderSource {
 
     /// Cap per-folder item counting so one huge folder can't make the scan expensive.
@@ -61,12 +62,28 @@ enum DriveFolderSource {
 
     /// Re-derives each folder's sync status from THIS cycle's transfers, so a
     /// cached scan never carries a stale "syncing" state.
-    nonisolated static func applying(transfers: [TransferItem], to folders: [DriveFolder]) -> [DriveFolder] {
+    ///
+    /// `retry`: bird's scheduled items. A folder holding some is "N items
+    /// not syncing"; while any item could be in ANY folder (no path on this
+    /// disk), a folder with no transfer and none of its own placed items
+    /// cannot be confirmed up to date either and reads `.unknown`.
+    nonisolated static func applying(
+        transfers: [TransferItem], to folders: [DriveFolder], retry: RetryAttribution? = nil
+    ) -> [DriveFolder] {
         // In flight only: a finished item lingers (completionGrace) at 1.0.
         let locations = transfers.filter { !$0.isDone }.map(\.location)
+        let unplaced = retry?.unplacedForFolders ?? 0
         return folders.map {
-            makeFolder(name: $0.name, itemCount: $0.itemCount, transferLocations: locations,
-                       itemCountIsCapped: $0.itemCountIsCapped)
+            var folder = makeFolder(name: $0.name, itemCount: $0.itemCount, transferLocations: locations,
+                                    itemCountIsCapped: $0.itemCountIsCapped)
+            if case .syncing = folder.status { return folder }
+            let own = retry?.count(folder: folder.name) ?? 0
+            if own > 0 {
+                folder.status = .notSyncing(items: own)
+            } else if unplaced > 0 {
+                folder.status = .unknown
+            }
+            return folder
         }
     }
 

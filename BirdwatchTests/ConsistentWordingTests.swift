@@ -43,6 +43,54 @@ struct ConsistentWordingTests {
         #expect(TransferWatchNotes.tile(bytes: 0, paused: false, unwatched: []).caption == nil)
     }
 
+    // The soak test saw "Zero KB" with no caption while the first read was
+    // still pending — a figure nobody had measured yet (C1).
+    @Test("Before the first read the Overview tiles say so instead of showing zero")
+    func tilesBeforeFirstRead() {
+        #expect(TransferWatchNotes.tile(bytes: 0, paused: false, unwatched: [], ready: false)
+                == ("—", "Waiting for first read"))
+        #expect(OverviewTiles.activeApps(count: 0, loaded: false, paused: false) == ("—", "Waiting for first read"))
+        #expect(OverviewTiles.activeApps(count: 2, loaded: true, paused: false) == ("2", nil))
+    }
+
+    // While paused the soak test saw "Active apps 0" and "0% CPU · Healthy"
+    // presented as live readings of a snapshot taken before the pause (C1).
+    @Test("Paused: active apps and daemon load are not shown as live")
+    func pausedFiguresAreNotLive() {
+        #expect(OverviewTiles.activeApps(count: 0, loaded: true, paused: true) == ("—", "Not watched while paused"))
+
+        let bird = DaemonStat(name: "bird", role: "", cpuPercent: 0, memoryMB: 40, pid: 1)
+        let paused = DaemonLoadDisplay(bird, paused: true)
+        #expect(paused.cpuText == "—")
+        #expect(paused.healthWord == "Not sampled while paused")
+        #expect(paused.barFraction == nil)
+        #expect(paused.color == Palette.gray)
+
+        for percent in [0.0, 14.99, 15, 29.6, 30, 134] {
+            var sample = bird
+            sample.cpuPercent = percent
+            let live = DaemonLoadDisplay(sample, paused: false)
+            #expect(live.color == cpuTint(percent), "one threshold rule for \(percent)")
+            #expect(live.cpuText == Format.cpu(percent))
+        }
+        #expect(DaemonLoadDisplay(bird, paused: false).healthWord == "Healthy")
+    }
+
+    @Test("A source's snapshot is not ready until the transfer watcher has swept once")
+    func watcherReadiness() async {
+        let gate = AsyncStream<Void>.makeStream()
+        let watcher = UbiquityTransferSource(roots: ["/nonexistent-bw-root"], sweep: { _ in
+            for await _ in gate.stream { break }
+            return []
+        })
+        watcher.start()
+        defer { watcher.stop() }
+        #expect(!watcher.hasSwept)
+        gate.continuation.yield()
+        await watcher.finishSweepForTesting()
+        #expect(watcher.hasSwept)
+    }
+
     @Test("Drive folders: gated Desktop/Documents, and never green while the engine is unknown or paused")
     func driveFolders() {
         let docs = DriveFolder(id: "d", name: "Documents", itemCount: 3, status: .upToDate)

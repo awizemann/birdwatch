@@ -24,8 +24,9 @@ settings:
     ENABLE_APP_SANDBOX: "NO"
     # The swift-stats write key is deliberately NOT a setting here. Info.plist
     # references $(BW_STATS_WRITE_KEY), which xcodebuild expands from the
-    # environment (scripts/release.sh exports it) or an -xcconfig outside the
-    # repo, and to "" when absent → analytics gated off
+    # environment (scripts/release.sh unsets it, then sets it only as an env
+    # prefix on the archive command) or an -xcconfig outside the repo, and to
+    # "" when absent → analytics gated off
     # (UsageAnalytics.makeTracker). Keeping it out of project.yml means
     # `xcodegen generate` can never bake it into the committed .xcodeproj — and
     # any definition here, even empty, would override the environment. Never
@@ -74,7 +75,7 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         # §13 merge base: Xcode generates Info.plist and merges it on top of
         # this partial file. Only keys the generator can't express live there
-        # (SUFeedURL, SUPublicEDKey, LSMinimumSystemVersion). Keeping
+        # (SUFeedURL, SUPublicEDKey, BWStatsWriteKey, LSMinimumSystemVersion). Keeping
         # GENERATE_INFOPLIST_FILE YES is required — a full hand-written plist
         # would lose the generated CFBundle* keys.
         INFOPLIST_FILE: Birdwatch/Resources/Info.plist
@@ -86,7 +87,11 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_NSPrincipalClass: NSApplication
-        ENABLE_TESTABILITY: "YES"
+      configs:
+        # Tests run the Debug configuration; Release must not export every
+        # internal symbol (larger binary, defeats dead-code stripping).
+        Debug:
+          ENABLE_TESTABILITY: "YES"
   BirdwatchTests:
     type: bundle.unit-test
     platform: macOS

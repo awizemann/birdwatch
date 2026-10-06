@@ -81,19 +81,33 @@ struct OverviewView: View {
 
     private func statGrid(activeCount: Int) -> some View {
         let unwatched = store.unwatchedApps
+        let ready = store.hasLoaded && store.transferWatchReady
         let up = TransferWatchNotes.tile(bytes: remainingBytes(direction: .upload),
-                                         paused: store.isGloballyPaused, unwatched: unwatched)
+                                         paused: store.isGloballyPaused, unwatched: unwatched, ready: ready)
         let down = TransferWatchNotes.tile(bytes: remainingBytes(direction: .download),
-                                           paused: store.isGloballyPaused, unwatched: unwatched)
-        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-            StatTile(label: "Uploading", value: up.value, tint: Palette.accent, caption: up.caption)
-            StatTile(label: "Downloading", value: down.value, tint: Palette.success, caption: down.caption)
-            StatTile(label: "Active apps", value: "\(activeCount)", tint: Surface.fg)
-            let issues = IssuesTile.display(count: store.issueCount, qualifiers: IssuesEmptyState.qualifiers(
-                isPaused: store.isGloballyPaused,
-                deliveredProducers: store.deliveredIssueProducers, conflictScanCap: store.conflictScanCap))
-            StatTile(label: "Issues", value: issues.value,
-                     tint: store.issueCount > 0 ? Palette.warning : Surface.fg, caption: issues.caption)
+                                           paused: store.isGloballyPaused, unwatched: unwatched, ready: ready)
+        let apps = OverviewTiles.activeApps(count: activeCount, loaded: store.hasLoaded,
+                                            paused: store.isGloballyPaused)
+        let issues = IssuesTile.display(count: store.issueCount, qualifiers: IssuesEmptyState.qualifiers(
+            isPaused: store.isGloballyPaused,
+            deliveredProducers: store.deliveredIssueProducers, conflictScanCap: store.conflictScanCap))
+        let upTile = StatTile(label: "Uploading", value: up.value, tint: Palette.accent, caption: up.caption)
+        let downTile = StatTile(label: "Downloading", value: down.value, tint: Palette.success, caption: down.caption)
+        let appsTile = StatTile(label: "Active apps", value: apps.value, tint: Surface.fg, caption: apps.caption)
+        let issuesTile = StatTile(label: "Issues", value: issues.value,
+                                  tint: store.issueCount > 0 ? Palette.warning : Surface.fg, caption: issues.caption)
+        // One row of four where it fits, else two rows of two — never three
+        // plus one stranded tile (the adaptive grid's answer at mid widths).
+        // Tiles in a row share its height, captioned or not.
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 14) {
+                upTile; downTile; appsTile; issuesTile
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Grid(horizontalSpacing: 14, verticalSpacing: 14) {
+                GridRow { upTile; downTile }
+                GridRow { appsTile; issuesTile }
+            }
         }
     }
 
@@ -259,7 +273,6 @@ private struct ProgressRing: View {
     var tint: Color = Palette.accent
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var spin = false
 
     private var indeterminate: Bool { ring == .indeterminate }
 
@@ -278,35 +291,29 @@ private struct ProgressRing: View {
             Circle()
                 // Idle: a dashed track — neither empty (0%) nor complete.
                 .stroke(Surface.hover, style: StrokeStyle(lineWidth: 10, dash: ring == .idle ? [4, 6] : []))
-            Circle()
-                .trim(from: 0, to: trim)
-                .stroke(
-                    // Fixed 0–360° gradient under the trim — the trim alone
-                    // clips it, so the gradient never double-scales.
-                    AngularGradient(
-                        colors: [tint.opacity(0.55), tint],
-                        center: .center,
-                        startAngle: .degrees(0),
-                        endAngle: .degrees(360)
-                    ),
-                    style: StrokeStyle(lineWidth: 10, lineCap: .round)
-                )
-                .rotationEffect(.degrees(indeterminate ? (spin ? 270 : -90) : -90))
-                .animation(
-                    indeterminate && !reduceMotion
-                        ? .linear(duration: 1.4).repeatForever(autoreverses: false) : nil,
-                    value: spin
-                )
-                // `indeterminate` is false at first paint (the snapshot has not
-                // landed yet), so an onAppear-only latch could never fire and
-                // never restart. Drive the flag off the VALUE both ways: true
-                // starts the repeating rotation, false stops it and resets the
-                // arc to the 12-o'clock start. onAppear covers the case where
-                // the view is created already indeterminate.
-                .onChange(of: indeterminate) { _, isIndeterminate in
-                    spin = isIndeterminate && !reduceMotion
-                }
-                .onAppear { spin = indeterminate && !reduceMotion }
+            if indeterminate && !reduceMotion {
+                // Created and destroyed with the indeterminate state, so each
+                // spell spins from 12 o'clock. Core Animation, not a SwiftUI
+                // repeatForever: that re-rendered the window every frame
+                // (~12% CPU on the Overview with nothing else changing).
+                SpinningArc(trim: trim, lineWidth: 10,
+                            colors: [tint.opacity(0.55), tint].map { NSColor($0).cgColor })
+            } else {
+                Circle()
+                    .trim(from: 0, to: trim)
+                    .stroke(
+                        // Fixed 0–360° gradient under the trim — the trim alone
+                        // clips it, so the gradient never double-scales.
+                        AngularGradient(
+                            colors: [tint.opacity(0.55), tint],
+                            center: .center,
+                            startAngle: .degrees(0),
+                            endAngle: .degrees(360)
+                        ),
+                        style: StrokeStyle(lineWidth: 10, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+            }
             VStack(spacing: 1) {
                 switch ring {
                 case .percent(let progress):
@@ -384,8 +391,86 @@ private struct StatTile: View {
                         .lineLimit(2)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Fills the row's height, so a tile without a caption is as tall
+            // as its captioned neighbours.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(minWidth: 140)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The indeterminate hero arc: a conic-gradient arc that turns once every
+/// 1.4 s, drawn and rotated by Core Animation in the render server.
+private struct SpinningArc: NSViewRepresentable {
+    let trim: Double
+    let lineWidth: CGFloat
+    let colors: [CGColor]
+
+    func makeNSView(context: Context) -> ArcView { ArcView() }
+
+    func updateNSView(_ view: ArcView, context: Context) {
+        view.configure(trim: trim, lineWidth: lineWidth, colors: colors)
+    }
+
+    final class ArcView: NSView {
+        private let spinner = CALayer()
+        private let gradient = CAGradientLayer()
+        private let arc = CAShapeLayer()
+        private var trim: Double = 0.22
+        private var lineWidth: CGFloat = 10
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            gradient.type = .conic
+            gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+            gradient.endPoint = CGPoint(x: 1, y: 0.5)
+            arc.fillColor = nil
+            arc.strokeColor = NSColor.black.cgColor
+            arc.lineCap = .round
+            gradient.mask = arc
+            spinner.addSublayer(gradient)
+            layer?.addSublayer(spinner)
+            let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+            turn.fromValue = 0
+            turn.toValue = -2 * Double.pi          // clockwise on screen
+            turn.duration = 1.4
+            turn.repeatCount = .infinity
+            turn.isRemovedOnCompletion = false
+            spinner.add(turn, forKey: "spin")
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        func configure(trim: Double, lineWidth: CGFloat, colors: [CGColor]) {
+            self.trim = trim
+            self.lineWidth = lineWidth
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            gradient.colors = colors
+            CATransaction.commit()
+            needsLayout = true
+        }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            spinner.bounds = bounds
+            spinner.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            gradient.frame = bounds
+            arc.frame = bounds
+            arc.lineWidth = lineWidth
+            let radius = (min(bounds.width, bounds.height) - lineWidth) / 2
+            // Starts at 12 o'clock and runs clockwise for `trim` of a turn
+            // (layer y points up on macOS, so clockwise is a negative angle).
+            let start = CGFloat.pi / 2
+            let path = CGMutablePath()
+            path.addArc(center: CGPoint(x: bounds.midX, y: bounds.midY), radius: radius,
+                        startAngle: start, endAngle: start - 2 * .pi * trim, clockwise: true)
+            arc.path = path
+            CATransaction.commit()
+        }
     }
 }

@@ -200,7 +200,9 @@ struct BirdwatchApp: App {
 
             Button("Refresh Now") {
                 store.record(.refreshForced)
-                Task { await store.refresh(force: true) }
+                // A deliberate refresh re-asks for permissions too: it is
+                // what someone presses right after granting access.
+                Task { await store.refresh(force: true, reprobePermissions: true) }
             }
             .keyboardShortcut("r", modifiers: .command)
 

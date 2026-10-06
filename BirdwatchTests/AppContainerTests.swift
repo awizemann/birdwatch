@@ -225,6 +225,54 @@ struct AppContainerSizeTests {
     }
 }
 
+/// Sets the UF_HIDDEN flag the way macOS does on most iCloud container
+/// directories, and proves it took (otherwise the test proves nothing).
+nonisolated func markHidden(_ url: URL) throws {
+    var target = url
+    var values = URLResourceValues()
+    values.isHidden = true
+    try target.setResourceValues(values)
+    target.removeAllCachedResourceValues()
+    let hidden = try target.resourceValues(forKeys: [.isHiddenKey]).isHidden
+    #expect(hidden == true, "the UF_HIDDEN flag did not stick")
+}
+
+@Suite("App container enumeration")
+struct AppContainerScanTests {
+
+    // `.skipsHiddenFiles` dropped every container macOS had flagged hidden —
+    // 197 of 221 on the reference Mac, including ones holding real data.
+    // Discriminates: the old option drops `iCloud~com~dayoneapp~dayone`.
+    @Test("Hidden-flagged containers with content are listed; dot-names are not")
+    func hiddenContainersListed() throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "bw-scan-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? fm.removeItem(at: root) }
+
+        let hidden = root.appending(path: "iCloud~com~dayoneapp~dayone", directoryHint: .isDirectory)
+        let visible = root.appending(path: "iCloud~md~obsidian", directoryHint: .isDirectory)
+        let dotDir = root.appending(path: ".Trash", directoryHint: .isDirectory)
+        for dir in [hidden, visible, dotDir] {
+            try fm.createDirectory(at: dir.appending(path: "Documents"), withIntermediateDirectories: true)
+        }
+        try Data("a".utf8).write(to: hidden.appending(path: "Documents/Journal.json"))
+        try Data("b".utf8).write(to: visible.appending(path: "Documents/Note.md"))
+        try Data("c".utf8).write(to: dotDir.appending(path: "Documents/Gone.md"))
+        // A container whose only content is a dot-file is an empty stub.
+        let stub = root.appending(path: "iCloud~com~example~stub", directoryHint: .isDirectory)
+        try fm.createDirectory(at: stub.appending(path: "Documents"), withIntermediateDirectories: true)
+        try Data("d".utf8).write(to: stub.appending(path: "Documents/.DS_Store"))
+        try markHidden(hidden)
+        try markHidden(stub)
+
+        let scanned = AppContainerSource.scanContainers(root: root)
+        let names = Set(scanned.map(\.directoryName))
+        #expect(names == ["iCloud~com~dayoneapp~dayone", "iCloud~md~obsidian"])
+        #expect(scanned.first { $0.directoryName == "iCloud~com~dayoneapp~dayone" }?.itemCount == 1)
+    }
+}
+
 @Suite("App container rows")
 struct AppContainerRowTests {
 

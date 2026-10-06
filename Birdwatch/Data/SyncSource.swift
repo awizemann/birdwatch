@@ -44,6 +44,10 @@ struct SyncSnapshot: Sendable {
     /// Set when the conflict scan stopped at its item cap (the cap's value),
     /// so "no conflicts" covers only the part of iCloud Drive it reached.
     var conflictScanCap: Int? = nil
+    /// The transfer watcher has completed its first sweep of the iCloud
+    /// roots. Until then an empty transfer list is "not read yet", not
+    /// "nothing transferring" (C1). Fixture sources default to ready.
+    var transferWatchReady: Bool = true
 }
 
 /// How fresh a background directory scan's result is (from
@@ -140,6 +144,12 @@ nonisolated protocol SyncSource: Sendable {
     /// so a dump collected before the move cannot resurrect it.
     /// Optional: sources without a cached dump keep the default no-op.
     func forgetRetryQueueItem(id: String) async
+    /// Drops any cached permission answers so the next snapshot probes them
+    /// afresh — called when a grant may just have changed (⌘R, the app
+    /// becoming active, onboarding finishing, the notification request
+    /// answering). Cheap: the probe itself runs on the next snapshot.
+    /// Optional: sources without a permissions cache keep the default no-op.
+    func invalidatePermissions() async
 }
 
 extension SyncSource {
@@ -148,4 +158,5 @@ extension SyncSource {
     /// file behind it, so "resolving" it trivially succeeds.
     func resolveConflict(issueID: String, keepVersionID: String, shownVersionIDs: Set<String>) async -> ConflictResolveResult { .resolved }
     func forgetRetryQueueItem(id: String) async {}
+    func invalidatePermissions() async {}
 }

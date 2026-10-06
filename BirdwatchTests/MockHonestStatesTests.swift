@@ -82,6 +82,26 @@ struct MockHonestStatesTests {
         #expect(Self.snapshot.bandwidth.uploadedTodayBytes == observedUp)
     }
 
+    // The old mock drew hours 7–23 whatever the time: bars before its own
+    // launch and in hours still to come, under "since Birdwatch started".
+    @Test("The mock chart covers only launch hour through the current hour")
+    func mockBandwidthRespectsLaunch() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "UTC"))
+        let day = try #require(calendar.date(from: DateComponents(year: 2026, month: 10, day: 6)))
+        let launch = day.addingTimeInterval(9 * 3_600 + 1_200)      // 09:20
+        let now = day.addingTimeInterval(13 * 3_600 + 300)          // 13:05
+        let observed = MockSyncSource.bandwidth(now: now, launchedAt: launch, calendar: calendar)
+            .hours.filter(\.isObserved).map(\.hour)
+        #expect(observed == [9, 10, 11, 12, 13])
+
+        let justLaunched = MockSyncSource.bandwidth(now: launch, launchedAt: launch, calendar: calendar)
+        #expect(justLaunched.hours.filter(\.isObserved).map(\.hour) == [9])
+
+        let yesterday = MockSyncSource.bandwidth(now: now, launchedAt: launch - 86_400, calendar: calendar)
+        #expect(yesterday.hours.filter(\.isObserved).map(\.hour) == Array(0...13), "today starts at midnight")
+    }
+
     // Fails on the old mock: a hand-written engine card ("Reachable ·
     // api.icloud.com", "Throttled — next window in 4m", a Δ token) that no
     // builder can produce, and that disagreed with the rows' bird state.

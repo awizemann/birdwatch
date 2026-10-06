@@ -155,6 +155,18 @@ func cpuTint(_ percent: Double) -> Color {
     if percent < 15 { Palette.success } else if percent < 30 { Palette.warning } else { Palette.error }
 }
 
+extension DaemonLoadDisplay {
+    /// Same thresholds as `cpuTint`; a paused (not current) figure is grey.
+    var color: Color {
+        switch tone {
+        case .healthy: Palette.success
+        case .elevated: Palette.warning
+        case .high: Palette.error
+        case .paused: Palette.gray
+        }
+    }
+}
+
 // MARK: - Formatting helpers (allocated once — never in view bodies)
 
 /// The type is MainActor (the default isolation) because its two stored
@@ -162,7 +174,8 @@ func cpuTint(_ percent: Double) -> Color {
 /// `relative` and `gigabytes(_:)` are main-actor only. Every FormatStyle-based
 /// helper (`capacity`, `percent`, `duration`, `compactUnit`, `cpu`, `memory`,
 /// `clockTime`, `hourOfDay`) is `nonisolated`, since data sources build
-/// user-facing text with them off the main actor.
+/// user-facing text with them off the main actor — as is `age(_:)`, which
+/// builds its own formatter in `relative`'s style.
 enum Format {
     static let bytes: ByteCountFormatter = {
         let f = ByteCountFormatter()
@@ -170,11 +183,24 @@ enum Format {
         return f
     }()
 
-    static let relative: RelativeDateTimeFormatter = {
+    static let relative: RelativeDateTimeFormatter = makeRelativeFormatter()
+
+    /// The one relative-age style ("4m ago", "vor 4 m"): `relative` and
+    /// `age(_:)` are both built here, so every surface words an age alike.
+    private nonisolated static func makeRelativeFormatter(locale: Locale = .current) -> RelativeDateTimeFormatter {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .abbreviated
+        f.locale = locale
         return f
-    }()
+    }
+
+    /// `relative`'s wording for an age in seconds, callable off the main
+    /// actor (data sources label last-known values with it). Builds its own
+    /// formatter — the shared one is not Sendable — which is fine for the
+    /// handful of labels a refresh cycle writes.
+    nonisolated static func age(_ seconds: TimeInterval, locale: Locale = .current) -> String {
+        makeRelativeFormatter(locale: locale).localizedString(fromTimeInterval: -max(0, seconds))
+    }
 
     static func size(_ bytes: Int64) -> String { Self.bytes.string(fromByteCount: bytes) }
 
@@ -272,8 +298,9 @@ enum Format {
         return gb.formatted(.number.precision(.fractionLength(0...1)).grouping(.never).locale(locale)) + " GB"
     }
 
-    /// "54%" in the user's locale (French "54 %", etc.).
-    nonisolated static func percent(_ fraction: Double, locale: Locale = .current) -> String {
-        fraction.formatted(.percent.precision(.fractionLength(0)).locale(locale))
+    /// "54%" in the user's locale (French "54 %", etc.). The one percentage
+    /// formatter; `fractionLength` is for callers that need a decimal ("0.5%").
+    nonisolated static func percent(_ fraction: Double, locale: Locale = .current, fractionLength: Int = 0) -> String {
+        fraction.formatted(.percent.precision(.fractionLength(fractionLength)).locale(locale))
     }
 }

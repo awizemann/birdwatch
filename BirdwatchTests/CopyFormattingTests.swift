@@ -96,6 +96,17 @@ struct CopyFormattingTests {
         #expect(BrctlDumpMapper.percent(0.5, locale: us) == "0.5%")
         #expect(BrctlDumpMapper.percent(57, locale: us) == "57%")
         #expect(BrctlDumpMapper.percent(0.5, locale: de) == "0,5\u{00A0}%")
+        #expect(BrctlDumpMapper.percent(57, locale: de) == Format.percent(0.57, locale: de),
+                "one percentage formatter, one locale spelling")
+    }
+
+    // Fails on the old English-only SystemSyncSource.ageText ("12 min ago"
+    // in every locale, and worded unlike every other age in the app).
+    @Test("Last-known ages are localised and worded like every other relative age")
+    func ages() {
+        #expect(Format.age(720, locale: us) == "12m ago")
+        #expect(Format.age(720, locale: de) == "vor 12 m")
+        #expect(Format.age(720) == Format.relative.localizedString(fromTimeInterval: -720))
     }
 
     // Fails on the old fixed "HH:mm:ss" formatter, which ignored 12-hour locales.

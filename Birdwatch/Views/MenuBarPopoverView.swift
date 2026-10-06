@@ -2,7 +2,7 @@ import AppKit
 import os
 import SwiftUI
 
-private let popoverLogger = Logger(subsystem: "com.wizemann.birdwatch", category: "popover")
+private nonisolated let popoverLogger = Logger(subsystem: "com.wizemann.birdwatch", category: "popover")
 
 struct MenuBarPopoverView: View {
     @Environment(SyncStore.self) private var store
@@ -102,9 +102,11 @@ struct MenuBarPopoverView: View {
                     // The chart carried no caption at all: sighted users saw
                     // bars with no unit and no hint that the figures are
                     // attributed, not measured (C2).
-                    Text("iCloud traffic per hour, today since Birdwatch started, estimated")
+                    Text(BandwidthPresentation.popoverCaption)
                         .scaledFont(size: 10.5)
                         .foregroundStyle(Surface.fg2)
+                        // Wraps rather than truncating at larger text sizes.
+                        .fixedSize(horizontal: false, vertical: true)
                         // The chart element already speaks this line as its
                         // accessibility label; leaving the caption visible to
                         // VoiceOver made it read twice in a row.
@@ -364,7 +366,7 @@ struct Sparkline: View {
         // popover, unreadable to VoiceOver. Summarize the series instead of
         // exposing 24 unlabeled bars, and keep the estimate wording (C2).
         .accessibilityElement()
-        .accessibilityLabel("iCloud traffic per hour, today since Birdwatch started, estimated")
+        .accessibilityLabel(BandwidthPresentation.popoverCaption)
         .accessibilityValue(Self.summary(of: hours))
     }
 

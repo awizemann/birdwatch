@@ -234,15 +234,13 @@ struct DiagnosticsView: View {
         }
     }
 
-    /// Visible CPU health word paired with the tint color (§12 — never color alone).
-    private func cpuHealthWord(_ percent: Double) -> String {
-        if percent < 15 { "Healthy" } else if percent < 30 { "Elevated" } else { "High load" }
-    }
-
     private func daemonRow(_ daemon: DaemonStat) -> some View {
-        HStack(spacing: 12) {
+        // Visible health word paired with the tint (§12 — never color alone).
+        let load = DaemonLoadDisplay(daemon, paused: store.isGloballyPaused)
+        let tint = load.color
+        return HStack(spacing: 12) {
             HStack(spacing: 12) {
-                StatusDot(color: cpuTint(daemon.cpuPercent))
+                StatusDot(color: tint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(daemon.name)
                         .scaledFont(size: 13, weight: .semibold, design: .monospaced)
@@ -253,20 +251,26 @@ struct DiagnosticsView: View {
                 }
                 .frame(minWidth: 170, alignment: .leading)
 
-                MiniProgressBar(progress: daemon.cpuPercent / 100, tint: cpuTint(daemon.cpuPercent), label: "\(daemon.name) CPU")
-                    .frame(maxWidth: 140)
+                Group {
+                    if let fraction = load.barFraction {
+                        MiniProgressBar(progress: fraction, tint: tint, label: "\(daemon.name) CPU")
+                    } else {
+                        Color.clear.frame(height: 1)
+                    }
+                }
+                .frame(maxWidth: 140)
 
-                Text(Format.cpu(daemon.cpuPercent))
+                Text(load.cpuText)
                     .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(Surface.fg)
                     .monospacedDigit()
                     .frame(minWidth: 70, alignment: .trailing)
 
-                Text(cpuHealthWord(daemon.cpuPercent))
+                Text(load.healthWord)
                     .scaledFont(size: 11.5, weight: .semibold)
-                    .foregroundStyle(cpuTint(daemon.cpuPercent))
+                    .foregroundStyle(tint)
 
-                Text(Format.memory(megabytes: daemon.memoryMB))
+                Text(load.memoryText)
                     .scaledFont(size: 12)
                     .foregroundStyle(Surface.fg2)
                     .monospacedDigit()

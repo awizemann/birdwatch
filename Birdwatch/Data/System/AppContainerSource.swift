@@ -59,14 +59,18 @@ enum AppContainerSource {
     /// BLOCKING: runs only on a `SingleFlightScan`'s own queue, never a
     /// cooperative-pool thread, and always runs to completion (a late result
     /// is cached and served next cycle).
-    nonisolated static func scanContainers() -> [Container] {
+    ///
+    /// WHY NOT `.skipsHiddenFiles`: macOS sets the hidden flag on most iCloud
+    /// container directories, so that option dropped ~90% of them (24 of 221
+    /// on the reference Mac — Day One, Ulysses and Notability among the lost).
+    /// Dot-files are filtered by name instead, as `RedactedPathResolver` does.
+    nonisolated static func scanContainers(root: URL = containersRoot) -> [Container] {
         let fm = FileManager.default
-        let root = containersRoot
         let entries: [URL]
         do {
             entries = try fm.contentsOfDirectory(
-                at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
-            )
+                at: root, includingPropertiesForKeys: [.isDirectoryKey], options: []
+            ).filter { !$0.lastPathComponent.hasPrefix(".") }
         } catch {
             let ns = error as NSError
             logger.error("Mobile Documents enumeration failed: \(ns.domain, privacy: .public) \(ns.code, privacy: .public) \(error.localizedDescription, privacy: .private)")
@@ -90,9 +94,12 @@ enum AppContainerSource {
                 do {
                     let items = try fm.contentsOfDirectory(
                         at: candidate, includingPropertiesForKeys: [.contentModificationDateKey],
-                        options: [.skipsHiddenFiles]
+                        options: []
                     )
-                    let visible = items.filter { $0.lastPathComponent != "Documents" || candidate == documents }
+                    let visible = items.filter {
+                        !$0.lastPathComponent.hasPrefix(".")
+                            && ($0.lastPathComponent != "Documents" || candidate == documents)
+                    }
                     if !visible.isEmpty {
                         count = min(visible.count, itemCountCap)
                         capped = visible.count > itemCountCap

@@ -118,7 +118,7 @@ struct AnonymousDeviceSummary: View {
                 .scaledFont(size: 13, weight: .semibold, design: .monospaced)
                 .foregroundStyle(Surface.fg)
                 .frame(minWidth: 92, alignment: .leading)
-            Text(Plural.count(device.itemCount, "item"))
+            Text(DevicesHeadline.itemCount(device.itemCount, countsArePartial: summary.countsArePartial))
                 .scaledFont(size: 12.5)
                 .foregroundStyle(Surface.fg2)
                 .monospacedDigit()
@@ -129,7 +129,7 @@ struct AnonymousDeviceSummary: View {
                 .monospacedDigit()
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Device \(device.index), \(Plural.count(device.itemCount, "item")), \(lastTouch(device))")
+        .accessibilityLabel("Device \(device.index), \(DevicesHeadline.itemCount(device.itemCount, countsArePartial: summary.countsArePartial)), \(lastTouch(device))")
     }
 
     private func lastTouch(_ device: DeviceActivityItem) -> String {

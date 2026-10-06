@@ -18,6 +18,7 @@ struct StorageView: View {
                 if isPromptVisible(storage) {
                     PlanPromptCard(
                         derivedCap: PlanPromptChoice.suggestedCap(storage),
+                        derivedIsSuggestion: PlanPromptChoice.seedIsSuggestion(storage),
                         onConfirm: { cap in
                             store.setPlanCap(cap)
                             promptOpen = false
@@ -382,6 +383,8 @@ struct StorageView: View {
 
 private struct PlanPromptCard: View {
     let derivedCap: Int64?
+    /// The pre-selection is Birdwatch's derivation, not the user's answer.
+    let derivedIsSuggestion: Bool
     let onConfirm: (Int64?) -> Void
     let onDismiss: () -> Void
 
@@ -438,6 +441,14 @@ private struct PlanPromptCard: View {
                         .labelsHidden()
                         .frame(width: 90)
                         .accessibilityLabel("Custom plan unit")
+                    }
+                    // Labelled while the answer is still the untouched
+                    // derivation — the moment it is edited it is the user's.
+                    if derivedIsSuggestion, chosenCap() == derivedCap {
+                        Text(PlanPromptChoice.suggestionNote)
+                            .scaledFont(size: 11.5)
+                            .foregroundStyle(Surface.fg3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                     Button("Confirm") { onConfirm(chosenCap()) }

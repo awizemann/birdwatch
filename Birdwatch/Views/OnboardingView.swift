@@ -184,8 +184,14 @@ struct OnboardingView: View {
                 } catch {
                     logger.error("notification authorization request failed: \(error.localizedDescription, privacy: .public)")
                 }
+                // The answer just changed the Notifications row.
+                await store.reprobePermissions()
             }
         }
+        // The store may have cached permission answers while setup was on
+        // screen (the popover refreshes too) — before the grant made here.
+        // No refresh of its own: the main window's first one follows.
+        Task { await store.reprobePermissions() }
         // fdaGranted is false for `.denied` AND `.unknown`, and can now be false
         // on completion via "Continue without Full Disk Access".
         store.record(.onboardingCompleted(fdaGranted: fdaGranted, notificationsRequested: optNotifications))

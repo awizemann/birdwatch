@@ -104,4 +104,26 @@ struct ComponentDecisionTests {
         #expect(!StatusDot.shouldPulse(pulses: true, reduceMotion: true))
         #expect(!StatusDot.shouldPulse(pulses: false, reduceMotion: false))
     }
+
+    // The pending buffer used to grow without bound during a log storm, with
+    // an insert-at-front per line; only the newest 25 were ever shown.
+    @MainActor
+    @Test("The log console keeps only the newest lines, newest first, in bounded memory")
+    func consoleLines() {
+        func line(_ second: Int) -> LogLine {
+            LogLine(id: UUID(), date: Self.now.addingTimeInterval(TimeInterval(second)), level: .info, message: "\(second)")
+        }
+        var buffer: [LogLine] = []
+        for second in 0..<1_000 { LogConsoleLines.buffer(line(second), into: &buffer) }
+        #expect(buffer.count <= LogConsoleLines.limit * 2)
+
+        let shown = LogConsoleLines.merged([line(-5), line(-6)], with: buffer)
+        #expect(shown.count == LogConsoleLines.limit)
+        #expect(shown.first?.message == "999")
+        #expect(shown.map(\.date) == shown.map(\.date).sorted(by: >))
+
+        // Seeds arrive newest-first; they still end up newest at the top.
+        let seeded = LogConsoleLines.merged([], with: [line(3), line(2), line(1)])
+        #expect(seeded.map(\.message) == ["3", "2", "1"])
+    }
 }

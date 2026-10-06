@@ -51,13 +51,18 @@ enum AppSyncStatus: Sendable, Hashable {
     /// first `brctl dump -i` has not landed). Neutral: neither a problem nor
     /// "up to date" — it is not counted as idle, active or an issue (C1).
     case unknown
+    /// bird has this many items scheduled and not yet synced (its retry
+    /// queue, from `brctl dump`) and nothing is transferring. Never "Up to
+    /// date", never green — and not a red error either: a backlog bird is
+    /// still holding is a warning (C1).
+    case notSyncing(items: Int)
 
     var isSyncing: Bool { if case .syncing = self { true } else { false } }
     /// Syncing with or without progress — anything that is doing work.
     var isActive: Bool {
         switch self {
         case .syncing, .active: true
-        case .upToDate, .paused, .issue, .unknown: false
+        case .upToDate, .paused, .issue, .unknown, .notSyncing: false
         }
     }
 }

@@ -7,8 +7,16 @@ import Foundation
 /// so there is no state to protect (real Phase 1 sources own Process handles
 /// and WILL be actors — see the SyncSource execution-context note).
 struct MockSyncSource: SyncSource {
+    /// When this source (so the `--mock` app) started. The bandwidth chart is
+    /// "since Birdwatch started", so hours before this — and hours still to
+    /// come — are never drawn as data.
+    let launchedAt: Date
 
-    nonisolated func currentSnapshot() async -> SyncSnapshot { Self.snapshot(now: Date()) }
+    nonisolated init(launchedAt: Date = Date()) { self.launchedAt = launchedAt }
+
+    nonisolated func currentSnapshot() async -> SyncSnapshot {
+        Self.snapshot(now: Date(), launchedAt: launchedAt)
+    }
 
     nonisolated func conflictDetail(issueID: String) async -> ConflictDetail? {
         guard issueID == "issue-conflict" else { return nil }
@@ -75,7 +83,9 @@ struct MockSyncSource: SyncSource {
     // CloudKit / File Provider, paused or errored app rows, device names
     // (bird redacts them), a "metered network" issue.
 
-    nonisolated static func snapshot(now: Date) -> SyncSnapshot {
+    /// `launchedAt` defaults to seven hours before `now` for callers (tests,
+    /// previews) that have no launch of their own.
+    nonisolated static func snapshot(now: Date, launchedAt: Date? = nil) -> SyncSnapshot {
         let transfers = transfers
         return SyncSnapshot(
             apps: apps(now: now, transfers: transfers),
@@ -89,7 +99,7 @@ struct MockSyncSource: SyncSource {
             retryQueue: retryQueue,
             engine: engine(now: now),
             permissions: permissions,
-            bandwidth: bandwidth,
+            bandwidth: bandwidth(now: now, launchedAt: launchedAt ?? now.addingTimeInterval(-7 * 3_600)),
             storage: storage,
             quotaRemainingBytes: quotaRemaining,
             notifications: notifications(now: now),
@@ -291,17 +301,23 @@ struct MockSyncSource: SyncSource {
         PermissionStatus(name: "Notifications", state: .granted),
     ]
 
-    /// Hours before Birdwatch started were never sampled: zeros there are
+    /// Only the hours from launch through the current hour of today were
+    /// "sampled": hours before Birdwatch started and hours still to come are
     /// not data (`isObserved: false`), and the day's totals add up only the
-    /// hours that were.
-    nonisolated private static let bandwidth: BandwidthSummary = {
+    /// hours that were. A launch on an earlier day observes from midnight.
+    nonisolated static func bandwidth(
+        now: Date, launchedAt: Date, calendar: Calendar = .current
+    ) -> BandwidthSummary {
         let up: [Int64] = [2, 1, 1, 0, 0, 1, 4, 12, 30, 48, 61, 52, 44, 58, 66, 51, 38, 42, 55, 34, 20, 12, 6, 3]
         let down: [Int64] = [4, 2, 1, 1, 0, 2, 8, 22, 41, 35, 28, 44, 52, 38, 30, 46, 61, 55, 40, 28, 18, 10, 8, 5]
-        let firstObservedHour = 7
+        let currentHour = calendar.component(.hour, from: now)
+        let firstObservedHour = calendar.isDate(launchedAt, inSameDayAs: now)
+            ? calendar.component(.hour, from: launchedAt) : 0
+        let observed = firstObservedHour...max(firstObservedHour, currentHour)
         let hours = (0..<24).map { h in
-            h < firstObservedHour
-                ? BandwidthHourSample(hour: h, uploadedBytes: 0, downloadedBytes: 0, isObserved: false)
-                : BandwidthHourSample(hour: h, uploadedBytes: up[h] * 18_000_000, downloadedBytes: down[h] * 15_000_000)
+            observed.contains(h) && launchedAt <= now
+                ? BandwidthHourSample(hour: h, uploadedBytes: up[h] * 18_000_000, downloadedBytes: down[h] * 15_000_000)
+                : BandwidthHourSample(hour: h, uploadedBytes: 0, downloadedBytes: 0, isObserved: false)
         }
         return BandwidthSummary(
             uploadedTodayBytes: hours.reduce(0) { $0 + $1.uploadedBytes },
@@ -309,7 +325,7 @@ struct MockSyncSource: SyncSource {
             currentRateBytesPerSec: 8_200_000,
             hours: hours
         )
-    }()
+    }
 
     /// bird's `brctl quota` remaining figure: low enough for the real
     /// low-quota issue, and the floor the plan cap is derived from.

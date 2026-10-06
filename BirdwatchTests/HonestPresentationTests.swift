@@ -414,6 +414,9 @@ struct BandwidthHonestyTests {
         let observed = [BandwidthHourSample(hour: 9, uploadedBytes: 0, downloadedBytes: 0, isObserved: true)]
         #expect(BandwidthPresentation.totalText(1_000, hours: observed).hasPrefix("≈ "))
         #expect(BandwidthPresentation.chartTitle == "Today, since Birdwatch started")
+        // The popover truncated "…since Birdwatch started, esti…": the
+        // estimate mark must come first, where truncation never reaches.
+        #expect(BandwidthPresentation.popoverCaption.hasPrefix("Estimated "))
     }
 
     @Test("With no hour observed, totals are \"—\", not \"≈ Zero KB\"")
@@ -450,6 +453,9 @@ struct HeadlineTests {
     func devicesPartial() {
         #expect(DevicesHeadline.text(registered: 34, wroteItems: 31, activeThisWeek: 4, countsArePartial: true)
                 == "34 devices registered · at least 31 have written items · at least 4 active this week")
+        // Per-row counts used to read as exact ("73 items") under that header.
+        #expect(DevicesHeadline.itemCount(73, countsArePartial: true) == "at least 73 items")
+        #expect(DevicesHeadline.itemCount(1, countsArePartial: false) == "1 item")
     }
 
     @Test("Issues empty state: clean only when nothing limits the answer")

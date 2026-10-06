@@ -23,7 +23,7 @@ final class SystemSyncSource: SyncSource {
     private let folderScan = SingleFlightScan(label: "drive-folders") { DriveFolderSource.scanFolders() }
     private let containerScan = SingleFlightScan(label: "app-containers") { AppContainerSource.scanContainers() }
     private let bandwidthSource = BandwidthSource()
-    @MainActor private var metadata: UbiquityTransferSource?
+    @MainActor private var transferWatcher: UbiquityTransferSource?
     @MainActor private var activityLog: ActivityLog?
     // Conflict scan cache: enumerating CloudDocs + NSFileVersion probing is
     // too heavy for every 15s refresh. 5-minute TTL like cachedPermissions.
@@ -40,7 +40,8 @@ final class SystemSyncSource: SyncSource {
     // Cached because the notifications probe races a 1.5s timeout — paying that
     // on every 15s refresh (or on first paint) is wasted latency. 5-minute TTL
     // so a grant made mid-session (e.g. FDA flipped in System Settings) shows
-    // up without a relaunch.
+    // up without a relaunch — and dropped early by `invalidatePermissions()`
+    // whenever a grant may just have changed (⌘R, app activation, onboarding).
     @MainActor private var cachedPermissions: (values: [PermissionStatus], at: Date)?
     @MainActor private var conflictScanInFlight = false
     @MainActor private var lastConflictScanAttempt: Date?
@@ -115,6 +116,9 @@ final class SystemSyncSource: SyncSource {
         var retryQueueTotal: Int
         var issues: [IssueItem]
         var deviceSummary: DeviceActivitySummary?
+        /// Which app / Drive folder each scheduled item belongs to — what
+        /// keeps those rows from reading "Up to date" while bird holds them.
+        var retryAttribution: RetryAttribution
         /// Kept so `enrich` can be applied to the *current* cycle's engine
         /// base. `enrich` itself is O(1) — it reads a handful of scalar
         /// fields — so there is nothing to memoize about it beyond holding
@@ -137,6 +141,7 @@ final class SystemSyncSource: SyncSource {
             retryQueueTotal = BrctlDumpMapper.retryQueueTotal(from: dump)
             issues = BrctlDumpMapper.issues(from: dump)
             deviceSummary = BrctlDumpMapper.deviceSummary(from: dump)
+            retryAttribution = BrctlDumpMapper.retryAttribution(from: dump, candidates: candidates)
             self.dump = dump
         }
     }
@@ -173,28 +178,29 @@ final class SystemSyncSource: SyncSource {
 
     /// Test seam: the transfer watcher the gate drives (normally created
     /// lazily by the first snapshot).
-    @MainActor func installTransferWatcherForTesting(_ watcher: UbiquityTransferSource) { metadata = watcher }
+    @MainActor func installTransferWatcherForTesting(_ watcher: UbiquityTransferSource) { transferWatcher = watcher }
 
     func currentSnapshot() async -> SyncSnapshot {
-        // Lazily start the metadata query on first use (needs the main runloop).
-        let (transfers, activity) = await MainActor.run { () -> ([TransferItem], [ActivityEvent]) in
-            if metadata == nil {
+        // Lazily start the transfer watcher (FSEvents + ubiquity resource
+        // values) on first use; it needs the main runloop.
+        let (transfers, activity, watchReady) = await MainActor.run { () -> ([TransferItem], [ActivityEvent], Bool) in
+            if transferWatcher == nil {
                 let m = UbiquityTransferSource()
                 m.start()
-                metadata = m
+                transferWatcher = m
             }
             if activityLog == nil { activityLog = ActivityLog() }
-            let transfers = metadata?.transfers ?? []
+            let transfers = transferWatcher?.transfers ?? []
             // Feed the fresh snapshot; the log diffs against the previous one.
             // While the watcher is paused its (cleared) list is not news.
             let activity: [ActivityEvent]
-            if metadata?.isPaused == true {
+            if transferWatcher?.isPaused == true {
                 activityLog?.pause()
                 activity = activityLog?.events ?? []
             } else {
                 activity = activityLog?.record(transfers) ?? []
             }
-            return (transfers, activity)
+            return (transfers, activity, transferWatcher?.hasSwept ?? false)
         }
 
         // No `brctl status` here: it blocks bird for 15–28 s (a charter
@@ -217,8 +223,6 @@ final class SystemSyncSource: SyncSource {
         let (quota, processStats, folderReading) =
             await (quotaTask, processStatsTask, foldersTask)
         let (daemons, bandwidth) = processStats
-        // value: nil = no scan finished yet; .some(nil) = the root was unreadable.
-        let folders = DriveFolderSource.applying(transfers: transfers, to: (folderReading.value ?? nil) ?? [])
         // One hop for everything the background dump refresh maintains.
         // Read the MAPPED result, not the dump: the mapping (retry queue sort,
         // issue derivation, device rollup) walks every pending item in a
@@ -226,6 +230,9 @@ final class SystemSyncSource: SyncSource {
         let (mapped, dumpAt, statusRead, dumpFailure) = await MainActor.run {
             (cachedDump?.mapped, cachedDump?.at, statusCache, lastDumpFailure)
         }
+        // value: nil = no scan finished yet; .some(nil) = the root was unreadable.
+        let folders = DriveFolderSource.applying(
+            transfers: transfers, to: (folderReading.value ?? nil) ?? [], retry: mapped?.retryAttribution)
         let cloudDocsRead = Self.cloudDocsReading(
             mapped: mapped, dumpAt: dumpAt, dumpFailure: dumpFailure, statusRead: statusRead, now: Date())
         let status = cloudDocsRead.state
@@ -316,7 +323,8 @@ final class SystemSyncSource: SyncSource {
             cloudKitApps: observedCloudKit,
             stateNote: cloudDocsRead.staleNote,
             desktopDocuments: statusRead.desktopDocuments(now: Date()),
-            desktopDocumentsReadable: readsDesktopDocuments
+            desktopDocumentsReadable: readsDesktopDocuments,
+            retry: mapped?.retryAttribution
         )
 
         // Per-producer delivery (see SyncSnapshot.issueProducers). Only a
@@ -328,7 +336,10 @@ final class SystemSyncSource: SyncSource {
         var producers: [IssueProducer: Set<String>] = [:]
         if quota != nil { producers[.quota] = Set(quotaIssues.map(\.id)) }
         if cachedC != nil { producers[.conflicts] = Set(conflicts.map(\.issue.id)) }
-        if let mapped { producers[.dump] = Set(mapped.issues.map(\.id)) }
+        // A dump older than `dumpIssueMaxStaleness` no longer delivers: its
+        // "haven't synced in N days" counts froze when it was taken.
+        let dumpIssues = Self.deliverableDumpIssues(mapped, dumpAt: dumpAt, now: Date())
+        if let dumpIssues { producers[.dump] = Set(dumpIssues.map(\.id)) }
         // Only meaningful while a scan result is being served.
         let conflictsCapped = cachedC != nil ? await MainActor.run(body: { conflictScanCapped }) : false
         let folderRootUnreadable: Bool = if case .some(.none) = folderReading.value { true } else { false }
@@ -341,7 +352,7 @@ final class SystemSyncSource: SyncSource {
             deviceActivity: mapped?.deviceSummary,
             issues: quotaIssues
                 + conflicts.map(\.issue)
-                + (mapped?.issues ?? []),
+                + (dumpIssues ?? []),
             activity: activity,
             daemons: daemons,
             retryQueue: mapped?.retryQueue ?? [],
@@ -371,7 +382,8 @@ final class SystemSyncSource: SyncSource {
             folderScan: ScanFreshness(completedAt: folderReading.completedAt, isOverdue: folderReading.isOverdue,
                                       isUnreadable: folderRootUnreadable),
             containerScan: ScanFreshness(completedAt: containerReading.completedAt, isOverdue: containerReading.isOverdue),
-            conflictScanCap: conflictsCapped ? ConflictSource.maxItemsVisited : nil
+            conflictScanCap: conflictsCapped ? ConflictSource.maxItemsVisited : nil,
+            transferWatchReady: watchReady
         )
     }
 
@@ -388,7 +400,7 @@ final class SystemSyncSource: SyncSource {
         guard let fileURL = detail?.fileURL else {
             // Not "failed": the scan no longer lists it, so a retry can never
             // succeed and the UI must not suggest one (C1).
-            logger.info("resolveConflict: no cached conflict for issue \(issueID, privacy: .public)")
+            logger.info("resolveConflict: no cached conflict for issue \(issueID, privacy: .private)")
             return .notFound
         }
         let result = await ConflictSource.resolve(
@@ -409,6 +421,13 @@ final class SystemSyncSource: SyncSource {
             break   // ConflictSource logged the cause; the conflict stays open
         }
         return result
+    }
+
+    /// Only nils the cache (one MainActor hop, no I/O); the re-probe runs on
+    /// the next snapshot, off the main actor, inside the Desktop & Documents
+    /// gate.
+    func invalidatePermissions() async {
+        await MainActor.run { cachedPermissions = nil }
     }
 
     // MARK: - brctl dump + status refresh (background; split out for tests)
@@ -521,7 +540,7 @@ final class SystemSyncSource: SyncSource {
         }
         let fullDiskAccess = permissions.first { $0.name == "Full Disk Access" }?.state ?? .unknown
         let reads = TransferWatchPolicy.readsDesktopDocuments(featureOn: featureOn, fullDiskAccess: fullDiskAccess)
-        await MainActor.run { metadata?.setIncludesDesktopDocuments(reads) }
+        await MainActor.run { transferWatcher?.setIncludesDesktopDocuments(reads) }
 
         // Local footprint: served stale-or-empty, refreshed in the background at
         // most every 5 minutes. Sizes land on a later cycle — never gating paint.
@@ -705,14 +724,11 @@ final class SystemSyncSource: SyncSource {
         // pending items, not of shown rows), so the "Showing N of M" line has
         // to lose them from BOTH halves.
         mapped.retryQueueTotal = max(mapped.retryQueue.count, mapped.retryQueueTotal - kept.count)
+        mapped.retryAttribution = mapped.retryAttribution.removing(kept)
         return (mapped, kept)
     }
 
     // MARK: - Assembly (pure, testable)
-
-    /// True when brctl status reports the Desktop & Documents feature ON
-    /// ("Desktop & Documents: current=YES"). The single source for every
-    /// decision to touch ~/Desktop or ~/Documents.
 
     /// The ONE `/bin/ps` of a refresh cycle. The process table is sampled once
     /// and the SAME raw output feeds both consumers: daemon CPU/memory (which
@@ -732,6 +748,9 @@ final class SystemSyncSource: SyncSource {
         return await (daemons, summary)
     }
 
+    /// True when brctl status reports the Desktop & Documents feature ON
+    /// ("Desktop & Documents: current=YES"). The single source for every
+    /// decision to touch ~/Desktop or ~/Documents.
     nonisolated static func desktopDocumentsSynced(_ status: BrctlStatus?) -> Bool {
         status?.apps.contains { $0.name.hasPrefix("Desktop") && $0.isCurrent } ?? false
     }
@@ -748,7 +767,8 @@ final class SystemSyncSource: SyncSource {
         cloudKitApps: [AppSyncState] = [],
         stateNote: String? = nil,
         desktopDocuments: DesktopDocumentsFlag? = nil,
-        desktopDocumentsReadable: Bool = true
+        desktopDocumentsReadable: Bool = true,
+        retry: RetryAttribution? = nil
     ) -> [AppSyncState] {
         var apps: [AppSyncState] = []
         let home = NSHomeDirectory()
@@ -778,6 +798,9 @@ final class SystemSyncSource: SyncSource {
             id: "icloud-drive", name: "iCloud Drive", tile: "30b0c7",
             location: "~/Library/Mobile Documents/com~apple~CloudDocs"
         )
+        // Every scheduled item is bird's, wherever it lives: the engine row
+        // is not up to date while any of them waits.
+        Self.applyRetryBacklog(retry?.total ?? 0, to: &drive, stateNote: stateNote)
         // Desktop & Documents is unknown until brctl status answers, and has
         // no row of its own until it is known to be on — so the iCloud Drive
         // row says what is (not) known, instead of the feature silently
@@ -842,7 +865,12 @@ final class SystemSyncSource: SyncSource {
         let existing = Set(apps.map(\.id))
         apps.append(contentsOf: AppContainerSource
             .makeApps(containers: containers, transfers: transfers, localSizes: localSizes)
-            .filter { !existing.contains($0.id) })
+            .filter { !existing.contains($0.id) }
+            .map { row in
+                var row = row
+                Self.applyRetryBacklog(retry?.count(appID: row.id) ?? 0, to: &row, stateNote: nil)
+                return row
+            })
         return apps
     }
 
@@ -865,6 +893,23 @@ final class SystemSyncSource: SyncSource {
     ///   though no file-level transfer is visible);
     /// - idle → up to date, worded as what bird said, not "all files synced".
     /// A not-current state carries its `stateNote` ("last-known, … ago").
+    /// bird holds `items` scheduled items for this row (its retry queue).
+    /// A row that is transferring keeps saying so; otherwise it is "N items
+    /// not syncing" — never "Up to date" — and its pending figure is the
+    /// backlog, not "None".
+    nonisolated static func applyRetryBacklog(_ items: Int, to row: inout AppSyncState, stateNote: String?) {
+        guard items > 0 else { return }
+        switch row.status {
+        case .syncing, .unknown: return      // transferring says so; unread stays unread
+        default: break
+        }
+        row.status = .notSyncing(items: items)
+        // The status label already says "N items not syncing"; the line says why.
+        row.statusLine = "Scheduled in bird's retry queue"
+            + (stateNote.map { " · \($0)" } ?? "")
+        row.pendingItems = items
+    }
+
     nonisolated static func cloudDocsRowStatus(
         ownTransfers: [TransferItem], state: BrctlStatus?, stateNote: String?
     ) -> (AppSyncStatus, String) {
@@ -933,22 +978,13 @@ final class SystemSyncSource: SyncSource {
             container.apps = statusRead.lastGood?.apps ?? []
             reading.state = container
             if dumpFailure != nil, let dumpAge {
-                reading.staleNote = "last-known, brctl dump \(ageText(dumpAge))"
+                reading.staleNote = "last-known, brctl dump \(Format.age(dumpAge))"
             }
         } else if let status = statusRead.lastGood, let at = statusRead.lastGoodAt {
             reading.state = status
-            reading.staleNote = "last-known, brctl status \(ageText(now.timeIntervalSince(at)))"
+            reading.staleNote = "last-known, brctl status \(Format.age(now.timeIntervalSince(at)))"
         }
         return reading
-    }
-
-    /// "under a minute ago", "12 min ago", "3 h ago".
-    nonisolated static func ageText(_ seconds: TimeInterval) -> String {
-        switch seconds {
-        case ..<60: "under a minute ago"
-        case ..<5400: "\(Int(seconds / 60)) min ago"
-        default: "\(Int(seconds / 3600)) h ago"
-        }
     }
 
     /// Whether a footprint cache (local sizes, breakdown) must be re-walked:
@@ -965,6 +1001,22 @@ final class SystemSyncSource: SyncSource {
     /// Dump refresh pacing: `dumpTTL` while dumps succeed, doubling per
     /// consecutive failure up to 10 minutes — a brctl that keeps timing out
     /// is not hammered every minute.
+    /// How long the last good dump's issues may keep being raised while
+    /// refreshes fail. Same bound as `conflictMaxStaleness`: past it the
+    /// issues are withdrawn rather than shown as if current (C1) — their
+    /// "haven't synced in N days" counts stopped advancing when the dump was
+    /// taken. Withdrawn, the dump producer stops delivering and so loses its
+    /// baseline; the retry queue and engine card keep their own last-known
+    /// labels.
+    static let dumpIssueMaxStaleness: TimeInterval = 900
+
+    /// The cached dump's issues while it is young enough to stand behind,
+    /// else nil (= the dump producer did not deliver this cycle).
+    nonisolated static func deliverableDumpIssues(_ mapped: MappedDump?, dumpAt: Date?, now: Date) -> [IssueItem]? {
+        guard let mapped, let dumpAt, now.timeIntervalSince(dumpAt) < dumpIssueMaxStaleness else { return nil }
+        return mapped.issues
+    }
+
     nonisolated static func dumpRetryInterval(consecutiveFailures: Int) -> TimeInterval {
         guard consecutiveFailures > 1 else { return dumpTTL }
         return min(600, dumpTTL * pow(2, Double(min(consecutiveFailures - 1, 4))))
@@ -1010,7 +1062,7 @@ final class SystemSyncSource: SyncSource {
         engine.metadataHealthy = true
         engine = BrctlDumpMapper.enrich(engine, with: mapped.dump)
         if let dumpFailure {
-            let age = reading.dumpAge.map { ", shown dump is from \(ageText($0))" } ?? ""
+            let age = reading.dumpAge.map { ", shown dump is from \(Format.age($0))" } ?? ""
             engine.metadataIndex += " · last-known (latest brctl dump \(dumpFailure.summary)\(age))"
             engine.metadataHealthy = false
         }

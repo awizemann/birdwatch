@@ -3,6 +3,11 @@ import SwiftUI
 /// iCloud Drive — folders table + files in transfer (handoff §3).
 struct DriveView: View {
     @Environment(SyncStore.self) private var store
+    // FIXED column widths, shared by the header and every row: with only a
+    // minimum, a wide status ("Not watched — needs Full Disk Access") pushed
+    // that row's Items figure left of the others. Scaled with Dynamic Type.
+    @ScaledMetric(relativeTo: .body) private var itemsWidth: CGFloat = 110
+    @ScaledMetric(relativeTo: .body) private var statusWidth: CGFloat = 230
 
     var body: some View {
         ContentColumn {
@@ -23,9 +28,9 @@ struct DriveView: View {
                         SectionLabel(text: "Folder")
                         Spacer()
                         SectionLabel(text: "Items")
-                            .frame(minWidth: 110, alignment: .leading)
+                            .frame(width: itemsWidth, alignment: .leading)
                         SectionLabel(text: "Status")
-                            .frame(minWidth: 150, alignment: .trailing)
+                            .frame(width: statusWidth, alignment: .trailing)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
@@ -39,7 +44,7 @@ struct DriveView: View {
                             progressIsIndeterminate: store.progressIsIndeterminate(folderName: folder.name),
                             engineStateUnknown: engineUnknown, paused: store.isGloballyPaused,
                             desktopDocumentsUnwatched: ddUnwatched
-                        ))
+                        ), itemsWidth: itemsWidth, statusWidth: statusWidth)
                     }
                 }
             }
@@ -84,6 +89,8 @@ struct DriveView: View {
 private struct FolderRow: View {
     let folder: DriveFolder
     let display: SyncStatusDisplay
+    let itemsWidth: CGFloat
+    let statusWidth: CGFloat
 
     var body: some View {
         HStack(spacing: 10) {
@@ -99,10 +106,10 @@ private struct FolderRow: View {
                 .scaledFont(size: 12.5)
                 .foregroundStyle(Surface.fg2)
                 .monospacedDigit()
-                .frame(minWidth: 110, alignment: .leading)
+                .frame(width: itemsWidth, alignment: .leading)
 
             statusColumn
-                .frame(minWidth: 150, alignment: .trailing)
+                .frame(width: statusWidth, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -135,6 +142,8 @@ private struct FolderRow: View {
             Text(display.label)
                 .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(display.tone.color)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
         }
     }
 }

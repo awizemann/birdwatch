@@ -303,6 +303,24 @@ struct SystemSyncSourceAssemblyTests {
         #expect(await source.conflictDetail(issueID: "conflict-a") == nil, "every reader sees the drop")
     }
 
+    // A good dump followed by failing refreshes used to keep raising its
+    // issues forever, with a "haven't synced in N days" count frozen at the
+    // dump's age (C1). Past the bound the dump producer stops delivering.
+    @Test("A good dump's issues stop being delivered once it is older than the staleness bound")
+    func staleDumpIssuesAgeOut() {
+        var mapped = SystemSyncSource.MappedDump(BrctlDump())
+        mapped.issues = [TestIssues.make(id: "stuck-items", action: .openDiagnostics, severity: .warning)]
+        let taken = Date(timeIntervalSinceReferenceDate: 50_000)
+        let bound = SystemSyncSource.dumpIssueMaxStaleness
+
+        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, now: taken + bound - 1)?.map(\.id)
+                == ["stuck-items"], "inside the bound the issues are still raised")
+        #expect(SystemSyncSource.deliverableDumpIssues(mapped, dumpAt: taken, now: taken + bound) == nil,
+                "past it the producer does not deliver — no frozen counts shown as current")
+        #expect(SystemSyncSource.deliverableDumpIssues(nil, dumpAt: nil, now: taken) == nil)
+        #expect(bound == SystemSyncSource.conflictMaxStaleness)
+    }
+
     // MARK: - Engine card
 
     private static let idleState = BrctlStatus(
@@ -351,8 +369,8 @@ struct SystemSyncSourceAssemblyTests {
         let reading = Self.reading(failure: .timedOut(seconds: 15), status: cache)
         let engine = SystemSyncSource.engine(
             reading: reading, mapped: nil, dumpFailure: .timedOut(seconds: 15), fullDiskAccess: .granted)
-        #expect(engine.clientState == "idle (last-known, brctl status 12 min ago)")
-        #expect(engine.serverState == "up (last-known, brctl status 12 min ago)")
+        #expect(engine.clientState == "idle (last-known, brctl status \(Format.age(720)))")
+        #expect(engine.serverState == "up (last-known, brctl status \(Format.age(720)))")
         #expect(engine.metadataIndex == "brctl dump timed out after 15 s")
         #expect(!engine.metadataHealthy)
     }
@@ -369,9 +387,9 @@ struct SystemSyncSourceAssemblyTests {
         let stale = SystemSyncSource.engine(
             reading: Self.reading(mapped: mapped, dumpAge: 240, failure: .timedOut(seconds: 15)),
             mapped: mapped, dumpFailure: .timedOut(seconds: 15), fullDiskAccess: .granted)
-        #expect(stale.clientState == "idle (last-known, brctl dump 4 min ago)")
+        #expect(stale.clientState == "idle (last-known, brctl dump \(Format.age(240)))")
         #expect(stale.metadataIndex
-                == "Read via brctl dump · last-known (latest brctl dump timed out after 15 s, shown dump is from 4 min ago)")
+                == "Read via brctl dump · last-known (latest brctl dump timed out after 15 s, shown dump is from \(Format.age(240)))")
         #expect(!stale.metadataHealthy)
     }
 
@@ -457,7 +475,7 @@ struct SystemSyncSourceAssemblyTests {
             Issue.record("expected a last-known ON"); return
         }
         #expect(note.contains("Last-known"))
-        #expect(note.contains("10 min ago"))
+        #expect(note.contains(Format.age(600)))
         #expect(note.contains("timed out after 45 s"))
 
         let apps = SystemSyncSource.buildApps(
@@ -509,7 +527,7 @@ struct SystemSyncSourceAssemblyTests {
 
         let statusOnly = Self.reading(status: cache)
         #expect(statusOnly.state?.serverState == "old")
-        #expect(statusOnly.staleNote == "last-known, brctl status 2 min ago")
+        #expect(statusOnly.staleNote == "last-known, brctl status \(Format.age(120))")
     }
 
     // MARK: - Footprint caches vs the Desktop & Documents flag

@@ -1,3 +1,5 @@
+import AppKit
+import QuartzCore
 import SwiftUI
 
 // MARK: - Dynamic Type
@@ -149,38 +151,74 @@ struct MiniProgressBar: View {
     }
 }
 
-/// The travelling shimmer, in its own view so it owns its own `@State`.
+/// The travelling shimmer, created and destroyed with the indeterminate
+/// branch so every indeterminate spell starts a fresh run.
 ///
-/// WHY SEPARATE: when the phase state lived on `MiniProgressBar`, a *second*
-/// indeterminate spell reused the surviving view identity — `shimmerPhase` was
-/// still 1 from the first spell, `onAppear` set it to 1 again, and SwiftUI saw
-/// old == new, so no animation was scheduled and the bar sat frozen. Here the
-/// view is created and destroyed with the indeterminate branch, so every spell
-/// gets a fresh `-1` and a real -1 → 1 transition.
+/// Core Animation, not a SwiftUI `repeatForever` (same reason as
+/// `PulsingDot`): a SwiftUI repeating animation re-renders the window's view
+/// graph every display frame; a layer animation runs in the render server.
 private struct ShimmerFill: View {
     let width: CGFloat
     let height: CGFloat
     let tint: Color
 
-    @State private var shimmerPhase: CGFloat = -1
-
     var body: some View {
-        Capsule()
-            .fill(
-                LinearGradient(
-                    colors: [tint.opacity(0.15), tint, tint.opacity(0.15)],
-                    startPoint: .leading, endPoint: .trailing
-                )
-            )
-            .frame(width: max(height, width * 0.45))
-            // Travels left edge → right edge and wraps; stays inside the
-            // track, so no clipping of the parent is needed.
-            .offset(x: (shimmerPhase + 1) / 2 * max(0, width * 0.55))
-            .onAppear {
-                withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
-                    shimmerPhase = 1
-                }
-            }
+        ShimmerLayer(colors: [tint.opacity(0.15), tint, tint.opacity(0.15)].map { NSColor($0).cgColor })
+            .frame(width: width, height: height)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A capsule 45% of the track wide, travelling left edge → right edge and
+/// wrapping, every 1.2 s; it stays inside the track, so nothing is clipped.
+private struct ShimmerLayer: NSViewRepresentable {
+    let colors: [CGColor]
+
+    func makeNSView(context: Context) -> ShimmerView { ShimmerView() }
+
+    func updateNSView(_ view: ShimmerView, context: Context) { view.setColors(colors) }
+
+    final class ShimmerView: NSView {
+        private let capsule = CAGradientLayer()
+        private var animatedWidth: CGFloat = -1
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            capsule.startPoint = CGPoint(x: 0, y: 0.5)
+            capsule.endPoint = CGPoint(x: 1, y: 0.5)
+            layer?.addSublayer(capsule)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        func setColors(_ colors: [CGColor]) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            capsule.colors = colors
+            CATransaction.commit()
+        }
+
+        override func layout() {
+            super.layout()
+            let width = bounds.width, height = bounds.height
+            guard width != animatedWidth else { return }
+            animatedWidth = width
+            let capsuleWidth = max(height, width * 0.45)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            capsule.bounds = CGRect(x: 0, y: 0, width: capsuleWidth, height: height)
+            capsule.cornerRadius = height / 2
+            capsule.position = CGPoint(x: capsuleWidth / 2, y: height / 2)
+            CATransaction.commit()
+            let travel = CABasicAnimation(keyPath: "position.x")
+            travel.fromValue = capsuleWidth / 2
+            travel.toValue = capsuleWidth / 2 + max(0, width * 0.55)
+            travel.duration = 1.2
+            travel.repeatCount = .infinity
+            travel.isRemovedOnCompletion = false
+            capsule.add(travel, forKey: "shimmer")
+        }
     }
 }
 
@@ -208,21 +246,60 @@ struct StatusDot: View {
     }
 }
 
-/// The pulse, in its own view so it owns its own `@State` — the same reason
-/// as `ShimmerFill`. When the flag lived on `StatusDot` and was latched in
-/// `onAppear`, a dot that appeared idle and later started syncing never
-/// pulsed (onAppear had already run). Here the view is created with the
-/// pulsing branch, so every idle → working change starts a fresh pulse.
-private struct PulsingDot: View {
+/// The pulse, in its own view so the pulsing branch is created fresh — a
+/// dot that appeared idle and later started working pulses from then on.
+///
+/// Core Animation, not a SwiftUI `repeatForever`: a SwiftUI-driven repeating
+/// animation re-renders the window's whole view graph every display frame.
+/// One "live" dot in the log console kept the app at ~10% CPU with nothing
+/// else changing (`sample`: NSHostingView.layout → ViewGraph render on every
+/// display cycle). A layer animation runs in the render server, so the app
+/// does no per-frame work at all.
+private struct PulsingDot: NSViewRepresentable {
     let color: Color
-    @State private var dimmed = false
 
-    var body: some View {
-        Circle()
-            .fill(color)
-            .opacity(dimmed ? 0.35 : 1)
-            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: dimmed)
-            .onAppear { dimmed = true }
+    func makeNSView(context: Context) -> PulseView { PulseView() }
+
+    func updateNSView(_ view: PulseView, context: Context) {
+        view.setColor(NSColor(color).cgColor)
+    }
+
+    final class PulseView: NSView {
+        private let dot = CALayer()
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            layer?.addSublayer(dot)
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1
+            pulse.toValue = 0.35
+            pulse.duration = 0.8
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            // Survives the window going off screen and coming back.
+            pulse.isRemovedOnCompletion = false
+            dot.add(pulse, forKey: "pulse")
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        func setColor(_ color: CGColor) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            dot.backgroundColor = color
+            CATransaction.commit()
+        }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            dot.frame = bounds
+            dot.cornerRadius = min(bounds.width, bounds.height) / 2
+            CATransaction.commit()
+        }
     }
 }
 
@@ -306,7 +383,34 @@ struct ContentColumn<Content: View>: View {
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, alignment: .center)
         }
+        .modifier(HardTopScrollEdge())
         .transition(reduceMotion ? AnyTransition.opacity : .opacity.combined(with: .offset(y: 6)))
+    }
+}
+
+/// macOS 26+: content scrolling under the glass toolbar ran straight beneath
+/// the Search pill and the toolbar buttons — an info banner's text sat
+/// legible behind "Search". The hidden title bar leaves no system scroll-edge
+/// effect there (`scrollEdgeEffectStyle(.hard, for: .top)` was tried and drew
+/// nothing), so the column masks itself: content fades out over the top
+/// `fade` points of its own frame and is never drawn under the toolbar.
+/// At rest that band is the column's top padding, so nothing visible changes.
+/// Earlier systems keep their own opaque toolbar.
+private struct HardTopScrollEdge: ViewModifier {
+    private let fade: CGFloat = 14
+
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.mask {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: fade)
+                    Rectangle()
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 

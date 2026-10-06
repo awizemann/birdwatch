@@ -127,6 +127,9 @@ final class UbiquityTransferSource {
     /// engine confirms they are iCloud data; flipping it re-arms the watcher
     /// on the wider root set.
     private(set) var includesDesktopDocuments = false
+    /// The first seed sweep has come back (or there was nothing to sweep):
+    /// from here on an empty `transfers` is a reading, not a wait.
+    private(set) var hasSwept = false
 
     func setIncludesDesktopDocuments(_ include: Bool) {
         guard include != includesDesktopDocuments else { return }
@@ -260,6 +263,7 @@ final class UbiquityTransferSource {
         let roots = currentRoots
         guard !roots.isEmpty else {
             logger.warning("no ubiquity roots present; transfer watching disabled")
+            hasSwept = true      // nothing to read: an empty list is the answer
             return
         }
 
@@ -317,6 +321,8 @@ final class UbiquityTransferSource {
     private var queuedSweep: Set<String> = []
     /// Test hook: true while a sweep is running.
     var isSweepingForTesting: Bool { sweepTask != nil }
+    /// Test hook: waits for the sweep in flight (if any) to land.
+    func finishSweepForTesting() async { await sweepTask?.value }
 
     /// FSEvents (or our own accumulator) lost individual events: re-sweep the
     /// affected directories with the same shallow seed sweep used at start.
@@ -351,6 +357,7 @@ final class UbiquityTransferSource {
             let swept = await sweep(targets)
             guard let self else { return }
             self.sweepTask = nil
+            self.hasSwept = true
             guard self.isStarted, !self.isPaused else { return }
             // The roots may have narrowed while the sweep ran (Desktop &
             // Documents turned off): never ingest what may no longer be read.

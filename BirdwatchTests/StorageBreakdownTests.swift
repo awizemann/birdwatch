@@ -229,6 +229,28 @@ struct StorageAggregationTests {
         #expect(documents >= 3_000)
     }
 
+    // `.skipsHiddenFiles` pruned every hidden-flagged container's subtree, so
+    // most of the local footprint went uncounted. Discriminates: the old
+    // option leaves `.audio` empty here.
+    @Test("Hidden-flagged directories are walked; dot-directories are not")
+    func hiddenFlagCounted() throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bw-storage-hidden-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let container = root.appendingPathComponent("iCloud~com~ulyssesapp~ulysses/Documents", isDirectory: true)
+        let dotDir = root.appendingPathComponent(".Trash/Nested", isDirectory: true)
+        try fm.createDirectory(at: container, withIntermediateDirectories: true)
+        try fm.createDirectory(at: dotDir, withIntermediateDirectories: true)
+        try Data(repeating: 0x41, count: 5_000).write(to: container.appendingPathComponent("song.mp3"))
+        try Data(repeating: 0x41, count: 5_000).write(to: dotDir.appendingPathComponent("old.zip"))
+        try markHidden(root.appendingPathComponent("iCloud~com~ulyssesapp~ulysses", isDirectory: true))
+
+        let totals = StorageBreakdownSource.totals(ofDirectories: [root]).totals
+        #expect(totals[.audio] != nil, "a hidden-flagged container's files are local footprint")
+        #expect(totals[.archives] == nil, "nothing under a dot-directory is counted")
+    }
+
     @Test("The entry cap truncates rather than walking forever")
     func entryCap() throws {
         let root = try makeTree()
@@ -568,6 +590,13 @@ struct PlanDisagreementTests {
         let agreeing = try #require(SyncStore.applyPlanCap(12_000_000_000_000, to: derived))
         #expect(PlanPromptChoice.suggestedCap(agreeing) == 12_000_000_000_000)
         #expect(PlanPromptChoice.seed(for: 12_000_000_000_000).tierIndex == 5)
+
+        // The "Custom… 8 TB" prefill is Birdwatch's derivation and is labelled
+        // as one; the user's own agreeing choice is not (C2).
+        #expect(PlanPromptChoice.seedIsSuggestion(derived))
+        #expect(PlanPromptChoice.seedIsSuggestion(tooSmall), "a disagreeing choice is replaced by a derivation")
+        #expect(!PlanPromptChoice.seedIsSuggestion(agreeing))
+        #expect(PlanPromptChoice.suggestionNote.hasPrefix("Suggested from iCloud's reported space"))
     }
 
     @Test("Custom totals accept GB or TB and reject non-numbers")

@@ -80,6 +80,9 @@ final class SyncStore {
     private(set) var containerScan: ScanFreshness?
     /// The conflict scan's item cap when the last scan stopped at it.
     private(set) var conflictScanCap: Int?
+    /// The transfer watcher has finished its first sweep, so an empty
+    /// transfer list means "nothing transferring", not "not looked yet".
+    private(set) var transferWatchReady = false
     /// Issue producers that have delivered a successful result (see
     /// `SyncSnapshot.issueProducers`); nil for a fixture source, which
     /// delivers everything at once.
@@ -207,7 +210,11 @@ final class SyncStore {
     /// A person activated the app (NSApplication didBecomeActive, driven by
     /// `UsageLifecycle`). Starts or continues the session — idempotent within
     /// one — and releases the launch events if the first snapshot is in.
+    /// Coming back to the app is when a Full Disk Access grant made in System
+    /// Settings lands, so the cached permission answers are dropped too: the
+    /// next snapshot (the activation refresh or the next 15 s tick) re-probes.
     func applicationDidBecomeActive() async {
+        await reprobePermissions()
         await usage.applicationDidBecomeActive()
         hasActivated = true
         recordLaunchEventsIfDue()
@@ -482,7 +489,21 @@ final class SyncStore {
 
     // MARK: - Loading (called from .task, never from init — §6)
 
-    func refresh(force: Bool = false) async {
+    /// Drops the source's cached permission answers so the next snapshot
+    /// probes them afresh (see `SyncSource.invalidatePermissions`). No fetch
+    /// of its own.
+    func reprobePermissions() async {
+        await source.invalidatePermissions()
+    }
+
+    /// `reprobePermissions`: a grant may just have changed (⌘R is what
+    /// someone presses right after granting access), so the source's cached
+    /// permission answers are dropped first. NOT implied by `force` — the
+    /// window's 15 s tick forces every refresh, and re-probing on each would
+    /// defeat the cache. Dropped even when paused or debounced, so the next
+    /// snapshot that does run sees the new answer.
+    func refresh(force: Bool = false, reprobePermissions reprobe: Bool = false) async {
+        if reprobe { await reprobePermissions() }
         // Monitoring paused → truly stop watching: no fetch, even forced.
         // hasLoaded (and all last-known data) is deliberately preserved.
         if isGloballyPaused { return }
@@ -596,6 +617,7 @@ final class SyncStore {
         folderScan = s.folderScan
         containerScan = s.containerScan
         conflictScanCap = s.conflictScanCap
+        transferWatchReady = s.transferWatchReady
         deliveredIssueProducers = s.issueProducers.map { Set($0.keys) }
         (indeterminateAppIDs, indeterminateFolderNames) = Self.indeterminateGroups(s.transfers)
     }
