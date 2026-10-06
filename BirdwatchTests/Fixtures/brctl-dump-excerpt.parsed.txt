@@ -22,8 +22,8 @@ lastMetadataSyncDate (local) 2026-08-14 12:55:04
       - some: 249667584
     ▿ purgeableSpaceBytes: Optional(0)
       - some: 0
-    ▿ serverChangeToken: Optional("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-      - some: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ▿ serverChangeToken: Optional("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==")
+      - some: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
     - lastMetadataSyncDate: nil
     ▿ periodicSyncDate: Optional(2026-08-14 14:05:14 +0000)
       ▿ some: 2026-08-14 14:05:14 +0000

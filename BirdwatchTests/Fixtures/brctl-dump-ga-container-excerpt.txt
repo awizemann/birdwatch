@@ -1,0 +1,11 @@
+    + container-metadata:    idle 
+    + sharedb:               has-synced-down 
+    + zone-health:           idle 
+    + sync status:           idle
+    + side-car:              idle 
+    + pcs-migration:         complete
+
+1 containers matching '*'
+-----------------------------------------------------
+- <c{1}m.a{3}e.C{7}s[1] [0;1;32mforeground[0m {client:idle server:full-sync|fetched-recents|fetched-favorites|ever-full-sync sync:has-synced-down last-sync:2026-10-05 20:20:52.446, requestID:212280, caught-up, token:unkown-token-size:36 (AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) zoneActiveState:{rid:212281} appuninstalled:(null)}>
+-----------------------------------------------------

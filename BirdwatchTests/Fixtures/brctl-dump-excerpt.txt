@@ -31,7 +31,7 @@ client_state
 {
     availableQuota = 223208176210;
     clientRanks = "nextNotifRank:62030283 nextPackageItemRank:84789 nextItemRowID:2255583";
-    containerMetadataSync = "<0x7702719d40>: serverChangeToken:<CKServerChangeToken: 0x7703338bf0; data=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA> requestID:34 lastSyncDate:2026-08-14 12:55:04";
+    containerMetadataSync = "<0x7702719d40>: serverChangeToken:<CKServerChangeToken: 0x7703338bf0; data=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==> requestID:34 lastSyncDate:2026-08-14 12:55:04";
     currentUserRecordID = "<CKRecordID: 0x77035f5900; recordName=_0000000000000000000000000000000, zoneID=_defaultZone:__defaultOwner__>";
     hasCompletedPCSMigration = 1;
     lastQuotaFetchDate = "2026-06-02 02:48:22 +0000";

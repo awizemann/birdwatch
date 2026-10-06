@@ -14,7 +14,7 @@ private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", cat
 /// DriveFolderSource scans on a @concurrent function). Reading
 /// UbiquityTransferSource (MainActor) from here is exactly right.
 final class SystemSyncSource: SyncSource {
-    private let cloudDocs = CloudDocsSource()
+    private let cloudDocs: CloudDocsSource
     private let daemonStats = DaemonStatsSource()
     private let logSource = LogStreamSource()
     // Blocking directory scans (see SingleFlightScan): one in flight each, on
@@ -45,12 +45,17 @@ final class SystemSyncSource: SyncSource {
     // container is far too heavy for the 15s cycle, so it NEVER runs on the
     // snapshot path: 5-minute TTL, single-flight, results served from cache and
     // folded into the next snapshot's rows.
-    @MainActor private var cachedLocalSizes: (values: [String: Int64], at: Date)?
+    // `includedDesktopDocuments` records the flag the walk ran with: a cache
+    // from before the Desktop & Documents flag was known (or changed) is
+    // stale regardless of age and is re-measured on the next cycle.
+    @MainActor private var cachedLocalSizes: (values: [String: Int64], at: Date, includedDesktopDocuments: Bool)?
     @MainActor private var sizeScanInFlight = false
     // File-type breakdown of the local footprint (Storage view). Deep walk over
     // every container + Desktop/Documents — same rule as the size pass: 5-minute
-    // TTL, single-flight, never on the paint path.
-    @MainActor private var cachedBreakdown: (totals: [StorageCategory: Int64], isPartial: Bool, at: Date)?
+    // TTL, single-flight, never on the paint path. Same flag rule as above.
+    @MainActor private var cachedBreakdown: (
+        totals: [StorageCategory: Int64], isPartial: Bool, at: Date, includedDesktopDocuments: Bool
+    )?
     @MainActor private var breakdownScanInFlight = false
     // Observed CloudKit apps (from cloudd's unified log). `log show` costs ~2s,
     // so it follows the same rule as the size/conflict scans: 5-minute TTL,
@@ -62,10 +67,25 @@ final class SystemSyncSource: SyncSource {
     // heavy for the 15s cycle and never allowed to gate paint. Same discipline
     // as the scans above, with a shorter 60s TTL because the retry queue and
     // engine internals it feeds are the diagnostics the user is watching.
-    private let dumpSource = BrctlDumpSource()
+    private let dumpSource: BrctlDumpSource
+    /// Redacted-path candidates for the retry queue (a capped filesystem
+    /// walk). Injected so a test can drive the dump refresh without one.
+    private let pathCandidates: @Sendable () -> [PathCandidate]
+    /// The retry-queue path walk and size measurement are blocking
+    /// filesystem work: they run here, never on the cooperative pool.
+    private static let dumpMappingQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.dump-mapping", qos: .utility)
     @MainActor private var cachedDump: (value: BrctlDump, mapped: MappedDump, at: Date)?
     @MainActor private var dumpScanInFlight = false
     @MainActor private var lastDumpAttempt: Date?
+    // Why the most recent dump refresh failed (nil after a success), and how
+    // many in a row — the engine card says "timed out", not "check FDA", and
+    // a dump that keeps failing backs off (see `dumpRetryInterval`).
+    @MainActor private var lastDumpFailure: BrctlReadFailure?
+    @MainActor private var dumpConsecutiveFailures = 0
+    // `brctl status`, read ONLY on the dump refresh Task, after the dump, so
+    // the two never contend for bird (see CloudDocsSource.statusTimeout).
+    // Source of the Desktop & Documents flag; keeps the last good read.
+    @MainActor private var statusCache = CloudDocsStatusCache()
     // Retry-queue rows whose file this session moved to the Trash. The cached
     // dump is up to 60s old and an in-flight one may be older still, so without
     // this the row reappears seconds after the user threw the folder away — and
@@ -88,12 +108,19 @@ final class SystemSyncSource: SyncSource {
         var issues: [IssueItem]
         var deviceSummary: DeviceActivitySummary?
         /// Kept so `enrich` can be applied to the *current* cycle's engine
-        /// base (which comes from brctl status and changes every cycle).
-        /// `enrich` itself is O(1) — it reads a handful of scalar fields — so
-        /// there is nothing to memoize about it beyond holding the dump.
+        /// base. `enrich` itself is O(1) — it reads a handful of scalar
+        /// fields — so there is nothing to memoize about it beyond holding
+        /// the dump.
         var dump: BrctlDump
+        /// The dump's CloudDocs container line (client/server state, last
+        /// sync, token) — what the snapshot used to pay `brctl status` for.
+        var cloudDocsState: BrctlStatus?
 
-        init(_ dump: BrctlDump, candidates: [PathCandidate] = [], measureSizes: Bool = false) {
+        init(
+            _ dump: BrctlDump, cloudDocsState: BrctlStatus? = nil,
+            candidates: [PathCandidate] = [], measureSizes: Bool = false
+        ) {
+            self.cloudDocsState = cloudDocsState
             let rows = BrctlDumpMapper.retryQueue(from: dump, candidates: candidates)
             // Sizing walks the filesystem, so it happens HERE — on the same
             // background dump-refresh Task that already paid for `candidates` —
@@ -106,7 +133,17 @@ final class SystemSyncSource: SyncSource {
         }
     }
 
-    nonisolated init() {}   // cheap by design — no I/O before first snapshot (§6)
+    /// Cheap by design — no I/O before first snapshot (§6). `brctlRunner`
+    /// is the spawn seam for every brctl call (status, quota, dump); tests
+    /// pass a recording stub.
+    nonisolated init(
+        brctlRunner: any ProcessRunning = ProcessRunner(),
+        pathCandidates: @escaping @Sendable () -> [PathCandidate] = { RedactedPathResolver.candidates() }
+    ) {
+        cloudDocs = CloudDocsSource(runner: brctlRunner)
+        dumpSource = BrctlDumpSource(runner: brctlRunner)
+        self.pathCandidates = pathCandidates
+    }
 
     func currentSnapshot() async -> SyncSnapshot {
         // Lazily start the metadata query on first use (needs the main runloop).
@@ -123,7 +160,10 @@ final class SystemSyncSource: SyncSource {
             return (transfers, activity)
         }
 
-        async let statusTask = cloudDocs.status()
+        // No `brctl status` here: it blocks bird for 15–28 s (a charter
+        // non-goal on this path). Client/server state comes from the cached
+        // dump; the Desktop & Documents flag from `statusCache`, which the
+        // background dump refresh keeps current.
         async let quotaTask = cloudDocs.quotaRemaining()
         // One ps spawn per cycle, shared by daemon stats and bandwidth (audit:
         // the two independent spawns walked the whole process table twice).
@@ -137,14 +177,26 @@ final class SystemSyncSource: SyncSource {
         // seconds. Single-flight on its own queue: a slow scan serves the last
         // result (empty only before the first one lands), never a pool thread.
         async let foldersTask = folderScan.value(within: 5)
-        let (status, quota, processStats, scannedFolders) =
-            await (statusTask, quotaTask, processStatsTask, foldersTask)
+        let (quota, processStats, scannedFolders) =
+            await (quotaTask, processStatsTask, foldersTask)
         let (daemons, bandwidth) = processStats
         let folders = DriveFolderSource.applying(transfers: transfers, to: scannedFolders ?? [])
+        // One hop for everything the background dump refresh maintains.
+        // Read the MAPPED result, not the dump: the mapping (retry queue sort,
+        // issue derivation, device rollup) walks every pending item in a
+        // multi-megabyte dump and is computed once, in the refresh Task.
+        let (mapped, dumpAt, statusRead, dumpFailure) = await MainActor.run {
+            (cachedDump?.mapped, cachedDump?.at, statusCache, lastDumpFailure)
+        }
+        let cloudDocsRead = Self.cloudDocsReading(
+            mapped: mapped, dumpAt: dumpAt, dumpFailure: dumpFailure, statusRead: statusRead, now: Date())
+        let status = cloudDocsRead.state
         // Desktop & Documents are only iCloud data when the sync feature is on;
         // brctl status says so. Nothing reads those folders (or earns a TCC
-        // prompt) until it does. Starts false; flips as soon as status confirms.
-        let desktopDocumentsSynced = Self.desktopDocumentsSynced(status)
+        // prompt) until it does. Starts false; flips once a status read
+        // confirms it, and a later FAILED read keeps the last-known answer
+        // instead of flapping the watcher.
+        let desktopDocumentsSynced = statusRead.desktopDocumentsSynced
         await MainActor.run { metadata?.setIncludesDesktopDocuments(desktopDocumentsSynced) }
         let permissions: [PermissionStatus]
         let cached = await MainActor.run(body: { cachedPermissions })
@@ -187,7 +239,7 @@ final class SystemSyncSource: SyncSource {
         // most every 5 minutes. Sizes land on a later cycle — never gating paint.
         let sizesCache = await MainActor.run(body: { cachedLocalSizes })
         let localSizes = sizesCache?.values ?? [:]
-        if sizesCache == nil || Date().timeIntervalSince(sizesCache!.at) >= 300 {
+        if Self.footprintCacheIsDue(sizesCache.map { ($0.at, $0.includedDesktopDocuments) }, desktopDocuments: desktopDocumentsSynced, now: Date()) {
             let claimed = await MainActor.run { () -> Bool in
                 guard !sizeScanInFlight else { return false }
                 sizeScanInFlight = true
@@ -199,7 +251,7 @@ final class SystemSyncSource: SyncSource {
                         containers: containers, includeDesktopDocuments: desktopDocumentsSynced)
                     guard let self else { return }
                     await MainActor.run {
-                        self.cachedLocalSizes = (measured, Date())
+                        self.cachedLocalSizes = (measured, Date(), desktopDocumentsSynced)
                         self.sizeScanInFlight = false
                     }
                 }
@@ -209,7 +261,7 @@ final class SystemSyncSource: SyncSource {
         // File-type breakdown: identical discipline. Served stale-or-nil, so the
         // Storage view shows its breakdown from a later cycle, never blocking one.
         let breakdownCache = await MainActor.run(body: { cachedBreakdown })
-        if breakdownCache == nil || Date().timeIntervalSince(breakdownCache!.at) >= 300 {
+        if Self.footprintCacheIsDue(breakdownCache.map { ($0.at, $0.includedDesktopDocuments) }, desktopDocuments: desktopDocumentsSynced, now: Date()) {
             let claimed = await MainActor.run { () -> Bool in
                 guard !breakdownScanInFlight else { return false }
                 breakdownScanInFlight = true
@@ -221,7 +273,7 @@ final class SystemSyncSource: SyncSource {
                         includeDesktopDocuments: desktopDocumentsSynced)
                     guard let self else { return }
                     await MainActor.run {
-                        self.cachedBreakdown = (measured.totals, measured.isPartial, Date())
+                        self.cachedBreakdown = (measured.totals, measured.isPartial, Date(), desktopDocumentsSynced)
                         self.breakdownScanInFlight = false
                     }
                 }
@@ -251,48 +303,12 @@ final class SystemSyncSource: SyncSource {
             }
         }
 
-        // brctl dump: stale-or-nil now, refreshed in the background at most
-        // once a minute. Retry queue / devices / engine internals appear on a
-        // later cycle rather than delaying first paint by ~2s.
-        // Read the MAPPED result, not the dump: the mapping (retry queue sort,
-        // issue derivation, device rollup, engine enrichment) walks every
-        // pending item in a multi-megabyte dump, and doing it here would repay
-        // that cost on every 15s snapshot for a dump that changes at most once
-        // a minute. It is computed once, in the refresh Task below.
-        let mapped = await MainActor.run(body: { cachedDump?.mapped })
-        // Gate on the last ATTEMPT, not the last success: a failing brctl
-        // (no Full Disk Access, bird wedged) must not be re-spawned every 15s.
-        // Single-hop claim: due-check and claim in one MainActor.run so two
-        // concurrent snapshots cannot both pass the gate.
-        let claimedDump = await MainActor.run { () -> Bool in
-            guard !dumpScanInFlight else { return false }
-            guard lastDumpAttempt.map({ Date().timeIntervalSince($0) >= Self.dumpTTL }) ?? true else { return false }
-            dumpScanInFlight = true
-            lastDumpAttempt = Date()
-            return true
-        }
-        if claimedDump {
-            Task { [weak self] in
-                let fresh = await self?.dumpSource.currentDump()
-                guard let self else { return }
-                // One capped walk of ~/Library/Mobile Documents per dump
-                // refresh, on this same background Task — it is what turns
-                // bird's redacted `D{7}s` into a real path we can show.
-                let candidates = fresh == nil ? [] : RedactedPathResolver.candidates()
-                // Map off the snapshot path, on this Task, before publishing.
-                let mapped = fresh.map { MappedDump($0, candidates: candidates, measureSizes: true) }
-                await MainActor.run {
-                    if let fresh, let mapped {
-                        // An item we moved to the Trash must not come back —
-                        // neither from a dump collected before the move, nor
-                        // from a fresh one bird has not re-scanned yet.
-                        let applied = Self.applyingForgotten(self.forgottenRetryIDs, to: mapped)
-                        self.forgottenRetryIDs = applied.keptIDs
-                        self.cachedDump = (fresh, applied.mapped, Date())
-                    }
-                    self.dumpScanInFlight = false
-                }
-            }
+        // brctl dump (+ status when due): stale-or-nil now (`mapped`, read
+        // above), refreshed in the background at most once a minute. Retry
+        // queue / devices / engine internals appear on a later cycle rather
+        // than delaying first paint by ~2s.
+        if await MainActor.run(body: { claimDumpRefresh(now: Date()) }) {
+            Task { [weak self] in await self?.performDumpRefresh() }
         }
 
         let apps = Self.buildApps(
@@ -301,7 +317,9 @@ final class SystemSyncSource: SyncSource {
             fileProviderDomains: await Self.fileProviderDomains(),
             containers: containers,
             localSizes: localSizes,
-            cloudKitApps: observedCloudKit
+            cloudKitApps: observedCloudKit,
+            stateNote: cloudDocsRead.staleNote,
+            desktopDocuments: statusRead.desktopDocuments(now: Date())
         )
 
         // Per-producer delivery (see SyncSnapshot.issueProducers). Only a
@@ -328,10 +346,10 @@ final class SystemSyncSource: SyncSource {
             daemons: daemons,
             retryQueue: mapped?.retryQueue ?? [],
             retryQueueTotal: mapped?.retryQueueTotal ?? 0,
-            engine: {
-                let base = Self.engineInfo(from: status)
-                return mapped.map { BrctlDumpMapper.enrich(base, with: $0.dump) } ?? base
-            }(),
+            engine: Self.engine(
+                reading: cloudDocsRead, mapped: mapped, dumpFailure: dumpFailure,
+                fullDiskAccess: permissions.first { $0.name == "Full Disk Access" }?.state ?? .unknown
+            ),
             permissions: permissions,
             bandwidth: bandwidth,                 // nettop deltas — estimated
             // Local file-type footprint (nil until the background pass lands).
@@ -340,7 +358,10 @@ final class SystemSyncSource: SyncSource {
             storage: breakdownCache.flatMap {
                 StorageBreakdownSource.makeStorageInfo(
                     totals: $0.totals, remainingBytes: quota,
-                    planCapOverride: nil, isPartial: $0.isPartial
+                    // A breakdown walked without Desktop & Documents while the
+                    // feature is on is missing data — partial until re-measured.
+                    planCapOverride: nil,
+                    isPartial: $0.isPartial || $0.includedDesktopDocuments != desktopDocumentsSynced
                 )
             },
             quotaRemainingBytes: quota,           // brctl quota — remaining only
@@ -388,6 +409,80 @@ final class SystemSyncSource: SyncSource {
             break   // ConflictSource logged the cause; the conflict stays open
         }
         return result
+    }
+
+    // MARK: - brctl dump + status refresh (background; split out for tests)
+
+    /// Single-flight claim for the background brctl refresh, test-and-set in
+    /// ONE MainActor hop so two concurrent snapshots cannot both pass. Gated
+    /// on the last ATTEMPT, not the last success: a failing brctl (no Full
+    /// Disk Access, bird wedged) must not be re-spawned every 15 s, and
+    /// repeated failures back off further.
+    @MainActor var statusCacheForTesting: CloudDocsStatusCache { statusCache }
+
+    @MainActor func claimDumpRefresh(now: Date) -> Bool {
+        guard !dumpScanInFlight else { return false }
+        let interval = Self.dumpRetryInterval(consecutiveFailures: dumpConsecutiveFailures)
+        guard lastDumpAttempt.map({ now.timeIntervalSince($0) >= interval }) ?? true else { return false }
+        dumpScanInFlight = true
+        lastDumpAttempt = now
+        return true
+    }
+
+    /// One claimed refresh: `brctl dump -i`, then — only after it has
+    /// finished — `brctl status` when due. bird serves one brctl request at a
+    /// time, so the two must never overlap: `dumpScanInFlight` stays raised
+    /// until both are done, and no other code path spawns either.
+    func performDumpRefresh() async {
+        let read = await dumpSource.currentDump()
+        let fresh = try? read.get()
+        // The redacted-path walk (what turns bird's `D{7}s` into a real
+        // path) and the exact-match size measurement are blocking filesystem
+        // work: on their own queue, never a pool thread.
+        let pathCandidates = pathCandidates
+        let mapped: MappedDump?
+        if let fresh {
+            mapped = await BlockingWork.run(on: Self.dumpMappingQueue) {
+                MappedDump(fresh.dump, cloudDocsState: fresh.cloudDocsState,
+                           candidates: pathCandidates(), measureSizes: true)
+            }
+        } else {
+            mapped = nil
+        }
+        let statusDue = await MainActor.run { () -> Bool in
+            switch read {
+            case .success:
+                lastDumpFailure = nil
+                dumpConsecutiveFailures = 0
+            case .failure(let failure):
+                lastDumpFailure = failure
+                dumpConsecutiveFailures += 1
+            }
+            if let fresh, let mapped {
+                // An item we moved to the Trash must not come back — neither
+                // from a dump collected before the move, nor from a fresh one
+                // bird has not re-scanned yet.
+                let applied = Self.applyingForgotten(forgottenRetryIDs, to: mapped)
+                forgottenRetryIDs = applied.keptIDs
+                cachedDump = (fresh.dump, applied.mapped, Date())
+            }
+            // Claim the status read in the same hop.
+            guard statusCache.isDue(now: Date()) else { return false }
+            statusCache.markAttempt(at: Date())
+            return true
+        }
+        if statusDue {
+            let result = await cloudDocs.status()
+            await MainActor.run {
+                statusCache.record(result, at: Date())
+                // A status read that timed out was killed client-side, but
+                // bird keeps serving it for the rest of its 15–28 s. Restart
+                // the dump's clock now so the next dump does not queue behind
+                // it, time out, and blame itself.
+                if case .failure = result { lastDumpAttempt = Date() }
+            }
+        }
+        await MainActor.run { dumpScanInFlight = false }
     }
 
     // MARK: - Conflict scan bookkeeping (MainActor; split out for tests)
@@ -551,27 +646,32 @@ final class SystemSyncSource: SyncSource {
         status?.apps.contains { $0.name.hasPrefix("Desktop") && $0.isCurrent } ?? false
     }
 
+    /// `stateNote` qualifies a CloudDocs state that is not current (see
+    /// `CloudDocsReading.staleNote`). `desktopDocuments` defaults to what
+    /// `status` itself says, for callers that only have a status read.
     nonisolated static func buildApps(
         status: BrctlStatus?,
         transfers: [TransferItem],
         fileProviderDomains: [String],
         containers: [AppContainerSource.Container] = [],
         localSizes: [String: Int64] = [:],
-        cloudKitApps: [AppSyncState] = []
+        cloudKitApps: [AppSyncState] = [],
+        stateNote: String? = nil,
+        desktopDocuments: DesktopDocumentsFlag? = nil
     ) -> [AppSyncState] {
         var apps: [AppSyncState] = []
         let home = NSHomeDirectory()
+        let flag = desktopDocuments ?? status.map {
+            desktopDocumentsSynced($0) ? .on(lastKnown: nil) : .off(lastKnown: nil)
+        } ?? .unknown("brctl status has not been read")
 
         func cloudDocsApp(id: String, name: String, tile: String, location: String) -> AppSyncState {
             let own = transfers.filter { $0.appID == id }
-            let syncing = !own.isEmpty
-            let progress = syncing ? own.map(\.progress).reduce(0, +) / Double(own.count) : 1
+            let (rowStatus, line) = cloudDocsRowStatus(ownTransfers: own, state: status, stateNote: stateNote)
             return AppSyncState(
                 id: id, name: name, tileColorHex: tile, backend: .cloudDocs, isApple: true,
-                status: syncing ? .syncing(progress: progress) : .upToDate,
-                statusLine: syncing
-                    ? "\(own.count) file\(own.count == 1 ? "" : "s") in transfer"
-                    : (status?.isIdle == false ? "Sync engine active" : "All files synced"),
+                status: rowStatus,
+                statusLine: line,
                 lastActivity: status?.lastSync,
                 itemsIndexed: 0, pendingItems: own.count,
                 localSizeBytes: localSizes[id] ?? 0,     // background size pass; 0 until it lands
@@ -579,15 +679,35 @@ final class SystemSyncSource: SyncSource {
             )
         }
 
-        apps.append(cloudDocsApp(
+        var drive = cloudDocsApp(
             id: "icloud-drive", name: "iCloud Drive", tile: "30b0c7",
             location: "~/Library/Mobile Documents/com~apple~CloudDocs"
-        ))
-        if status?.apps.contains(where: { $0.name.hasPrefix("Desktop") && $0.isCurrent }) ?? false {
-            apps.append(cloudDocsApp(
+        )
+        // Desktop & Documents is unknown until brctl status answers, and has
+        // no row of its own until it is known to be on — so the iCloud Drive
+        // row says what is (not) known, instead of the feature silently
+        // reading as off.
+        switch flag {
+        case .unknown(let reason):
+            drive.infoCallout = "Desktop & Documents sync: \(reason)."
+        case .off(let lastKnown?):
+            drive.infoCallout = "Desktop & Documents sync is off. \(lastKnown)"
+        case .on, .off(nil):
+            break
+        }
+        apps.append(drive)
+        if case .on(let lastKnown) = flag {
+            var row = cloudDocsApp(
                 id: "desktop-documents", name: "Desktop & Documents", tile: "ffa62b",
                 location: "~/Desktop · ~/Documents"
-            ))
+            )
+            if let lastKnown {
+                // Visible in the list and popover too, not just the detail
+                // callout: this row must not read as freshly confirmed.
+                row.statusLine += " · last-known setting"
+                row.infoCallout = lastKnown
+            }
+            apps.append(row)
         }
 
         // CloudKit services: OBSERVED only (Phase 5D). Rows come from cloudd's
@@ -624,6 +744,37 @@ final class SystemSyncSource: SyncSource {
         return apps
     }
 
+    /// Status of a built-in CloudDocs row. Every claim needs evidence (C1):
+    /// - file transfers seen → syncing;
+    /// - no CloudDocs state at all → unknown, never "synced";
+    /// - bird's client state not idle → busy (the engine is working even
+    ///   though no file-level transfer is visible);
+    /// - idle → up to date, worded as what bird said, not "all files synced".
+    /// A not-current state carries its `stateNote` ("last-known, … ago").
+    nonisolated static func cloudDocsRowStatus(
+        ownTransfers: [TransferItem], state: BrctlStatus?, stateNote: String?
+    ) -> (AppSyncStatus, String) {
+        if !ownTransfers.isEmpty {
+            let progress = ownTransfers.map(\.progress).reduce(0, +) / Double(ownTransfers.count)
+            return (.syncing(progress: progress),
+                    "\(ownTransfers.count) file\(ownTransfers.count == 1 ? "" : "s") in transfer")
+        }
+        let suffix = stateNote.map { " · \($0)" } ?? ""
+        guard let state else {
+            // TODO: a neutral "unknown" status case would read better than
+            // `.issue`; until one exists, never fall back to `.upToDate`.
+            return (.issue("Sync state unknown"), "Sync state unknown")
+        }
+        if !state.isIdle {
+            // TODO(.active): use `AppSyncStatus.active` (work in progress, no
+            // progress figure) once it lands; `.syncing(progress: 0)` is the
+            // closest case on this base and is not "up to date".
+            return (.syncing(progress: 0), "Sync engine busy, no file transfers seen" + suffix)
+        }
+        return (.upToDate, "Sync engine idle" + suffix)
+    }
+
+
     nonisolated static func deriveIssues(quotaRemaining: Int64?) -> [IssueItem] {
         guard let quota = quotaRemaining, quota < 5_000_000_000 else { return [] }
         return [IssueItem(
@@ -638,17 +789,121 @@ final class SystemSyncSource: SyncSource {
         )]
     }
 
-    nonisolated static func engineInfo(from status: BrctlStatus?) -> SyncEngineInfo {
-        SyncEngineInfo(
-            serverState: status?.serverState ?? "Unavailable",
-            clientState: status?.clientState ?? "Unavailable",
-            lastSyncToken: status?.tokenInfo ?? "—",
+    /// The CloudDocs state a snapshot can show, and how current it is.
+    nonisolated struct CloudDocsReading: Sendable, Equatable {
+        /// Container fields (client/server state, last sync, token) plus the
+        /// per-app lines from the last good status read. nil = nothing read.
+        var state: BrctlStatus?
+        /// Non-nil when `state` is not current: "last-known, brctl dump 4 min
+        /// ago" (latest dump refresh failed) or "last-known, brctl status
+        /// 12 min ago" (no dump container line to read it from).
+        var staleNote: String?
+        /// A dump has been parsed at least once (its age), whether or not it
+        /// carried a CloudDocs container line.
+        var dumpAge: TimeInterval?
+        var dumpHasContainer: Bool = false
+    }
+
+    /// Container fields from the latest dump when one carried them, else from
+    /// the last good `brctl status` (always labelled with its age — it is up
+    /// to 5 minutes old by design, more when reads fail). Per-app lines (the
+    /// Desktop & Documents flag) only ever come from status, the only place
+    /// bird prints them.
+    nonisolated static func cloudDocsReading(
+        mapped: MappedDump?, dumpAt: Date?, dumpFailure: BrctlReadFailure?,
+        statusRead: CloudDocsStatusCache, now: Date
+    ) -> CloudDocsReading {
+        let dumpAge = dumpAt.map { now.timeIntervalSince($0) }
+        var reading = CloudDocsReading(
+            dumpAge: mapped == nil ? nil : dumpAge, dumpHasContainer: mapped?.cloudDocsState != nil)
+        if var container = mapped?.cloudDocsState {
+            container.apps = statusRead.lastGood?.apps ?? []
+            reading.state = container
+            if dumpFailure != nil, let dumpAge {
+                reading.staleNote = "last-known, brctl dump \(ageText(dumpAge))"
+            }
+        } else if let status = statusRead.lastGood, let at = statusRead.lastGoodAt {
+            reading.state = status
+            reading.staleNote = "last-known, brctl status \(ageText(now.timeIntervalSince(at)))"
+        }
+        return reading
+    }
+
+    /// "under a minute ago", "12 min ago", "3 h ago".
+    nonisolated static func ageText(_ seconds: TimeInterval) -> String {
+        switch seconds {
+        case ..<60: "under a minute ago"
+        case ..<5400: "\(Int(seconds / 60)) min ago"
+        default: "\(Int(seconds / 3600)) h ago"
+        }
+    }
+
+    /// Whether a footprint cache (local sizes, breakdown) must be re-walked:
+    /// older than 5 minutes, or walked with a different Desktop & Documents
+    /// setting than the one now known (it then misses, or wrongly includes,
+    /// ~/Desktop and ~/Documents).
+    nonisolated static func footprintCacheIsDue(
+        _ cache: (at: Date, includedDesktopDocuments: Bool)?, desktopDocuments: Bool, now: Date
+    ) -> Bool {
+        guard let cache else { return true }
+        return now.timeIntervalSince(cache.at) >= 300 || cache.includedDesktopDocuments != desktopDocuments
+    }
+
+    /// Dump refresh pacing: `dumpTTL` while dumps succeed, doubling per
+    /// consecutive failure up to 10 minutes — a brctl that keeps timing out
+    /// is not hammered every minute.
+    nonisolated static func dumpRetryInterval(consecutiveFailures: Int) -> TimeInterval {
+        guard consecutiveFailures > 1 else { return dumpTTL }
+        return min(600, dumpTTL * pow(2, Double(min(consecutiveFailures - 1, 4))))
+    }
+
+    /// Engine card. Never blames a permission it has not checked (C1): a
+    /// timeout reads as a timeout, and Full Disk Access is named only when
+    /// the probe says it is not granted. A state that is not current says so
+    /// with its age, and a failed dump refresh is never hidden behind an
+    /// older result (it turns the metadata row amber).
+    nonisolated static func engine(
+        reading: CloudDocsReading, mapped: MappedDump?, dumpFailure: BrctlReadFailure?,
+        fullDiskAccess: PermissionState
+    ) -> SyncEngineInfo {
+        let missing: String = if reading.dumpAge != nil {
+            "Not in brctl dump"           // a dump was read; it had no container line
+        } else if dumpFailure != nil {
+            "Unavailable"
+        } else {
+            "Not read yet"
+        }
+        func label(_ value: String?) -> String {
+            guard let value else { return missing }
+            return reading.staleNote.map { "\(value) (\($0))" } ?? value
+        }
+        var engine = SyncEngineInfo(
+            serverState: label(reading.state?.serverState),
+            clientState: label(reading.state?.clientState),
+            lastSyncToken: reading.state?.tokenInfo ?? "—",
             pushBudget: "Not measured",
             pushThrottled: false,
-            metadataIndex: status != nil ? "Reachable via brctl" : "brctl unavailable — check Full Disk Access",
-            metadataHealthy: status != nil
+            metadataIndex: "",
+            metadataHealthy: false
         )
+        guard let mapped else {
+            let reason = dumpFailure.map { "brctl dump \($0.summary)" } ?? "Waiting for the first brctl dump"
+            engine.metadataIndex = fullDiskAccess == .denied ? "\(reason) — Full Disk Access is not granted" : reason
+            return engine
+        }
+        engine.metadataIndex = reading.dumpHasContainer
+            ? "Read via brctl dump"
+            : "Read via brctl dump (no CloudDocs container line in it)"
+        engine.metadataHealthy = true
+        engine = BrctlDumpMapper.enrich(engine, with: mapped.dump)
+        if let dumpFailure {
+            let age = reading.dumpAge.map { ", shown dump is from \(ageText($0))" } ?? ""
+            engine.metadataIndex += " · last-known (latest brctl dump \(dumpFailure.summary)\(age))"
+            engine.metadataHealthy = false
+        }
+        return engine
     }
+
 
     @concurrent nonisolated static func fileProviderDomains() async -> [String] {
         let url = URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/CloudStorage")

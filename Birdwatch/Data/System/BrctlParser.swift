@@ -34,6 +34,20 @@ nonisolated enum BrctlParser {
         return status
     }
 
+    /// The CloudDocs container line inside a `brctl dump -i`
+    /// (`- <c{1}m.a{3}e.C{7}s[1] foreground {client:idle server:… last-sync:… token:…}>`).
+    /// It is the same line `brctl status` prints, so the dump — already
+    /// collected every minute in the background — supplies client/server
+    /// state without the 15–28 s status call. Never carries the per-app
+    /// `current=` lines (`apps` stays empty). nil when the dump has no such line.
+    static func containerState(inDump raw: String) -> BrctlStatus? {
+        guard let hit = raw.range(of: "{client:") else { return nil }
+        let lineStart = raw[..<hit.lowerBound].lastIndex(of: "\n").map { raw.index(after: $0) } ?? raw.startIndex
+        let lineEnd = raw[hit.lowerBound...].firstIndex(of: "\n") ?? raw.endIndex
+        let status = parseStatus(String(raw[lineStart..<lineEnd]))
+        return status.clientState == nil && status.serverState == nil ? nil : status
+    }
+
     /// "220606297196 bytes of quota remaining in personal account"
     static func parseQuota(_ raw: String) -> Int64? {
         let text = stripANSI(raw)

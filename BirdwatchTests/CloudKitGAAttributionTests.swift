@@ -88,6 +88,23 @@ private nonisolated func twoEmitterFixture() throws -> String {
 
 private nonisolated let cloudd = "/System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd"
 
+/// Real cloudphotod OP lines from macOS 27.0 GA (26A428), captured 2026-10-05:
+/// one CKFetchDatabaseChanges pair and one asset-download pair. GA logs the
+/// download as CloudKit's Swift `CodeOperation` generic
+/// (`<_TtGC12CloudKitCode13CodeOperationV…ResourceDownloadRequest…>`), not a
+/// `<CK…Operation:` class. Redactions: operationID / operationGroupID values
+/// replaced with sequential placeholders, object addresses unified, UUIDs and
+/// traceID zeroed. Only operation types and the container id remain.
+private nonisolated func photosDownloadFixture() throws -> String {
+    let url = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appending(path: "Fixtures/cloudkit-log-ga-27.0-photos-download.ndjson")
+    return try String(contentsOf: url, encoding: .utf8)
+}
+
+/// One minute after the fixture's download finished (15:41:49).
+private nonisolated let photosNow = ISO8601DateFormatter().date(from: "2026-10-05T15:42:49-04:00")!
+
 @Suite("CloudKit attribution on macOS 27 GA")
 struct CloudKitGAAttributionTests {
 
@@ -387,5 +404,35 @@ struct CloudKitScanOutcomeTests {
         installed.withLock { $0 = true }
         let after = await source.scan(now: gaNow)
         #expect(after.apps.contains { $0.name == "Example Notes" })
+    }
+
+    // Fails on the pre-fix parser: `operationKind` only knew `<CK…Operation:`
+    // classes, so cloudphotod's GA asset download counted as no operation at
+    // all and Photos could never read "Transferring now".
+    @Test("cloudphotod's GA ResourceDownload CodeOperation is an asset transfer")
+    func photosResourceDownloadIsTransfer() throws {
+        let text = try photosDownloadFixture()
+        let download = try #require(text.split(separator: "\n").first { $0.contains("ResourceDownload") })
+        let event = try #require(CloudKitLogParser.lines(String(download)).first)
+        #expect(CloudKitLogParser.operationKind(in: event.text) == "ResourceDownload")
+        #expect(CloudKitLogParser.isAssetTransfer("ResourceDownload"))
+
+        let map = CloudKitLogParser.containerActivity(text, userID: fixtureUID, bundleForImage: capturedResolution)
+        let photos = try #require(map["com.apple.photos.cloud"])
+        #expect(photos.operationCount == 4, "two FetchDatabaseChanges lines + two ResourceDownload lines")
+        #expect(photos.lastAssetTransfer != nil)
+
+        let activities = CloudKitLogParser.parse(text, now: photosNow, bundleForImage: capturedResolution)
+        #expect(activities.first { $0.bundleID == "com.apple.cloudphotod" }?.state == .transferring)
+    }
+
+    @Test("CodeOperation kinds come from the mangled request type", arguments: [
+        ("Starting operation <_TtGC12CloudKitCode13CodeOperationV22CloudKitImplementation23ResourceDownloadRequestVS1_24ResourceDownloadResponse_: 0x1; container=x>", "ResourceDownload"),
+        ("<_TtGC12CloudKitCode13CodeOperationV22CloudKitImplementation: 0x1>", nil),
+        ("<_TtGC12CloudKitCode13CodeOperationV99Truncated", nil),
+        ("<_TtC8Whatever9SomeClass: 0x1>", nil),
+    ] as [(String, String?)])
+    func codeOperationKinds(pair: (String, String?)) {
+        #expect(CloudKitLogParser.operationKind(in: Substring(pair.0)) == pair.1)
     }
 }

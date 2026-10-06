@@ -149,6 +149,7 @@ nonisolated enum CloudKitLogParser {
     /// `<CKModifyRecordsOperation:` → `ModifyRecords`. Client (`CK…`) and daemon
     /// (`CKD…`) spellings collapse to the same kind.
     static func operationKind(in line: Substring) -> String? {
+        if let kind = codeOperationKind(in: line) { return kind }
         guard let open = line.range(of: "<CK") else { return nil }
         let rest = line[open.lowerBound...].dropFirst()      // drop "<"
         let end = rest.firstIndex { !$0.isLetter && !$0.isNumber } ?? rest.endIndex
@@ -159,8 +160,49 @@ nonisolated enum CloudKitLogParser {
         return token.isEmpty ? nil : token
     }
 
+    private static let codeOperationPrefix = "<_TtGC12CloudKitCode13CodeOperation"
+
+    /// macOS 27 GA: some clients (cloudphotod's asset downloads) run CloudKit's
+    /// Swift `CodeOperation<Request, Response>` instead of a `CK…Operation`
+    /// class, and the log prints its mangled generic name:
+    /// `<_TtGC12CloudKitCode13CodeOperationV22CloudKitImplementation23ResourceDownloadRequestVS1_24ResourceDownloadResponse_:`
+    /// The kind is the first length-prefixed identifier ending in `Request`,
+    /// minus that suffix (`ResourceDownload`). Anything that does not decode
+    /// cleanly is not an operation we recognise — nil, never a guess.
+    static func codeOperationKind(in line: Substring) -> String? {
+        guard let open = line.range(of: codeOperationPrefix) else { return nil }
+        var rest = line[open.upperBound...]
+        while let next = rest.first {
+            if next.isNumber {
+                // `<len><identifier>`: is this the request type?
+                let digits = rest.prefix { $0.isNumber }
+                guard let length = Int(digits), length > 0 else { return nil }
+                rest = rest.dropFirst(digits.count)
+                let identifier = rest.prefix(length)
+                guard identifier.count == length,
+                      identifier.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return nil }
+                rest = rest.dropFirst(length)
+                if identifier.hasSuffix("Request"), identifier.count > "Request".count {
+                    return String(identifier.dropLast("Request".count))
+                }
+            } else if next == "S" {
+                // Substitution `S<n>_` refers back to an earlier identifier.
+                rest = rest.dropFirst()
+                rest = rest.drop { $0.isNumber }
+                if rest.first == "_" { rest = rest.dropFirst() }
+            } else if next.isLetter || next == "_" {
+                rest = rest.dropFirst()        // mangling marker (`V`, `_`)
+            } else {
+                return nil                     // `:` / space: the name ended
+            }
+        }
+        return nil
+    }
+
+    /// `ResourceDownload` is the GA CodeOperation spelling of an asset
+    /// download (captured from cloudphotod; see the photos-download fixture).
     static func isAssetTransfer(_ kind: String) -> Bool {
-        kind == "UploadAssets" || kind == "DownloadAssets"
+        kind == "UploadAssets" || kind == "DownloadAssets" || kind == "ResourceDownload"
     }
 
     static func isThrottle(_ line: Substring) -> Bool {

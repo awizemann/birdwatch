@@ -6,9 +6,10 @@ private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", cat
 /// Runs `brctl dump -i` (itemless) and parses it with `BrctlDumpParser`.
 ///
 /// WHY `-i`: the full dump is ~40s / ~90 MB and gets truncated anyway; the
-/// itemless dump is ~2s and is a strict superset of `brctl status` (which
-/// blocks 15–28s precisely while a sync is running, so it can never back a
-/// live view). See the system-data-source ground-truth note.
+/// itemless dump is ~2s and carries everything `brctl status` does (which
+/// blocks 15–28s, so it can never back a live view) EXCEPT the per-app
+/// `current=` lines — the Desktop & Documents flag exists only in status
+/// (verified on macOS 27 GA). See the system-data-source ground-truth note.
 ///
 /// WHY `-o <file>` rather than stdout: brctl DOES write the dump to stdout,
 /// but it is ~4.8 MB on this account and ProcessRunner caps captured pipe
@@ -19,16 +20,28 @@ private nonisolated let logger = Logger(subsystem: "com.wizemann.birdwatch", cat
 ///
 /// Actor-isolated so the spawn + the multi-megabyte parse never touch main.
 actor BrctlDumpSource {
-    private let runner = ProcessRunner()
+    private let runner: any ProcessRunning
+
+    init(runner: any ProcessRunning = ProcessRunner()) { self.runner = runner }
     private static let brctlPath = "/usr/bin/brctl"
-    /// Measured ~2s; 15s leaves generous headroom for a busy engine while
-    /// still bounding the background refresh.
+    /// Measured ~2s alone. It used to time out because bird serves brctl
+    /// requests one at a time: a `brctl status` that ProcessRunner had already
+    /// killed kept bird busy for its remaining 15–28 s and the dump queued
+    /// behind it (measured 18 s). Status now never runs concurrently with the
+    /// dump (see SystemSyncSource's dump refresh), so 15 s is real headroom.
     static let timeout: Duration = .seconds(15)
 
-    func currentDump() async -> BrctlDump? {
+    /// A parsed dump plus the CloudDocs container line it carries.
+    nonisolated struct Read: Sendable {
+        var dump: BrctlDump
+        var cloudDocsState: BrctlStatus?
+    }
+
+    func currentDump() async -> Result<Read, BrctlReadFailure> {
         let url = FileManager.default.temporaryDirectory
             .appending(path: "birdwatch-dump-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: url) }
+        let started = ContinuousClock.now
         do {
             _ = try await runner.run(
                 toolPath: Self.brctlPath,
@@ -37,18 +50,24 @@ actor BrctlDumpSource {
             )
         } catch {
             logger.warning("brctl dump -i failed: \(String(describing: error), privacy: .public)")
-            return nil
+            return .failure(BrctlReadFailure(error, timeout: Self.timeout))
         }
         // Lossy on purpose: brctl's dump carries redacted file names and ANSI
         // escapes, and a single invalid UTF-8 byte anywhere in ~5 MB would make
         // the strict `String(contentsOf:encoding:)` initializer fail and kill
         // the entire diagnostics feature permanently. `String(decoding:as:)`
         // substitutes U+FFFD for bad bytes and keeps every parseable section.
-        guard let data = try? Data(contentsOf: url) else {
-            logger.warning("brctl dump -i produced no readable output file")
-            return nil
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            let ns = error as NSError
+            logger.warning("brctl dump -i produced no readable output file: \(ns.domain, privacy: .public) \(ns.code, privacy: .public)")
+            return .failure(.failed("produced no readable output"))
         }
-        return BrctlDumpParser.parse(String(decoding: data, as: UTF8.self))
+        let text = String(decoding: data, as: UTF8.self)
+        logger.info("brctl dump -i collected in \((ContinuousClock.now - started).components.seconds, privacy: .public)s (\(data.count, privacy: .public) bytes)")
+        return .success(Read(dump: BrctlDumpParser.parse(text), cloudDocsState: BrctlParser.containerState(inDump: text)))
     }
 }
 

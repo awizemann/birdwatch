@@ -37,10 +37,29 @@ enum ConflictSource {
     /// NSFileCoordinator.h says that option grants the read "instead of
     /// waiting for … additional metadata like conflicting versions" — the
     /// exact metadata this scan exists to read.
-    @concurrent nonisolated static func findConflicts(
+    ///
+    /// The walk itself is blocking (enumeration plus a coordinated
+    /// NSFileVersion read per file — tens of seconds on cold placeholders), so
+    /// it runs on `scanQueue` via `BlockingWork`, never on a cooperative-pool
+    /// thread: a hung File Provider read then holds a GCD thread, not one of
+    /// the few threads every Task and deadline in the app depends on.
+    /// Single-flight, backoff and staleness stay with the caller
+    /// (`SystemSyncSource.claimConflictScan` / `completeConflictScan`).
+    nonisolated static func findConflicts(
         root: URL = URL(fileURLWithPath: NSHomeDirectory())
             .appending(path: "Library/Mobile Documents/com~apple~CloudDocs")
     ) async -> [FoundConflict]? {
+        await BlockingWork.run(on: scanQueue) { scanConflicts(root: root) }
+    }
+
+    /// Dedicated serial queue for the conflict walk (see `findConflicts`).
+    nonisolated static let scanQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.conflicts", qos: .utility)
+
+    /// The blocking walk. Only ever runs on `scanQueue` — the precondition
+    /// turns a future direct call from async code back onto the pool into a
+    /// test failure instead of a silent pool-starvation risk.
+    private nonisolated static func scanConflicts(root: URL) -> [FoundConflict]? {
+        dispatchPrecondition(condition: .onQueue(scanQueue))
         let fm = FileManager.default
         guard (try? root.checkResourceIsReachable()) == true else {
             logger.warning("conflict scan: root is not reachable \(root.path, privacy: .private)")

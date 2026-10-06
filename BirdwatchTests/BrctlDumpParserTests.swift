@@ -185,7 +185,7 @@ struct BrctlDumpParserTests {
         #expect(state.nonPurgeableSpaceBytes == 249_667_584)
         #expect(state.purgeableSpaceBytes == 0)
         #expect(state.hasCompletedPCSMigration == true)
-        #expect(state.serverChangeToken == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        #expect(state.serverChangeToken == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==")
         #expect(state.lastMetadataSyncDate != nil)
         #expect(state.budget?.hourValue == 19.6)
 

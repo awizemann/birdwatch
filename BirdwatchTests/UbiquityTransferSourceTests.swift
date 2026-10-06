@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 import Testing
 @testable import Birdwatch
@@ -268,5 +269,124 @@ struct UbiquityTransferSourceTests {
         let lines = raw.split(separator: "\n", omittingEmptySubsequences: true)
         #expect(lines.count == 1)
         #expect(lines[0].hasPrefix("observing in "))
+    }
+}
+
+/// FSEvents loss handling. Before: dropped-event flags were ignored and a
+/// `bufferingNewest(32)` stream silently discarded batches under bursts.
+@Suite("FSEvents loss handling")
+struct FSEventLossTests {
+
+    private static let roots = ["/Users/u/Library/Mobile Documents", "/Users/u/Desktop"]
+
+    @Test("Must-rescan flags split a callback into rescan paths, not candidates")
+    func classifyFlags() {
+        let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+        let userDropped = FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped | kFSEventStreamEventFlagMustScanSubDirs)
+        let kernelDropped = FSEventStreamEventFlags(kFSEventStreamEventFlagKernelDropped)
+        let modified = FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemIsFile)
+        let batch = UbiquityTransferSource.classify(
+            paths: ["/a/file", "/a/dir", "/b", "/c", "/d/file"],
+            flags: [modified, mustScan, userDropped, kernelDropped, modified]
+        )
+        #expect(batch.paths == ["/a/file", "/d/file"])
+        #expect(batch.rescanPaths == ["/a/dir", "/b", "/c"])
+        #expect(!batch.overflowed)
+    }
+
+    @Test("Rescan targets: subdirectories as named, ancestors map to their roots, overflow sweeps every root")
+    func rescanTargets() {
+        let inside = FSEventBatch(rescanPaths: ["/Users/u/Library/Mobile Documents/com~apple~CloudDocs/Dir/"])
+        #expect(UbiquityTransferSource.rescanTargets(for: inside, roots: Self.roots)
+                == ["/Users/u/Library/Mobile Documents/com~apple~CloudDocs/Dir"])
+
+        let volume = FSEventBatch(rescanPaths: ["/"])
+        #expect(UbiquityTransferSource.rescanTargets(for: volume, roots: Self.roots) == Self.roots.sorted())
+
+        let outside = FSEventBatch(rescanPaths: ["/private/tmp/x"])
+        #expect(UbiquityTransferSource.rescanTargets(for: outside, roots: Self.roots).isEmpty)
+
+        let overflow = FSEventBatch(paths: ["/x"], overflowed: true)
+        #expect(UbiquityTransferSource.rescanTargets(for: overflow, roots: Self.roots) == Self.roots.sorted())
+
+        #expect(UbiquityTransferSource.rescanTargets(for: FSEventBatch(paths: ["/x"]), roots: Self.roots).isEmpty)
+    }
+
+    // A slow consumer coalesces: nothing between two drains is lost.
+    @Test("The sink accumulates callbacks between drains instead of dropping batches")
+    func sinkCoalesces() {
+        let sink = FSEventSink(limit: 100)
+        for index in 0..<40 {
+            sink.accumulate(FSEventBatch(paths: ["/p\(index)"]))
+        }
+        sink.accumulate(FSEventBatch(rescanPaths: ["/dir"]))
+        let drained = sink.drain()
+        #expect(drained.paths.count == 40)
+        #expect(drained.rescanPaths == ["/dir"])
+        #expect(!drained.overflowed)
+        #expect(sink.drain().isEmpty, "a drain empties the sink")
+    }
+
+    @Test("Past its cap the sink keeps the newest paths and flags the overflow")
+    func sinkOverflow() {
+        let sink = FSEventSink(limit: 3)
+        sink.accumulate(FSEventBatch(paths: ["/1", "/2"]))
+        sink.accumulate(FSEventBatch(paths: ["/3", "/4", "/5"]))
+        let drained = sink.drain()
+        #expect(drained.paths == ["/3", "/4", "/5"])
+        #expect(drained.overflowed, "the lost paths become a full rescan, never silence")
+    }
+
+    // A hung seed/rescan sweep used to let every pause/resume (and every
+    // rescan) queue another blocking listing behind it.
+    @Test("Sweeps are single-flight: a request while one runs never starts a second")
+    @MainActor func sweepIsSingleFlight() async {
+        let gate = SweepGate()
+        let source = UbiquityTransferSource(sweep: { await gate.sweep($0) })
+        source.requestSweepForTesting(["/a"])
+        await gate.waitUntilCalled(times: 1)
+        source.requestSweepForTesting(["/b"])
+        source.requestSweepForTesting(["/c"])
+        #expect(source.isSweepingForTesting)
+        #expect(await gate.calls == [["/a"]], "requests made while a sweep runs fold into the next one")
+        await gate.release()
+        source.stop()
+    }
+
+    @Test("Each accumulate wakes the consumer; unconsumed wakes coalesce")
+    func sinkWakes() async {
+        let sink = FSEventSink(limit: 10)
+        let wakes = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { sink.attach($0) }
+        sink.accumulate(FSEventBatch(paths: ["/a"]))
+        sink.accumulate(FSEventBatch(paths: ["/b"]))
+        var iterator = wakes.makeAsyncIterator()
+        #expect(await iterator.next() != nil)
+        #expect(sink.drain().paths == ["/a", "/b"], "one wake, both batches")
+    }
+}
+
+/// A sweep that stays open until released, recording what it was asked for.
+private actor SweepGate {
+    private(set) var calls: [[String]] = []
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private var callWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func sweep(_ directories: [String]) async -> [String] {
+        calls.append(directories)
+        let ready = callWaiters.filter { calls.count >= $0.0 }
+        callWaiters.removeAll { calls.count >= $0.0 }
+        ready.forEach { $0.1.resume() }
+        await withCheckedContinuation { held.append($0) }
+        return []
+    }
+
+    func waitUntilCalled(times: Int) async {
+        guard calls.count < times else { return }
+        await withCheckedContinuation { callWaiters.append((times, $0)) }
+    }
+
+    func release() {
+        held.forEach { $0.resume() }
+        held.removeAll()
     }
 }

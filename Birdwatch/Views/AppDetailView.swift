@@ -245,7 +245,7 @@ struct AppDetailView: View {
     private func footnoteText(_ backend: SyncBackend) -> String {
         let source = switch backend {
         case .cloudDocs:
-            "Data source: brctl status / NSMetadataQuery (bird) — per-file exact progress."
+            "Data source: bird via brctl dump -i and brctl status, plus FSEvents and per-file ubiquity flags — in flight or not, no per-file percentage."
         case .cloudKit:
             "Data source: cloudd status and item counts — CloudKit exposes no per-item progress API."
         case .fileProvider:

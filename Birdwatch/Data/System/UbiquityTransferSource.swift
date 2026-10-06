@@ -137,7 +137,12 @@ final class UbiquityTransferSource {
         beginWatching()
     }
 
-    init() {
+    /// The shallow directory sweep (seed and rescan). Injected only so a test
+    /// can hold a sweep open; production always lists the directories.
+    private let sweep: @Sendable ([String]) async -> [String]
+
+    init(sweep: @escaping @Sendable ([String]) async -> [String] = { await UbiquityTransferSource.shallowSeedPaths(roots: $0) }) {
+        self.sweep = sweep
         // Self-wiring: the instance listens for the app-wide pause/resume
         // signals itself, so no owner has to forward them.
         for (name, isPauseSignal) in [(Self.pauseRequest, true), (Self.resumeRequest, false)] {
@@ -208,18 +213,17 @@ final class UbiquityTransferSource {
         // Seed: a transfer already in flight when the app launches produced its
         // FSEvents before we were listening. A shallow, time-boxed sweep of the
         // roots catches it without the >20s cost of a full recursive walk.
-        let seedAt = Date()
-        Task { [weak self] in
-            let seeded = await Self.shallowSeedPaths(roots: roots)
-            guard let self, self.isStarted, !self.isPaused else { return }
-            self.ingest(paths: seeded, at: seedAt)
-        }
+        requestSweep(of: roots)
 
-        let stream = Self.pathStream(roots: roots, latency: Self.eventLatency)
+        let feed = Self.eventFeed(roots: roots, latency: Self.eventLatency)
         watchTask = Task { [weak self] in
-            for await batch in stream {
+            // One wake-up may stand for several FSEvents callbacks: the sink
+            // accumulates between wakes, so draining it loses nothing.
+            for await _ in feed.wakes {
+                let batch = feed.sink.drain()
                 guard let self else { return }
-                self.ingest(paths: batch, at: Date())
+                self.ingest(paths: batch.paths, at: Date())
+                self.rescanIfNeeded(after: batch, roots: roots)
             }
         }
 
@@ -242,11 +246,66 @@ final class UbiquityTransferSource {
         watchTask = nil
         probeTask?.cancel()
         probeTask = nil
+        // The sweep in flight (if any) is NOT cancelled or forgotten: its GCD
+        // block cannot be interrupted, and forgetting it would let a resume
+        // queue another behind a hung one. It finishes, its result is
+        // dropped while paused, and only then may a new sweep start.
+        queuedSweep.removeAll()
     }
 
     private func ingest(paths: [String], at date: Date) {
         candidates = Self.merge(candidates, newPaths: paths, at: date)
     }
+
+    /// The one shallow sweep in flight (seed or rescan), and directories
+    /// asked for while it runs. Single-flight: a hung File Provider listing
+    /// holds one GCD thread, never a growing queue of blocks behind it.
+    private var sweepTask: Task<Void, Never>?
+    private var queuedSweep: Set<String> = []
+    /// Test hook: true while a sweep is running.
+    var isSweepingForTesting: Bool { sweepTask != nil }
+
+    /// FSEvents (or our own accumulator) lost individual events: re-sweep the
+    /// affected directories with the same shallow seed sweep used at start.
+    ///
+    /// SHALLOW ON PURPOSE: only the immediate children of each named
+    /// directory become candidates, so a file deeper down whose event was
+    /// lost is found only when its next event arrives. A recursive walk of
+    /// CloudDocs measured >20 s and never completed, and an overflow names
+    /// whole roots — a bounded deep walk would still miss files while
+    /// costing far more, so the cheaper, predictable sweep is used and the
+    /// gap is logged rather than papered over.
+    private func rescanIfNeeded(after batch: FSEventBatch, roots: [String]) {
+        let targets = Self.rescanTargets(for: batch, roots: roots)
+        guard !targets.isEmpty else { return }
+        logger.warning("FSEvents lost events (\(batch.rescanPaths.count, privacy: .public) must-rescan flag(s), accumulator overflow: \(batch.overflowed, privacy: .public)); shallow re-sweep of \(targets.count, privacy: .public) director\(targets.count == 1 ? "y" : "ies", privacy: .public)")
+        requestSweep(of: targets)
+    }
+
+    private func requestSweep(of directories: [String]) {
+        queuedSweep.formUnion(directories)
+        guard sweepTask == nil else { return }   // folds into the next sweep
+        startQueuedSweep()
+    }
+
+    private func startQueuedSweep() {
+        let targets = queuedSweep.sorted()
+        queuedSweep.removeAll()
+        guard !targets.isEmpty else { sweepTask = nil; return }
+        let sweptAt = Date()
+        let sweep = sweep
+        sweepTask = Task { [weak self] in
+            let swept = await sweep(targets)
+            guard let self else { return }
+            self.sweepTask = nil
+            guard self.isStarted, !self.isPaused else { return }
+            self.ingest(paths: swept, at: sweptAt)
+            self.startQueuedSweep()
+        }
+    }
+
+    func requestSweepForTesting(_ directories: [String]) { requestSweep(of: directories) }
+
 
     /// Paths to probe this tick.
     ///
@@ -509,7 +568,15 @@ final class UbiquityTransferSource {
     /// Top-level-only sweep of each root, so a transfer already running at
     /// launch is not invisible until the user touches the file again. Bounded
     /// by construction (no recursion) — the recursive walk measured >20 s.
-    @concurrent nonisolated static func shallowSeedPaths(roots: [String]) async -> [String] {
+    /// Also the rescan after FSEvents drops events, so it runs on its own
+    /// serial queue via `BlockingWork` (a cold-placeholder listing blocks).
+    nonisolated static func shallowSeedPaths(roots: [String]) async -> [String] {
+        await BlockingWork.run(on: seedQueue) { listChildren(of: roots) }
+    }
+
+    nonisolated static let seedQueue = DispatchQueue(label: "com.wizemann.birdwatch.scan.ubiquity-seed", qos: .utility)
+
+    private nonisolated static func listChildren(of roots: [String]) -> [String] {
         var out: [String] = []
         for root in roots {
             let url = URL(fileURLWithPath: root)
@@ -526,22 +593,75 @@ final class UbiquityTransferSource {
 
     // MARK: - FSEvents
 
-    /// Coalesced batches of changed file paths under `roots`.
+    /// FSEvents flags meaning "individual events under this path were lost —
+    /// rescan it": the kernel or fseventsd dropped events, or coalesced a
+    /// subtree into one must-scan event.
+    nonisolated static let mustRescanFlags = FSEventStreamEventFlags(
+        kFSEventStreamEventFlagMustScanSubDirs
+            | kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagKernelDropped
+    )
+
+    /// One callback's events, split into ordinary changed paths and
+    /// directories FSEvents says must be rescanned. Pure, so the flag handling
+    /// is testable without a live stream.
+    nonisolated static func classify(paths: [String], flags: [FSEventStreamEventFlags]) -> FSEventBatch {
+        var batch = FSEventBatch()
+        for (index, path) in paths.enumerated() {
+            let flag = index < flags.count ? flags[index] : 0
+            if flag & mustRescanFlags != 0 {
+                batch.rescanPaths.append(path)
+            } else {
+                batch.paths.append(path)
+            }
+        }
+        return batch
+    }
+
+    /// Directories to re-sweep after `batch`. An accumulator overflow lost
+    /// paths we cannot name, so every root is swept. A must-rescan path inside
+    /// a root is swept itself; one ABOVE a root (a kernel drop can name the
+    /// volume) stands for that root. Anything else is outside what we watch.
+    nonisolated static func rescanTargets(for batch: FSEventBatch, roots: [String]) -> [String] {
+        if batch.overflowed { return roots.sorted() }
+        var targets: Set<String> = []
+        for raw in batch.rescanPaths {
+            let path = raw.count > 1 && raw.hasSuffix("/") ? String(raw.dropLast()) : raw
+            for root in roots {
+                if path == root || path.hasPrefix(root + "/") {
+                    targets.insert(path)
+                } else if path == "/" || root.hasPrefix(path + "/") {
+                    targets.insert(root)
+                }
+            }
+        }
+        return targets.sorted()
+    }
+
+    /// Changed paths under `roots`, delivered through an accumulating sink.
+    ///
+    /// WHY NOT a buffered AsyncStream of batches: a bounded buffer
+    /// (`bufferingNewest(32)` before) silently discards batches whenever the
+    /// main actor falls behind a burst. The callback now merges into the sink
+    /// and only posts a coalesced wake-up; the consumer drains everything that
+    /// accumulated. The sink is capped — past the cap it keeps the newest
+    /// paths and flags `overflowed`, which triggers a rescan of every root.
     ///
     /// SIGTRAP hazard: the FSEvents callback fires on a dispatch queue, never
-    /// main. It is a C function pointer (captures nothing) and the continuation
+    /// main. It is a C function pointer (captures nothing) and the sink
     /// travels through the stream's `info` context, so nothing @MainActor is
     /// ever touched off-main.
-    nonisolated static func pathStream(roots: [String], latency: CFTimeInterval) -> AsyncStream<[String]> {
-        AsyncStream(bufferingPolicy: .bufferingNewest(32)) { continuation in
-            let sink = PathSink(continuation: continuation)
+    nonisolated static func eventFeed(roots: [String], latency: CFTimeInterval) -> FSEventFeed {
+        let sink = FSEventSink()
+        let wakes = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            sink.attach(continuation)
             var context = FSEventStreamContext(
                 version: 0,
                 info: Unmanaged.passRetained(sink).toOpaque(),
                 retain: nil,
                 release: { pointer in
                     guard let pointer else { return }
-                    Unmanaged<PathSink>.fromOpaque(pointer).release()
+                    Unmanaged<FSEventSink>.fromOpaque(pointer).release()
                 },
                 copyDescription: nil
             )
@@ -557,7 +677,7 @@ final class UbiquityTransferSource {
                 logger.error("FSEventStreamCreate failed")
                 // Balance the passRetained above: no stream means no release
                 // callback will ever run.
-                Unmanaged<PathSink>.fromOpaque(context.info!).release()
+                Unmanaged<FSEventSink>.fromOpaque(context.info!).release()
                 continuation.finish()
                 return
             }
@@ -571,6 +691,77 @@ final class UbiquityTransferSource {
             }
             let handle = StreamHandle(stream)
             continuation.onTermination = { _ in handle.tearDown() }
+        }
+        return FSEventFeed(wakes: wakes, sink: sink)
+    }
+}
+
+/// What the watcher drains from `FSEventSink` per wake-up.
+nonisolated struct FSEventBatch: Sendable, Equatable {
+    /// Changed paths (candidates for the ubiquity probe).
+    var paths: [String] = []
+    /// Directories FSEvents flagged must-rescan (MustScanSubDirs /
+    /// UserDropped / KernelDropped): their individual events are gone.
+    var rescanPaths: [String] = []
+    /// The sink hit its cap and discarded older paths it cannot name.
+    var overflowed = false
+
+    var isEmpty: Bool { paths.isEmpty && rescanPaths.isEmpty && !overflowed }
+}
+
+/// A started FSEvents stream: coalesced wake-ups plus the sink to drain.
+nonisolated struct FSEventFeed: Sendable {
+    let wakes: AsyncStream<Void>
+    let sink: FSEventSink
+}
+
+/// Accumulates FSEvents callbacks between consumer wake-ups, so a slow
+/// consumer coalesces batches instead of losing them.
+/// Sendable: all mutable state lives in an OSAllocatedUnfairLock.
+nonisolated final class FSEventSink: Sendable {
+    /// Matches the candidate table's own limit: anything past it would be
+    /// evicted by `merge` anyway, so beyond this the rescan is the record.
+    static let pathLimit = UbiquityTransferSource.candidateLimit
+
+    private struct State {
+        var pending = FSEventBatch()
+        var continuation: AsyncStream<Void>.Continuation?
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let limit: Int
+
+    init(limit: Int = FSEventSink.pathLimit) { self.limit = limit }
+
+    func attach(_ continuation: AsyncStream<Void>.Continuation) {
+        state.withLock { $0.continuation = continuation }
+    }
+
+    /// Called from the FSEvents queue. Merges, caps, then wakes the consumer
+    /// (a wake-up that coalesces with an unconsumed one loses nothing — the
+    /// data is here, not in the stream).
+    func accumulate(_ batch: FSEventBatch) {
+        let continuation = state.withLock { state -> AsyncStream<Void>.Continuation? in
+            state.pending.paths.append(contentsOf: batch.paths)
+            state.pending.rescanPaths.append(contentsOf: batch.rescanPaths)
+            state.pending.overflowed = state.pending.overflowed || batch.overflowed
+            if state.pending.paths.count > limit {
+                state.pending.paths.removeFirst(state.pending.paths.count - limit)
+                state.pending.overflowed = true
+            }
+            if state.pending.rescanPaths.count > limit {
+                state.pending.rescanPaths.removeAll()
+                state.pending.overflowed = true
+            }
+            return state.continuation
+        }
+        continuation?.yield(())
+    }
+
+    /// Everything accumulated since the last drain.
+    func drain() -> FSEventBatch {
+        state.withLock { state in
+            defer { state.pending = FSEventBatch() }
+            return state.pending
         }
     }
 }
@@ -588,19 +779,12 @@ private nonisolated final class StreamHandle: @unchecked Sendable {
     }
 }
 
-/// Carries the stream continuation into the C callback. @unchecked Sendable:
-/// the continuation itself is Sendable and the box is immutable after init —
-/// the only reason it exists is to have something to put behind a raw pointer.
-private nonisolated final class PathSink: @unchecked Sendable {
-    let continuation: AsyncStream<[String]>.Continuation
-    init(continuation: AsyncStream<[String]>.Continuation) { self.continuation = continuation }
-}
-
 /// Top-level so it stays a capture-free C function pointer.
-private nonisolated let fsEventsCallback: FSEventStreamCallback = { _, info, count, eventPaths, _, _ in
+private nonisolated let fsEventsCallback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
     guard let info, count > 0 else { return }
-    let sink = Unmanaged<PathSink>.fromOpaque(info).takeUnretainedValue()
+    let sink = Unmanaged<FSEventSink>.fromOpaque(info).takeUnretainedValue()
     // kFSEventStreamCreateFlagUseCFTypes: eventPaths is a CFArray of CFString.
     guard let paths = unsafeBitCast(eventPaths, to: NSArray.self) as? [String] else { return }
-    sink.continuation.yield(paths)
+    let flags = Array(UnsafeBufferPointer(start: eventFlags, count: count))
+    sink.accumulate(UbiquityTransferSource.classify(paths: paths, flags: flags))
 }

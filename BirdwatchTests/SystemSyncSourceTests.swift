@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import os
 @testable import Birdwatch
 
 /// Coverage for SystemSyncSource's pure assembly step (audit P2: "untested pure
@@ -84,25 +85,33 @@ struct SystemSyncSourceAssemblyTests {
         #expect(drive.pendingItems == 1)
     }
 
-    // Fails if the idle branch ever collapses to a single string — "Sync engine
-    // active" is the honest line when brctl says the engine is busy but the
-    // metadata query has no file-level transfers to show.
-    @Test("With no transfers, the status line follows brctl's idle flag")
+    // C1: the old code said "Up to date · Sync engine active" while bird was
+    // busy and "All files synced" with no evidence at all (nil state).
+    @Test("With no transfers, the row says what bird reported — never 'synced' without evidence")
     func idleStatusLine() {
         let busy = SystemSyncSource.buildApps(
             status: Self.status(isIdle: false), transfers: [], fileProviderDomains: []
         )
-        #expect(busy.first { $0.id == "icloud-drive" }?.statusLine == "Sync engine active")
-        #expect(busy.first { $0.id == "icloud-drive" }?.status == .upToDate)
+        let busyDrive = busy.first { $0.id == "icloud-drive" }
+        #expect(busyDrive?.statusLine == "Sync engine busy, no file transfers seen")
+        #expect(busyDrive?.status != .upToDate, "a busy engine is not up to date")
 
         let idle = SystemSyncSource.buildApps(
             status: Self.status(isIdle: true), transfers: [], fileProviderDomains: []
         )
-        #expect(idle.first { $0.id == "icloud-drive" }?.statusLine == "All files synced")
+        #expect(idle.first { $0.id == "icloud-drive" }?.statusLine == "Sync engine idle")
+        #expect(idle.first { $0.id == "icloud-drive" }?.status == .upToDate)
 
         let unknown = SystemSyncSource.buildApps(status: nil, transfers: [], fileProviderDomains: [])
-        #expect(unknown.first { $0.id == "icloud-drive" }?.statusLine == "All files synced",
-                "no brctl status is not evidence of an active engine")
+        #expect(unknown.first { $0.id == "icloud-drive" }?.statusLine == "Sync state unknown")
+        #expect(unknown.first { $0.id == "icloud-drive" }?.status != .upToDate)
+
+        let stale = SystemSyncSource.buildApps(
+            status: Self.status(isIdle: true), transfers: [], fileProviderDomains: [],
+            stateNote: "last-known, brctl status 12 min ago"
+        )
+        #expect(stale.first { $0.id == "icloud-drive" }?.statusLine
+                == "Sync engine idle · last-known, brctl status 12 min ago")
     }
 
     // MARK: - File Provider domains
@@ -291,33 +300,287 @@ struct SystemSyncSourceAssemblyTests {
         #expect(await source.conflictDetail(issueID: "conflict-a") == nil, "every reader sees the drop")
     }
 
-    // MARK: - engineInfo
+    // MARK: - Engine card
 
-    // Fails if a missing brctl status is ever rendered as a healthy engine —
-    // the whole point is telling the user Full Disk Access is the problem.
-    @Test("engineInfo with no brctl status reports unavailable and unhealthy metadata")
-    func engineInfoUnavailable() {
-        let info = SystemSyncSource.engineInfo(from: nil)
-        #expect(info.serverState == "Unavailable")
-        #expect(info.clientState == "Unavailable")
-        #expect(info.lastSyncToken == "—")
-        #expect(info.metadataIndex == "brctl unavailable — check Full Disk Access")
-        #expect(info.metadataHealthy == false)
-        #expect(info.pushThrottled == false)
-        #expect(info.pushBudget == "Not measured")
+    private static let idleState = BrctlStatus(
+        clientState: "idle", serverState: "up", lastSync: nil, isIdle: true, tokenInfo: "tok-42", apps: [])
+
+    private static func reading(
+        mapped: SystemSyncSource.MappedDump? = nil, dumpAge: TimeInterval? = nil,
+        failure: BrctlReadFailure? = nil, status: CloudDocsStatusCache = CloudDocsStatusCache()
+    ) -> SystemSyncSource.CloudDocsReading {
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        return SystemSyncSource.cloudDocsReading(
+            mapped: mapped, dumpAt: dumpAge.map { now - $0 }, dumpFailure: failure, statusRead: status, now: now)
     }
 
-    @Test("engineInfo maps every brctl field through unchanged")
-    func engineInfoMapped() {
-        let info = SystemSyncSource.engineInfo(from: BrctlStatus(
-            clientState: "idle", serverState: "up", lastSync: Date(timeIntervalSinceReferenceDate: 0),
-            isIdle: true, tokenInfo: "tok-42", apps: []
-        ))
-        #expect(info.serverState == "up")
-        #expect(info.clientState == "idle")
-        #expect(info.lastSyncToken == "tok-42")
-        #expect(info.metadataIndex == "Reachable via brctl")
-        #expect(info.metadataHealthy)
-        #expect(info.pushBudget == "Not measured", "push budget is not measurable — never invented")
+    // Fails if a missing CloudDocs state is ever rendered as a healthy engine,
+    // or if a timeout is ever blamed on Full Disk Access (the old text said
+    // "check Full Disk Access" for every failure, including timeouts — C1).
+    @Test("Engine with nothing read says why, and names FDA only when it is denied")
+    func engineNothingRead() {
+        let waiting = SystemSyncSource.engine(reading: Self.reading(), mapped: nil, dumpFailure: nil, fullDiskAccess: .unknown)
+        #expect(waiting.serverState == "Not read yet")
+        #expect(waiting.clientState == "Not read yet")
+        #expect(waiting.lastSyncToken == "—")
+        #expect(waiting.metadataIndex == "Waiting for the first brctl dump")
+        #expect(waiting.metadataHealthy == false)
+        #expect(waiting.pushBudget == "Not measured")
+
+        let timedOut = SystemSyncSource.engine(
+            reading: Self.reading(failure: .timedOut(seconds: 15)), mapped: nil,
+            dumpFailure: .timedOut(seconds: 15), fullDiskAccess: .granted)
+        #expect(timedOut.serverState == "Unavailable")
+        #expect(timedOut.metadataIndex == "brctl dump timed out after 15 s")
+
+        let denied = SystemSyncSource.engine(
+            reading: Self.reading(failure: .failed("exited with status 1")), mapped: nil,
+            dumpFailure: .failed("exited with status 1"), fullDiskAccess: .denied)
+        #expect(denied.metadataIndex == "brctl dump exited with status 1 — Full Disk Access is not granted")
+    }
+
+    // The review's case: status was the only source and the dump failed —
+    // the old engine said "Reachable via brctl", healthy, with no age.
+    @Test("Status-only state is labelled last-known with its age, and the dump failure stays visible")
+    func engineStatusOnlyAfterDumpFailure() {
+        var cache = CloudDocsStatusCache()
+        cache.record(.success(Self.idleState), at: Date(timeIntervalSinceReferenceDate: 10_000 - 720))
+        let reading = Self.reading(failure: .timedOut(seconds: 15), status: cache)
+        let engine = SystemSyncSource.engine(
+            reading: reading, mapped: nil, dumpFailure: .timedOut(seconds: 15), fullDiskAccess: .granted)
+        #expect(engine.clientState == "idle (last-known, brctl status 12 min ago)")
+        #expect(engine.serverState == "up (last-known, brctl status 12 min ago)")
+        #expect(engine.metadataIndex == "brctl dump timed out after 15 s")
+        #expect(!engine.metadataHealthy)
+    }
+
+    @Test("A failed dump refresh labels the still-shown older dump as last-known, with its age")
+    func engineLastKnownDump() {
+        let mapped = SystemSyncSource.MappedDump(BrctlDump(), cloudDocsState: Self.idleState)
+        let fresh = SystemSyncSource.engine(
+            reading: Self.reading(mapped: mapped, dumpAge: 30), mapped: mapped, dumpFailure: nil, fullDiskAccess: .granted)
+        #expect(fresh.metadataIndex == "Read via brctl dump")
+        #expect(fresh.clientState == "idle")
+        #expect(fresh.metadataHealthy)
+
+        let stale = SystemSyncSource.engine(
+            reading: Self.reading(mapped: mapped, dumpAge: 240, failure: .timedOut(seconds: 15)),
+            mapped: mapped, dumpFailure: .timedOut(seconds: 15), fullDiskAccess: .granted)
+        #expect(stale.clientState == "idle (last-known, brctl dump 4 min ago)")
+        #expect(stale.metadataIndex
+                == "Read via brctl dump · last-known (latest brctl dump timed out after 15 s, shown dump is from 4 min ago)")
+        #expect(!stale.metadataHealthy)
+    }
+
+    // Item 9: a dump that parsed but carried no `{client:` line is not
+    // "waiting for the first dump".
+    @Test("A dump without a container line is distinguished from no dump at all")
+    func engineDumpWithoutContainer() {
+        let mapped = SystemSyncSource.MappedDump(BrctlDump())
+        let engine = SystemSyncSource.engine(
+            reading: Self.reading(mapped: mapped, dumpAge: 10), mapped: mapped, dumpFailure: nil, fullDiskAccess: .granted)
+        #expect(engine.clientState == "Not in brctl dump")
+        #expect(engine.serverState == "Not in brctl dump")
+        #expect(engine.metadataIndex == "Read via brctl dump (no CloudDocs container line in it)")
+    }
+
+    @Test("A runner timeout maps to .timedOut with the timeout it was given")
+    func readFailureMapping() {
+        #expect(BrctlReadFailure(RunnerError.timeout, timeout: .seconds(45)) == .timedOut(seconds: 45))
+        #expect(BrctlReadFailure(RunnerError.nonZeroExit(code: 2, stderr: "x"), timeout: .seconds(1))
+                == .failed("exited with status 2"))
+        #expect(BrctlReadFailure.timedOut(seconds: 45).summary == "timed out after 45 s")
+    }
+
+    @Test("Dump refresh backs off on consecutive failures, capped at 10 minutes")
+    func dumpBackoff() {
+        #expect(SystemSyncSource.dumpRetryInterval(consecutiveFailures: 0) == 60)
+        #expect(SystemSyncSource.dumpRetryInterval(consecutiveFailures: 1) == 60)
+        #expect(SystemSyncSource.dumpRetryInterval(consecutiveFailures: 2) == 120)
+        #expect(SystemSyncSource.dumpRetryInterval(consecutiveFailures: 3) == 240)
+        #expect(SystemSyncSource.dumpRetryInterval(consecutiveFailures: 5) == 600)
+        #expect(SystemSyncSource.dumpRetryInterval(consecutiveFailures: 50) == 600)
+    }
+
+    // MARK: - Desktop & Documents (tri-state)
+
+    private static let desktopOn = BrctlStatus(
+        clientState: "idle", serverState: "old", lastSync: nil, isIdle: true, tokenInfo: nil,
+        apps: [BrctlAppLine(name: "Desktop & Documents", isCurrent: true)])
+
+    @Test("Desktop & Documents is unknown — not off — until brctl status answers, and the iCloud Drive row says so")
+    func desktopDocumentsUnknown() throws {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
+        var cache = CloudDocsStatusCache()
+        guard case .unknown(let notYet) = cache.desktopDocuments(now: t0) else {
+            Issue.record("expected unknown before any read"); return
+        }
+        #expect(notYet.hasPrefix("not read yet"))
+        #expect(!cache.desktopDocumentsSynced, "unknown never touches ~/Desktop or ~/Documents")
+
+        cache.markAttempt(at: t0)
+        cache.record(.failure(.timedOut(seconds: 45)), at: t0 + 45)
+        guard case .unknown(let failed) = cache.desktopDocuments(now: t0 + 60) else {
+            Issue.record("a failed first read is still unknown"); return
+        }
+        #expect(failed.contains("timed out after 45 s"))
+
+        let apps = SystemSyncSource.buildApps(
+            status: nil, transfers: [], fileProviderDomains: [], desktopDocuments: cache.desktopDocuments(now: t0 + 60))
+        let drive = try #require(apps.first { $0.id == "icloud-drive" })
+        #expect(drive.infoCallout == "Desktop & Documents sync: \(failed).")
+        #expect(!apps.contains { $0.id == "desktop-documents" })
+    }
+
+    // The flapping bug: every timed-out status read turned the flag off, hid
+    // the row and re-armed the FSEvents watcher. A failure must keep it — and
+    // the row's STATUS LINE (list, popover) must say it is last-known.
+    @Test("A failed status read keeps the last-known flag, on the row's status line too")
+    func statusCacheKeepsLastKnown() throws {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
+        var cache = CloudDocsStatusCache()
+        #expect(cache.isDue(now: t0))
+        cache.markAttempt(at: t0)
+        cache.record(.success(Self.desktopOn), at: t0)
+        #expect(cache.desktopDocuments(now: t0) == .on(lastKnown: nil))
+        #expect(cache.desktopDocumentsSynced)
+        #expect(!cache.isDue(now: t0 + 299))
+        #expect(cache.isDue(now: t0 + 300))
+
+        cache.markAttempt(at: t0 + 300)
+        cache.record(.failure(.timedOut(seconds: 45)), at: t0 + 345)
+        #expect(cache.desktopDocumentsSynced, "a timeout is not 'feature off'")
+        guard case .on(let note?) = cache.desktopDocuments(now: t0 + 600) else {
+            Issue.record("expected a last-known ON"); return
+        }
+        #expect(note.contains("Last-known"))
+        #expect(note.contains("10 min ago"))
+        #expect(note.contains("timed out after 45 s"))
+
+        let apps = SystemSyncSource.buildApps(
+            status: Self.desktopOn, transfers: [], fileProviderDomains: [],
+            desktopDocuments: cache.desktopDocuments(now: t0 + 600))
+        let row = try #require(apps.first { $0.id == "desktop-documents" })
+        #expect(row.infoCallout == note)
+        #expect(row.statusLine == "Sync engine idle · last-known setting")
+    }
+
+    @Test("Container state comes from the dump; per-app lines only from status; status alone is aged")
+    func cloudDocsReadingMerge() throws {
+        var cache = CloudDocsStatusCache()
+        #expect(Self.reading(status: cache).state == nil)
+
+        let fromDump = BrctlStatus(clientState: "busy", serverState: "new", lastSync: nil, isIdle: false, tokenInfo: "t", apps: [])
+        let dumpOnly = Self.reading(mapped: .init(BrctlDump(), cloudDocsState: fromDump), dumpAge: 20, status: cache)
+        #expect(dumpOnly.state?.clientState == "busy")
+        #expect(dumpOnly.staleNote == nil)
+        #expect(!SystemSyncSource.desktopDocumentsSynced(dumpOnly.state))
+
+        cache.record(.success(Self.desktopOn), at: Date(timeIntervalSinceReferenceDate: 10_000 - 120))
+        let merged = Self.reading(mapped: .init(BrctlDump(), cloudDocsState: fromDump), dumpAge: 20, status: cache)
+        #expect(merged.state?.serverState == "new", "the dump (≤60 s old) wins over an older status read")
+        #expect(SystemSyncSource.desktopDocumentsSynced(merged.state))
+
+        let statusOnly = Self.reading(status: cache)
+        #expect(statusOnly.state?.serverState == "old")
+        #expect(statusOnly.staleNote == "last-known, brctl status 2 min ago")
+    }
+
+    // MARK: - Footprint caches vs the Desktop & Documents flag
+
+    @Test("Footprint caches are re-walked when the Desktop & Documents flag differs from the walk's")
+    func footprintCacheFollowsFlag() {
+        let t0 = Date(timeIntervalSinceReferenceDate: 0)
+        #expect(SystemSyncSource.footprintCacheIsDue(nil, desktopDocuments: false, now: t0))
+        #expect(!SystemSyncSource.footprintCacheIsDue((t0, false), desktopDocuments: false, now: t0 + 10))
+        #expect(SystemSyncSource.footprintCacheIsDue((t0, false), desktopDocuments: true, now: t0 + 10),
+                "walked before the flag was known: stale at once, not after 5 minutes")
+        #expect(SystemSyncSource.footprintCacheIsDue((t0, true), desktopDocuments: true, now: t0 + 300))
+    }
+}
+
+// MARK: - brctl refresh ordering (injected runner)
+
+/// Records every brctl spawn and how many overlap. The dump writes a small
+/// real-shaped dump to its `-o` path; status answers or times out.
+private nonisolated final class RecordingBrctlRunner: ProcessRunning {
+    struct State {
+        var events: [String] = []
+        var inFlight = 0
+        var maxInFlight = 0
+    }
+    let state = OSAllocatedUnfairLock(initialState: State())
+    let statusTimesOut: Bool
+
+    init(statusTimesOut: Bool = false) { self.statusTimesOut = statusTimesOut }
+
+    static let dump = """
+        1 containers matching '*'
+        -----------------------------------------------------
+        - <c{1}m.a{3}e.C{7}s[1] foreground {client:idle server:full-sync last-sync:2026-10-05 20:20:52.446, token:unkown-token-size:36 (AAAA)}>
+        """
+
+    func run(toolPath: String, arguments: [String], timeout: Duration) async throws -> String {
+        let kind = arguments.first ?? "?"
+        state.withLock {
+            $0.events.append("start \(kind)")
+            $0.inFlight += 1
+            $0.maxInFlight = max($0.maxInFlight, $0.inFlight)
+        }
+        // Give any other spawn the chance to start while this one is "running".
+        await Task.yield()
+        defer { state.withLock { $0.events.append("end \(kind)"); $0.inFlight -= 1 } }
+        switch kind {
+        case "dump":
+            if let flag = arguments.firstIndex(of: "-o"), flag + 1 < arguments.count {
+                try Self.dump.write(toFile: arguments[flag + 1], atomically: true, encoding: .utf8)
+            }
+            return ""
+        case "status":
+            if statusTimesOut { throw RunnerError.timeout }
+            return "Desktop & Documents: current=YES lastEnabled=(never) lastDisabled=(never)\n"
+        default:
+            return ""
+        }
+    }
+
+    var events: [String] { state.withLock { $0.events } }
+    var maxInFlight: Int { state.withLock { $0.maxInFlight } }
+}
+
+@Suite("brctl background refresh")
+struct BrctlRefreshOrderingTests {
+
+    // bird serves one brctl request at a time; a status overlapping the dump
+    // made the dump time out. Status must start only after the dump ENDED,
+    // and a second claim while the refresh runs must be refused.
+    @Test("Status never starts while the dump is in flight, and runs after it")
+    func statusRunsAfterDump() async {
+        let runner = RecordingBrctlRunner()
+        let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        let now = Date()
+        #expect(await source.claimDumpRefresh(now: now))
+        #expect(await !source.claimDumpRefresh(now: now + 3600), "single flight while the refresh runs")
+        await source.performDumpRefresh()
+
+        #expect(runner.events == ["start dump", "end dump", "start status", "end status"])
+        #expect(runner.maxInFlight == 1)
+        let flag = source.statusCacheForTesting.desktopDocuments(now: Date())
+        #expect(flag == .on(lastKnown: nil))
+    }
+
+    // A timed-out status keeps bird busy for its remaining 15–28 s; the next
+    // dump must not be claimed straight away (it would queue and time out).
+    @Test("A failed status read restarts the dump clock before the refresh ends")
+    func statusFailureDefersNextDump() async {
+        let runner = RecordingBrctlRunner(statusTimesOut: true)
+        let source = SystemSyncSource(brctlRunner: runner, pathCandidates: { [] })
+        // Claimed "long ago": without the re-stamp, a claim right after the
+        // refresh would pass the 60 s gate.
+        #expect(await source.claimDumpRefresh(now: Date() - 600))
+        await source.performDumpRefresh()
+        #expect(runner.events.last == "end status")
+        #expect(await !source.claimDumpRefresh(now: Date() + 1))
+        #expect(await source.claimDumpRefresh(now: Date() + 61))
     }
 }

@@ -427,10 +427,10 @@ final class SyncStore {
         activity = s.activity
         daemons = s.daemons
         // Rows the user has already trashed must not come back on a snapshot
-        // that was ALREADY IN FLIGHT when they did it. On this machine a single
-        // `currentSnapshot()` takes ~26s (brctl status times out at 10s every
-        // cycle), so there is essentially always one in flight, and it carries a
-        // retry queue collected before the folder moved. Filtering here — at the
+        // that was ALREADY IN FLIGHT when they did it. A snapshot can take
+        // seconds (system scans are time-boxed at 5s each) and it serves the
+        // cached dump, so it can carry a retry queue collected before the
+        // folder moved. Filtering here — at the
         // one place every snapshot lands — is what makes the row stay gone.
         let incoming = Set(s.retryQueue.map(\.id))
         // Prune first: once a snapshot stops listing an id, bird has re-scanned
@@ -726,8 +726,8 @@ final class SyncStore {
     /// THE BUG THIS SHAPE FIXES (measured live, 2026-08-15): this used to
     /// `await refresh(force: true)` before returning. `refresh` joins whatever
     /// snapshot is in flight and then runs its own, and on a real account each
-    /// snapshot takes ~26 SECONDS (`brctl status` hits its 10s timeout every
-    /// cycle — see the log). So the outcome — the green line, the failure
+    /// snapshot took ~26 SECONDS (`brctl status` then ran on the snapshot path
+    /// and hit its 10s timeout every cycle; it no longer does). So the outcome — the green line, the failure
     /// reason, everything the user gets told — did not appear for the better
     /// part of a minute, and the stale in-flight snapshot re-applied a retry
     /// queue that still contained the row. From the outside: nothing happened,

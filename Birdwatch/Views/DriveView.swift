@@ -41,7 +41,7 @@ struct DriveView: View {
                 }
             }
 
-            SourceFootnote(text: "Read from bird (CloudDocs) via brctl status and NSMetadataQuery per-file progress.")
+            SourceFootnote(text: "Read from bird (CloudDocs) via brctl dump -i (engine state) and brctl status (Desktop & Documents setting); file transfers via FSEvents and per-file ubiquity flags.")
         }
     }
 }

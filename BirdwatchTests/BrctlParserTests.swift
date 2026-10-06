@@ -82,4 +82,23 @@ struct BrctlParserTests {
         #expect(status.lastSync != nil)
         #expect(status.apps == [BrctlAppLine(name: "SomeNewApp", isCurrent: false)])
     }
+
+    // The snapshot no longer runs `brctl status`; client/server state must
+    // come from the dump's container line. Real GA capture (ANSI intact) and
+    // the 26-beta dump excerpt.
+    @Test("containerState(inDump:) reads the CloudDocs container line from a real dump")
+    func containerStateFromDump() throws {
+        let ga = try #require(BrctlParser.containerState(inDump: try fixture("brctl-dump-ga-container-excerpt.txt")))
+        #expect(ga.clientState == "idle")
+        #expect(ga.isIdle)
+        #expect(ga.serverState == "full-sync|fetched-recents|fetched-favorites|ever-full-sync")
+        #expect(ga.lastSync != nil)
+        #expect(ga.tokenInfo?.hasPrefix("token:unkown-token-size:36") == true)
+        #expect(ga.apps.isEmpty, "the dump never carries the per-app current= lines")
+
+        let beta = try #require(BrctlParser.containerState(inDump: try fixture("brctl-dump-excerpt.txt")))
+        #expect(beta.clientState == "idle")
+
+        #expect(BrctlParser.containerState(inDump: "scheduler\n    + items: client:1, server: 1\n") == nil)
+    }
 }
